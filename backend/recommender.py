@@ -13,7 +13,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.cluster import MiniBatchKMeans
 
 HERE = Path(__file__).resolve().parent
-DATA_PATH = HERE / "data" / "data" / "data.csv"
+DATA_PATH = HERE / "data" / "data.csv"
 
 FEATURE_COLS = [
     "valence", "year", "acousticness", "danceability", "duration_ms", "energy",

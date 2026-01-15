@@ -1,8 +1,7 @@
-# backend/recommender.py
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
-from pathlib import Path
 import ast
 import os
 
@@ -10,236 +9,298 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.cluster import MiniBatchKMeans
 
-HERE = Path(__file__).resolve().parent
-DATA_PATH = HERE / "data" / "data.csv"
+from sqlalchemy import text
+from db import engine
 
+# -----------------------------
+# Tunables
+# -----------------------------
 FEATURE_COLS = [
-    "valence", "year", "acousticness", "danceability", "duration_ms", "energy",
-    "explicit", "instrumentalness", "key", "liveness", "loudness", "mode",
-    "popularity", "speechiness", "tempo"
+    "valence",
+    "acousticness",
+    "danceability",
+    "duration_ms",
+    "energy",
+    "explicit",
+    "instrumentalness",
+    "key",
+    "liveness",
+    "loudness",
+    "mode",
+    "popularity",
+    "speechiness",
+    "tempo",
 ]
 
-# -----------------------------
-# Quality knobs (tune as needed)
-# -----------------------------
 YEAR_WINDOW = 8
-K_CLUSTERS = 60
-MMR_LAMBDA = 0.85
-
-# popularity guardrails
-MIN_POPULARITY_ALL = 15
-INDIE_POP_MAX = 55
+INDIE_POP_MAX = 40
 MAINSTREAM_POP_MIN = 70
 
-POPULARITY_BOOST = 0.12
-YEAR_PENALTY = 0.10
+# mixing weights
+ALPHA_SIM = 0.78
+ALPHA_POP = 0.12
+ALPHA_YEAR = 0.10
 
-
-def _parse_first_artist(x: Any) -> str:
-    if pd.isna(x):
-        return ""
-    if isinstance(x, list):
-        return str(x[0]) if x else ""
-    s = str(x)
-    try:
-        v = ast.literal_eval(s)
-        if isinstance(v, list) and v:
-            return str(v[0])
-    except Exception:
-        pass
-    return s
+# diversity / MMR
+MMR_LAMBDA = 0.85
 
 
 def _normalize(s: str) -> str:
-    return str(s or "").strip().lower()
+    s = (s or "").strip().lower()
+    return "".join(ch for ch in s if ch.isalnum() or ch.isspace()).strip()
+
+
+def _parse_first_artist(x: Any) -> str:
+    # dataset stores artists like "['A', 'B']"
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        t = x.strip()
+        if t.startswith("[") and t.endswith("]"):
+            try:
+                v = ast.literal_eval(t)
+                if isinstance(v, list) and v:
+                    return str(v[0])
+            except Exception:
+                pass
+        return t.split(",")[0].strip()
+    if isinstance(x, list) and x:
+        return str(x[0])
+    return str(x)
 
 
 def _safe_year(y: Any) -> Optional[int]:
     try:
-        yi = int(float(y))
-        if 1900 <= yi <= 2035:
-            return yi
+        if y is None:
+            return None
+        y = int(float(str(y)))
+        if 1800 <= y <= 2100:
+            return y
     except Exception:
         pass
     return None
 
 
-# -----------------------------
-# Load dataset once
-# -----------------------------
-_df = pd.read_csv(DATA_PATH)
+def _mmr_select(scores: np.ndarray, X: np.ndarray, k: int, lam: float = MMR_LAMBDA) -> List[int]:
+    # Maximal marginal relevance: select high-score while avoiding near-duplicates.
+    k = int(k)
+    if k <= 0:
+        return []
+    n = int(scores.shape[0])
+    if n == 0:
+        return []
 
-_df["name"] = _df["name"].astype(str).str.strip()
-_df["name_norm"] = _df["name"].map(_normalize)
-_df["artist_primary"] = _df["artists"].map(_parse_first_artist)
-_df["artist_norm"] = _df["artist_primary"].map(_normalize)
+    first = int(np.argmax(scores))
+    selected = [first]
+    if k == 1:
+        return selected
 
-for c in FEATURE_COLS:
-    _df[c] = pd.to_numeric(_df[c], errors="coerce")
+    candidates = np.arange(n, dtype=np.int32)
+    candidates = candidates[candidates != first]
 
-_df["year"] = _df["year"].map(_safe_year)
-_df = _df.dropna(subset=["name_norm", "year", "id"]).copy()
-_df["year"] = _df["year"].astype(int)
-_df["id"] = _df["id"].astype(str)
-
-# scaled matrix
-_scaler = MinMaxScaler()
-_X = _scaler.fit_transform(
-    _df[FEATURE_COLS].fillna(0.0).to_numpy(dtype=np.float32))
-
-_pop = _df["popularity"].fillna(0).to_numpy(dtype=np.float32)
-_pop_norm = (_pop - _pop.min()) / (_pop.max() - _pop.min() + 1e-9)
-_years = _df["year"].to_numpy(dtype=np.int32)
-
-# -----------------------------
-# Cluster coherence (fast + safe)
-# -----------------------------
-_DISABLE_CLUSTERING = os.getenv("DISABLE_CLUSTERING", "0") == "1"
-_clusters = np.zeros(len(_df), dtype=np.int32)
-
-if not _DISABLE_CLUSTERING and len(_df) >= 300:
-    k = int(min(K_CLUSTERS, max(8, int(np.sqrt(len(_df))))))
-    try:
-        km = MiniBatchKMeans(
-            n_clusters=k,
-            random_state=0,
-            batch_size=2048,
-            n_init="auto",
-            max_iter=200,
-        )
-        _clusters = km.fit_predict(_X).astype(np.int32)
-    except Exception:
-        _clusters = np.zeros(len(_df), dtype=np.int32)
-
-
-def _find_track(title: str, year: Optional[int], artist: str = "") -> Optional[int]:
-    t = _normalize(title)
-    if not t:
-        return None
-
-    y = _safe_year(year) if year is not None else None
-    a = _normalize(artist)
-
-    if y is not None and a:
-        hits = _df.index[(_df["name_norm"] == t) & (
-            _df["year"] == y) & (_df["artist_norm"] == a)]
-        if len(hits) > 0:
-            return int(hits[0])
-
-    if y is not None:
-        hits = _df.index[(_df["name_norm"] == t) & (_df["year"] == y)]
-        if len(hits) > 0:
-            return int(hits[0])
-
-    hits = _df.index[_df["name_norm"] == t]
-    if len(hits) > 0:
-        return int(hits[0])
-
-    return None
-
-
-def _mmr_select(scores: np.ndarray, X: np.ndarray, k: int, lam: float) -> List[int]:
-    selected: List[int] = []
-    cand = np.argsort(-scores)[:5000]
-
-    for idx in cand:
-        idx = int(idx)
-        if scores[idx] <= -1e8:
-            continue
-
-        if not selected:
-            selected.append(idx)
-            if len(selected) >= k:
-                break
-            continue
-
-        sims_to_sel = cosine_similarity(
-            X[idx].reshape(1, -1), X[selected]).ravel()
-        mmr = lam * float(scores[idx]) - (1.0 - lam) * \
-            float(np.max(sims_to_sel))
-        if mmr > -1e6:
-            selected.append(idx)
-            if len(selected) >= k:
-                break
+    for _ in range(k - 1):
+        best_idx = None
+        best_val = -1e18
+        for idx in candidates:
+            sims_to_sel = cosine_similarity(X[idx].reshape(1, -1), X[selected]).ravel()
+            mmr = lam * float(scores[idx]) - (1.0 - lam) * float(np.max(sims_to_sel))
+            if mmr > best_val:
+                best_val = mmr
+                best_idx = int(idx)
+        if best_idx is None:
+            break
+        selected.append(best_idx)
+        candidates = candidates[candidates != best_idx]
+        if candidates.size == 0:
+            break
 
     return selected
 
 
-def recommend(
-    seeds: List[Dict[str, Any]],
-    n: int = 10,
-    mode: str = "all",  # "all" | "indie" | "mainstream"
-) -> List[Dict[str, Any]]:
-    mode = (mode or "all").strip().lower()
-    if mode not in {"all", "indie", "mainstream"}:
-        mode = "all"
+@dataclass
+class RecommenderState:
+    df: pd.DataFrame
+    X: np.ndarray
+    years: np.ndarray
+    pop: np.ndarray
+    pop_norm: np.ndarray
+    scaler: MinMaxScaler
 
-    seed_idx: List[int] = []
-    seed_years: List[int] = []
-    seed_clusters: List[int] = []
 
-    for s in seeds:
-        idx = _find_track(s.get("title", ""), s.get(
-            "year", None), s.get("artist", "") or "")
-        if idx is not None:
-            seed_idx.append(idx)
-            seed_years.append(int(_df.iloc[idx]["year"]))
-            seed_clusters.append(int(_clusters[idx]))
+class Recommender:
+    def __init__(self):
+        self._state: Optional[RecommenderState] = None
 
-    if not seed_idx:
-        return []
+    def load(self, limit: Optional[int] = None) -> None:
+        # Pull required columns from Postgres
+        cols = ["id", "name", "artists", "year"] + FEATURE_COLS
+        q = f"SELECT {', '.join(cols)} FROM tracks"
+        if limit is not None:
+            q += f" LIMIT {int(limit)}"
 
-    seed_vec = _X[seed_idx].mean(axis=0, keepdims=True)
-    sims = cosine_similarity(seed_vec, _X).ravel()
+        df = pd.read_sql_query(text(q), engine)
 
-    seed_ids = set(_df.iloc[seed_idx]["id"].astype(str).tolist())
+        if df.empty:
+            raise RuntimeError(
+                "Postgres table 'tracks' is empty. Run: python seed_db.py (or seed via your own pipeline)."
+            )
 
-    year_mean = int(round(float(np.mean(seed_years))))
-    year_mask = np.abs(_years - year_mean) <= YEAR_WINDOW
+        # type normalization
+        df["id"] = df["id"].astype(str)
+        df["name"] = df["name"].astype(str).str.strip()
+        df["artists"] = df["artists"].astype(str)
 
-    if mode == "mainstream":
-        pop_mask = _pop >= max(MAINSTREAM_POP_MIN, MIN_POPULARITY_ALL)
-    elif mode == "indie":
-        pop_mask = (_pop >= 5) & (_pop <= INDIE_POP_MAX)
-    else:
-        pop_mask = _pop >= MIN_POPULARITY_ALL
+        df["name_norm"] = df["name"].map(_normalize)
+        df["artist_primary"] = df["artists"].map(_parse_first_artist)
+        df["artist_norm"] = df["artist_primary"].map(_normalize)
 
-    # coherence via clusters (proxy for genre)
-    seed_cluster_set = set(seed_clusters)
-    cluster_mask = np.array(
-        [c in seed_cluster_set for c in _clusters], dtype=bool)
+        df["year"] = df["year"].map(_safe_year)
+        for c in FEATURE_COLS:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    candidate_mask = year_mask & pop_mask & cluster_mask
+        df = df.dropna(subset=["id", "name_norm", "year"]).copy()
+        df["year"] = df["year"].astype(int)
 
-    # relax if too strict
-    if int(candidate_mask.sum()) < 150:
-        candidate_mask = year_mask & pop_mask
-    if int(candidate_mask.sum()) < 60:
-        candidate_mask = pop_mask
+        # Scale feature matrix
+        scaler = MinMaxScaler()
+        X = scaler.fit_transform(df[FEATURE_COLS].to_numpy(dtype=np.float32))
 
-    year_dist_norm = np.abs(_years - year_mean) / max(YEAR_WINDOW, 1)
-    score = sims + POPULARITY_BOOST * _pop_norm - YEAR_PENALTY * year_dist_norm
+        pop = df["popularity"].fillna(0).to_numpy(dtype=np.float32)
+        pop_norm = (pop - pop.min()) / (pop.max() - pop.min() + 1e-9)
+        years = df["year"].to_numpy(dtype=np.int32)
 
-    for i in seed_idx:
-        score[int(i)] = -1e9
-    score = np.where(candidate_mask, score, -1e9)
+        self._state = RecommenderState(
+            df=df.reset_index(drop=True),
+            X=X,
+            years=years,
+            pop=pop,
+            pop_norm=pop_norm,
+            scaler=scaler,
+        )
 
-    picked = _mmr_select(score, _X, k=n, lam=MMR_LAMBDA)
+    def ensure_loaded(self) -> None:
+        if self._state is None:
+            self.load()
 
-    out: List[Dict[str, Any]] = []
-    for i in picked:
-        row = _df.iloc[int(i)]
-        if str(row["id"]) in seed_ids:
-            continue
-        out.append({
-            "title": row["name"],
-            "artist": row["artist_primary"],
-            "year": int(row["year"]),
-            "id": str(row["id"]),
-            "similarity": float(sims[int(i)]),
-            "popularity": float(row.get("popularity", 0.0)),
-        })
+    def _find_seed_idx(self, seed: Dict[str, Any]) -> Optional[int]:
+        st = self._state
+        assert st is not None
+        df = st.df
 
-    return out
+        sid = (seed.get("id") or "").strip()
+        if sid:
+            hits = df.index[df["id"] == sid]
+            if len(hits) > 0:
+                return int(hits[0])
+
+        t = _normalize(seed.get("title", ""))
+        a = _normalize(seed.get("artist", ""))
+        y = _safe_year(seed.get("year"))
+
+        if not t:
+            return None
+
+        if y is not None and a:
+            hits = df.index[(df["name_norm"] == t) & (df["year"] == y) & (df["artist_norm"] == a)]
+            if len(hits) > 0:
+                return int(hits[0])
+
+        if y is not None:
+            hits = df.index[(df["name_norm"] == t) & (df["year"] == y)]
+            if len(hits) > 0:
+                return int(hits[0])
+
+        hits = df.index[df["name_norm"] == t]
+        if len(hits) > 0:
+            return int(hits[0])
+
+        return None
+
+    def recommend(self, seeds: List[Dict[str, Any]], n: int = 9, mode: str = "all") -> List[Dict[str, Any]]:
+        self.ensure_loaded()
+        st = self._state
+        assert st is not None
+
+        df, X, years, pop, pop_norm = st.df, st.X, st.years, st.pop, st.pop_norm
+
+        n = int(max(1, min(50, n)))
+        mode = (mode or "all").lower().strip()
+        if mode not in {"all", "indie", "mainstream"}:
+            mode = "all"
+
+        seed_idxs: List[int] = []
+        for s in seeds:
+            idx = self._find_seed_idx(s)
+            if idx is not None:
+                seed_idxs.append(idx)
+
+        if not seed_idxs:
+            # fallback: most popular tracks (filtered by mode)
+            mask = np.ones(len(df), dtype=bool)
+            if mode == "indie":
+                mask = pop <= INDIE_POP_MAX
+            elif mode == "mainstream":
+                mask = pop >= MAINSTREAM_POP_MIN
+            order = np.argsort(-pop_norm)
+            out = []
+            for i in order:
+                if not mask[i]:
+                    continue
+                out.append(_row_to_rec(df.iloc[int(i)]))
+                if len(out) >= n:
+                    break
+            return out
+
+        seed_vec = X[seed_idxs].mean(axis=0, keepdims=True)
+
+        sim = cosine_similarity(seed_vec, X).ravel().astype(np.float32)
+
+        # basic year preference: mean seed year
+        seed_year = int(np.mean(years[seed_idxs]))
+        year_dist = np.abs(years - seed_year).astype(np.float32)
+        year_score = 1.0 - np.clip(year_dist / float(YEAR_WINDOW), 0.0, 1.0)
+
+        # combine
+        score = ALPHA_SIM * sim + ALPHA_POP * pop_norm + ALPHA_YEAR * year_score
+
+        # filter: remove the seeds themselves
+        mask = np.ones(len(df), dtype=bool)
+        mask[seed_idxs] = False
+
+        # popularity regime filter
+        if mode == "indie":
+            mask &= (pop <= INDIE_POP_MAX)
+        elif mode == "mainstream":
+            mask &= (pop >= MAINSTREAM_POP_MIN)
+
+        # take a larger pool then diversify using MMR
+        cand_idx = np.where(mask)[0]
+        if cand_idx.size == 0:
+            return []
+
+        # top pool
+        pool_size = int(min(max(200, n * 80), cand_idx.size))
+        top_pool = cand_idx[np.argsort(-score[cand_idx])[:pool_size]]
+
+        sel_local = _mmr_select(score[top_pool], X[top_pool], k=n, lam=MMR_LAMBDA)
+        final_idx = [int(top_pool[i]) for i in sel_local]
+
+        return [_row_to_rec(df.iloc[i]) for i in final_idx]
+
+
+def _row_to_rec(row: pd.Series) -> Dict[str, Any]:
+    return {
+        "id": str(row.get("id", "")),
+        "title": str(row.get("name", "")),
+        "artist": str(row.get("artist_primary", row.get("artists", ""))),
+        "year": int(row.get("year", 0)) if row.get("year") is not None else None,
+        "popularity": float(row.get("popularity", 0)),
+    }
+
+
+# Singleton used by the API layer
+_RECOMMENDER = Recommender()
+
+def get_recommender() -> Recommender:
+    return _RECOMMENDER

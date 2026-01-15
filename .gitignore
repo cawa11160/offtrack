@@ -1,0 +1,18 @@
+# env
+**/.env
+**/.env.*
+!**/.env.example
+
+# node / build
+**/node_modules/
+**/dist/
+**/.vite/
+**/.next/
+
+# python
+**/__pycache__/
+**/*.pyc
+.venv/
+
+# OS
+**/.DS_Store

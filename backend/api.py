@@ -13,11 +13,18 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 
-from db import get_db
-from models import Track
-from recommender import get_recommender
+try:
+    # when running from backend/ (e.g., `cd backend && uvicorn api:app`)
+    from db import get_db
+    from models import Track
+    from recommender import get_recommender
+except ImportError:
+    # when running from repo root (e.g., `uvicorn backend.api:app`)
+    from backend.db import get_db
+    from backend.models import Track
+    from backend.recommender import get_recommender
 
 load_dotenv()
 
@@ -100,12 +107,10 @@ def spotify_search(q: str, limit: int = 8):
     url = f"https://api.spotify.com/v1/search?type=track&limit={int(limit)}&q={quote(q)}"
     try:
         r = requests.get(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
+            url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
     except requests.RequestException:
         return []
+
     if r.status_code != 200:
         return []
 
@@ -144,27 +149,74 @@ def spotify_cover(title: str, artist: str) -> str:
     token = get_spotify_token()
     if not token:
         return ""
+
     q = f'track:"{title}" artist:"{artist}"'
     url = f"https://api.spotify.com/v1/search?type=track&limit=1&q={quote(q)}"
+
     try:
         r = requests.get(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
+            url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
     except requests.RequestException:
         return ""
+
     if r.status_code != 200:
         return ""
+
     items = (r.json().get("tracks") or {}).get("items") or []
     if not items:
         return ""
+
     images = ((items[0].get("album") or {}).get("images") or [])
     if len(images) >= 2:
         return images[1].get("url", "") or images[0].get("url", "")
     if len(images) == 1:
         return images[0].get("url", "")
     return ""
+
+
+def itunes_cover(title: str, artist: str) -> str:
+    # No auth required; reliable fallback
+    term = quote(f"{title} {artist}".strip())
+    url = f"https://itunes.apple.com/search?term={term}&entity=song&limit=1"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return ""
+        results = (r.json() or {}).get("results") or []
+        if not results:
+            return ""
+        art = results[0].get("artworkUrl100") or results[0].get(
+            "artworkUrl60") or ""
+        if not art:
+            return ""
+        # upgrade to larger size when possible
+        art = art.replace("100x100bb.jpg", "600x600bb.jpg").replace(
+            "60x60bb.jpg", "600x600bb.jpg")
+        return art
+    except Exception:
+        return ""
+
+
+def cover_for(title: str, artist: str) -> str:
+    # Prefer Spotify (if configured), else iTunes
+    url = spotify_cover(title, artist).strip()
+    if not url:
+        url = itunes_cover(title, artist).strip()
+    return url
+
+
+def _try_reload_recommender() -> str:
+    """
+    If startup failed (e.g., DB empty), try loading again now.
+    Returns "" if ready, else error string.
+    """
+    try:
+        get_recommender().load()
+        app.state.recommender_error = ""
+        return ""
+    except Exception as e:
+        app.state.recommender_error = str(e)
+        return app.state.recommender_error
 
 # -----------------------------
 # API Models
@@ -198,10 +250,24 @@ def _startup():
         app.state.recommender_error = str(e)
 
 
+@app.post("/api/reload")
+def reload_now():
+    err = _try_reload_recommender()
+    return {"ok": True, "recommender_ready": not bool(err), "recommender_error": err}
+
+
 @app.get("/api/ping")
 def ping():
     err = getattr(app.state, "recommender_error", "")
-    return {"ok": True, "recommender_ready": not bool(err), "recommender_error": err}
+    if err:
+        # If DB was empty at startup, it may be seeded now -> retry load
+        err = _try_reload_recommender()
+
+    return {
+        "ok": True,
+        "recommender_ready": not bool(err),
+        "recommender_error": err,
+    }
 
 # -----------------------------
 # Search: Spotify if configured, else Postgres
@@ -223,7 +289,8 @@ def db_search(db: Session, q: str, limit: int = 8):
             "artist": r.artists,
             "year": int(r.year),
             "id": r.id,          # DB id
-            "imageUrl": "",      # we can fill via spotify on the client if desired
+            # we can fill via spotify on the client if desired
+            "imageUrl": (getattr(r, "image_url", "") or ""),
             "source": "db",
         }
         for r in rows
@@ -252,6 +319,9 @@ def search_endpoint(q: str, limit: int = 8, db: Session = Depends(get_db)):
 def recommend_endpoint(req: RecommendRequest):
     err = getattr(app.state, "recommender_error", "")
     if err:
+        # Try reloading in case DB was seeded after startup
+        err = _try_reload_recommender()
+    if err:
         raise HTTPException(
             status_code=500, detail=f"Recommender not ready: {err}")
 
@@ -274,7 +344,28 @@ def recommend_endpoint(req: RecommendRequest):
     for r in recs:
         title = r.get("title", "")
         artist = r.get("artist", "")
-        image_url = r.get("imageUrl", "") or spotify_cover(title, artist)
+        image_url = (r.get("imageUrl", "") or "").strip()
+        if not image_url:
+            image_url = cover_for(title, artist).strip()
+
+        # Cache to DB if we got a URL and track id looks like a DB id
+        tid = (r.get("id") or "").strip()
+        if image_url and tid:
+            try:
+                # Use a short-lived DB session and update only if empty
+                db = next(get_db())
+                db.execute(
+                    text(
+                        "UPDATE tracks "
+                        "SET image_url = :u "
+                        "WHERE id = :i AND (image_url IS NULL OR image_url = '')"
+                    ),
+                    {"u": image_url, "i": tid},
+                )
+                db.commit()
+            except Exception:
+                pass
+
         out.append({**r, "imageUrl": image_url})
 
     return {"recommendations": out}

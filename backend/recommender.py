@@ -11,7 +11,11 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics.pairwise import cosine_similarity
 
 from sqlalchemy import text
-from db import engine
+
+try:
+    from db import engine
+except ImportError:
+    from backend.db import engine
 
 # -----------------------------
 # Tunables
@@ -103,8 +107,10 @@ def _mmr_select(scores: np.ndarray, X: np.ndarray, k: int, lam: float = MMR_LAMB
         best_idx = None
         best_val = -1e18
         for idx in candidates:
-            sims_to_sel = cosine_similarity(X[idx].reshape(1, -1), X[selected]).ravel()
-            mmr = lam * float(scores[idx]) - (1.0 - lam) * float(np.max(sims_to_sel))
+            sims_to_sel = cosine_similarity(
+                X[idx].reshape(1, -1), X[selected]).ravel()
+            mmr = lam * float(scores[idx]) - \
+                (1.0 - lam) * float(np.max(sims_to_sel))
             if mmr > best_val:
                 best_val = mmr
                 best_idx = int(idx)
@@ -134,7 +140,7 @@ class Recommender:
 
     def load(self, limit: Optional[int] = None) -> None:
         # Pull required columns from Postgres
-        cols = ["id", "name", "artists", "year"] + FEATURE_COLS
+        cols = ["id", "name", "artists", "image_url", "year"] + FEATURE_COLS
         q = f"SELECT {', '.join(cols)} FROM tracks"
         if limit is not None:
             q += f" LIMIT {int(limit)}"
@@ -202,7 +208,8 @@ class Recommender:
             return None
 
         if y is not None and a:
-            hits = df.index[(df["name_norm"] == t) & (df["year"] == y) & (df["artist_norm"] == a)]
+            hits = df.index[(df["name_norm"] == t) & (
+                df["year"] == y) & (df["artist_norm"] == a)]
             if len(hits) > 0:
                 return int(hits[0])
 
@@ -283,7 +290,8 @@ class Recommender:
         pool_size = int(min(max(200, n * 80), cand_idx.size))
         top_pool = cand_idx[np.argsort(-score[cand_idx])[:pool_size]]
 
-        sel_local = _mmr_select(score[top_pool], X[top_pool], k=n, lam=MMR_LAMBDA)
+        sel_local = _mmr_select(
+            score[top_pool], X[top_pool], k=n, lam=MMR_LAMBDA)
         final_idx = [int(top_pool[i]) for i in sel_local]
 
         return [_row_to_rec(df.iloc[i]) for i in final_idx]
@@ -296,11 +304,13 @@ def _row_to_rec(row: pd.Series) -> Dict[str, Any]:
         "artist": str(row.get("artist_primary", row.get("artists", ""))),
         "year": int(row.get("year", 0)) if row.get("year") is not None else None,
         "popularity": float(row.get("popularity", 0)),
+        "imageUrl": str(row.get("image_url", "") or ""),
     }
 
 
 # Singleton used by the API layer
 _RECOMMENDER = Recommender()
+
 
 def get_recommender() -> Recommender:
     return _RECOMMENDER

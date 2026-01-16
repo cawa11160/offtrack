@@ -290,7 +290,11 @@ export default function Recommendations() {
                 <div className="aspect-[16/10] w-full bg-muted">
                   {r.imageUrl ? (
                     <img src={r.imageUrl} alt={r.title} className="h-full w-full object-cover" />
-                  ) : null}
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center text-3xl font-semibold text-white bg-muted">
+                    ♪
+                    </div>
+                  )}
                 </div>
                 <div className="p-4">
                   <div className="text-sm font-semibold">{r.title}</div>

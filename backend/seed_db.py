@@ -2,45 +2,43 @@ import os
 from pathlib import Path
 import pandas as pd
 
-from db import engine
-from models import Base
+try:
+    from db import engine, DATABASE_URL
+    from models import Base
+except ImportError:
+    from backend.db import engine, DATABASE_URL
+    from backend.models import Base
+
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_CSV = HERE / "data" / "data.csv"
+DATA_CSV = HERE / "data" / "data.csv"
+
 
 def main():
-    src = Path(os.getenv("SEED_CSV", str(DEFAULT_CSV))).resolve()
-    if not src.exists():
-        raise FileNotFoundError(f"Seed CSV not found: {src}")
+    print("DATABASE_URL =", DATABASE_URL)
+    print("CSV PATH =", DATA_CSV)
 
-    print(f"[seed_db] Loading: {src}")
-    df = pd.read_csv(src)
+    if not DATA_CSV.exists():
+        raise FileNotFoundError(f"CSV not found: {DATA_CSV}")
 
-    # Normalize types to match DB schema
-    df["id"] = df["id"].astype(str)
-    df["name"] = df["name"].astype(str)
-    df["artists"] = df["artists"].astype(str)
+    df = pd.read_csv(DATA_CSV)
+    print("Loaded rows:", len(df))
+    if len(df) == 0:
+        raise RuntimeError("CSV loaded 0 rows — cannot seed.")
 
-    df["year"] = pd.to_numeric(df["year"], errors="coerce").fillna(0).astype(int)
-
-    if "explicit" in df.columns:
-        df["explicit"] = df["explicit"].astype(int).astype(bool)
-
-    # Recreate tables (idempotent)
-    print("[seed_db] Recreating schema...")
+    # Create schema
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
 
-    print(f"[seed_db] Inserting {len(df):,} rows into Postgres...")
-    df.to_sql(
-        "tracks",
-        engine,
-        if_exists="append",
-        index=False,
-        chunksize=10_000,
-        method="multi",
-    )
-    print("[seed_db] Done.")
+    # Ensure image_url exists even if CSV doesn't have it
+    if "image_url" not in df.columns:
+        df["image_url"] = ""
+
+    # Seed
+    df.to_sql("tracks", engine, if_exists="append",
+              index=False, chunksize=5000, method="multi")
+    print("Seed complete.")
+
 
 if __name__ == "__main__":
     main()

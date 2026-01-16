@@ -205,7 +205,7 @@ export function Sidebar({
           {!isCompact && (
             <div className="leading-tight">
               <div className="text-[18px] font-semibold tracking-tight text-black">
-                Tunes
+                Offtrack
               </div>
               {/* removed "minimal streaming" */}
             </div>

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { X, Bell, CheckCheck, Filter, MapPin, ShoppingBag, Music2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -9,11 +10,12 @@ export type AppNotification = {
   type: NotificationType;
   title: string;
   body: string;
-  timeLabel: string; // "Today", "Yesterday", "2d ago"
-  dateGroup: string; // "Today", "Yesterday", "Earlier"
+  timeLabel: string;
+  dateGroup: string;
   read?: boolean;
-  ctaLabel?: string;
-  onCta?: () => void;
+
+  // optional deep link in future
+  link?: string;
 };
 
 type Props = {
@@ -31,7 +33,6 @@ const demoNotifications: AppNotification[] = [
     timeLabel: "2h ago",
     dateGroup: "Today",
     read: false,
-    ctaLabel: "Play",
   },
   {
     id: "n2",
@@ -41,7 +42,6 @@ const demoNotifications: AppNotification[] = [
     timeLabel: "6h ago",
     dateGroup: "Today",
     read: false,
-    ctaLabel: "View map",
   },
   {
     id: "n3",
@@ -51,7 +51,6 @@ const demoNotifications: AppNotification[] = [
     timeLabel: "Yesterday",
     dateGroup: "Yesterday",
     read: true,
-    ctaLabel: "Shop",
   },
   {
     id: "n4",
@@ -61,7 +60,6 @@ const demoNotifications: AppNotification[] = [
     timeLabel: "3d ago",
     dateGroup: "Earlier",
     read: true,
-    ctaLabel: "Open recap",
   },
 ];
 
@@ -79,19 +77,21 @@ function typeIcon(type: NotificationType) {
 }
 
 function typePill(type: NotificationType) {
-  const label =
-    type === "music" ? "Music" : type === "event" ? "Events" : type === "merch" ? "Merch" : "Updates";
-  return label;
+  if (type === "music") return "Music";
+  if (type === "event") return "Events";
+  if (type === "merch") return "Merch";
+  return "Updates";
 }
 
 export function NotificationsPanel({ open, onClose, items }: Props) {
+  const navigate = useNavigate();
+
   const [filter, setFilter] = useState<"all" | NotificationType>("all");
   const [local, setLocal] = useState<AppNotification[]>(() => items ?? demoNotifications);
 
   const filtered = useMemo(() => {
-    const data = local;
-    if (filter === "all") return data;
-    return data.filter((n) => n.type === filter);
+    if (filter === "all") return local;
+    return local.filter((n) => n.type === filter);
   }, [local, filter]);
 
   const groups = useMemo(() => {
@@ -113,11 +113,45 @@ export function NotificationsPanel({ open, onClose, items }: Props) {
     setLocal((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
   };
 
+  // 🔥 NEW: navigation logic
+  const handleClick = (n: AppNotification) => {
+    markOneRead(n.id);
+
+    // if backend provided explicit link, prefer that
+    if (n.link) {
+      navigate(n.link);
+      onClose();
+      return;
+    }
+
+    switch (n.type) {
+      case "music":
+        navigate("/release/demo");   // replace with real release id later
+        break;
+
+      case "event":
+        navigate("/concerts");
+        break;
+
+      case "merch":
+        navigate("/merch");
+        break;
+
+      case "system":
+        navigate("/profile");
+        break;
+
+      default:
+        break;
+    }
+
+    onClose();
+  };
+
   if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-[80]">
-      {/* backdrop */}
       <button
         type="button"
         onClick={onClose}
@@ -125,7 +159,6 @@ export function NotificationsPanel({ open, onClose, items }: Props) {
         aria-label="Close notifications"
       />
 
-      {/* panel */}
       <div
         className={cn(
           "absolute right-0 top-0 h-full w-full sm:w-[460px]",
@@ -137,7 +170,7 @@ export function NotificationsPanel({ open, onClose, items }: Props) {
       >
         {/* Header */}
         <div className="p-4 border-b border-border flex items-center justify-between gap-3">
-          <div className="min-w-0">
+          <div>
             <div className="flex items-center gap-2">
               <h2 className="text-lg font-semibold">Notifications</h2>
               {unreadCount > 0 && (
@@ -146,16 +179,12 @@ export function NotificationsPanel({ open, onClose, items }: Props) {
                 </span>
               )}
             </div>
-            <p className="text-sm text-muted-foreground">
-              New releases, nearby shows, merch drops — all in one place.
-            </p>
           </div>
 
           <button
             type="button"
             onClick={onClose}
             className="h-9 w-9 rounded-full hover:bg-accent grid place-items-center"
-            aria-label="Close"
           >
             <X className="w-5 h-5" />
           </button>
@@ -163,70 +192,14 @@ export function NotificationsPanel({ open, onClose, items }: Props) {
 
         {/* Controls */}
         <div className="p-4 border-b border-border flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-            <span className="inline-flex items-center gap-2 text-xs text-muted-foreground mr-1">
-              <Filter className="w-4 h-4" />
-              Filter
-            </span>
-
-            <button
-              type="button"
-              onClick={() => setFilter("all")}
-              className={cn(
-                "px-3 py-1.5 rounded-full border text-sm transition-colors",
-                filter === "all"
-                  ? "bg-foreground text-background border-foreground"
-                  : "bg-background border-border hover:bg-accent"
-              )}
-            >
-              All
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setFilter("music")}
-              className={cn(
-                "px-3 py-1.5 rounded-full border text-sm transition-colors",
-                filter === "music"
-                  ? "bg-foreground text-background border-foreground"
-                  : "bg-background border-border hover:bg-accent"
-              )}
-            >
-              Music
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setFilter("event")}
-              className={cn(
-                "px-3 py-1.5 rounded-full border text-sm transition-colors",
-                filter === "event"
-                  ? "bg-foreground text-background border-foreground"
-                  : "bg-background border-border hover:bg-accent"
-              )}
-            >
-              Events
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setFilter("merch")}
-              className={cn(
-                "px-3 py-1.5 rounded-full border text-sm transition-colors",
-                filter === "merch"
-                  ? "bg-foreground text-background border-foreground"
-                  : "bg-background border-border hover:bg-accent"
-              )}
-            >
-              Merch
-            </button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setFilter("all")} className="text-sm">All</button>
+            <button onClick={() => setFilter("music")} className="text-sm">Music</button>
+            <button onClick={() => setFilter("event")} className="text-sm">Events</button>
+            <button onClick={() => setFilter("merch")} className="text-sm">Merch</button>
           </div>
 
-          <button
-            type="button"
-            onClick={markAllRead}
-            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-accent text-sm font-medium"
-          >
+          <button onClick={markAllRead} className="text-sm flex items-center gap-1">
             <CheckCheck className="w-4 h-4" />
             Mark all read
           </button>
@@ -234,87 +207,38 @@ export function NotificationsPanel({ open, onClose, items }: Props) {
 
         {/* List */}
         <div className="flex-1 overflow-y-auto">
-          {filtered.length === 0 ? (
-            <div className="p-8 text-center">
-              <div className="mx-auto h-12 w-12 rounded-full bg-accent grid place-items-center mb-4">
-                <Bell className="w-6 h-6" />
-              </div>
-              <h3 className="text-lg font-semibold">You’re all caught up</h3>
-              <p className="text-muted-foreground mt-2">
-                When there’s something new — releases, shows, or drops — it’ll show up here.
-              </p>
-            </div>
-          ) : (
-            <div className="p-3">
-              {groups.map(([groupName, groupItems]) => (
-                <div key={groupName} className="mb-4">
-                  <div className="px-2 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                    {groupName}
+          {groups.map(([groupName, groupItems]) => (
+            <div key={groupName} className="p-3">
+              <div className="text-xs font-semibold mb-2">{groupName}</div>
+
+              {groupItems.map((n) => (
+                <button
+                  key={n.id}
+                  type="button"
+                  onClick={() => handleClick(n)}
+                  className={cn(
+                    "w-full text-left rounded-2xl border p-4 transition-colors mb-2",
+                    n.read ? "bg-background" : "bg-primary/5",
+                    "hover:bg-accent"
+                  )}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="h-10 w-10 rounded-xl grid place-items-center bg-accent">
+                      {typeIcon(n.type)}
+                    </div>
+
+                    <div className="flex-1">
+                      <div className="font-semibold">{n.title}</div>
+                      <p className="text-sm text-muted-foreground">{n.body}</p>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        {n.timeLabel}
+                      </div>
+                    </div>
                   </div>
-
-                  <div className="space-y-2">
-                    {groupItems.map((n) => (
-                      <button
-                        key={n.id}
-                        type="button"
-                        onClick={() => markOneRead(n.id)}
-                        className={cn(
-                          "w-full text-left rounded-2xl border p-4 transition-colors",
-                          n.read ? "bg-background border-border" : "bg-primary/5 border-primary/20",
-                          "hover:bg-accent"
-                        )}
-                      >
-                        <div className="flex items-start gap-3">
-                          <div
-                            className={cn(
-                              "h-10 w-10 rounded-xl grid place-items-center shrink-0",
-                              n.read ? "bg-accent" : "bg-primary/10"
-                            )}
-                          >
-                            {typeIcon(n.type)}
-                          </div>
-
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs px-2 py-0.5 rounded-full bg-muted border border-border">
-                                    {typePill(n.type)}
-                                  </span>
-                                  {!n.read && (
-                                    <span className="h-2 w-2 rounded-full bg-primary" aria-label="Unread" />
-                                  )}
-                                </div>
-
-                                <div className="mt-1 font-semibold truncate">{n.title}</div>
-                              </div>
-
-                              <span className="text-xs text-muted-foreground shrink-0">{n.timeLabel}</span>
-                            </div>
-
-                            <p className="mt-1 text-sm text-muted-foreground line-clamp-2">{n.body}</p>
-
-                            {n.ctaLabel && (
-                              <div className="mt-3">
-                                <span className="inline-flex items-center justify-center px-3 py-1.5 rounded-lg bg-foreground text-background text-sm font-medium">
-                                  {n.ctaLabel}
-                                </span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                </button>
               ))}
             </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="p-4 border-t border-border text-xs text-muted-foreground">
-          Tip: You can personalize this later (artists followed, saved venues, merch preferences).
+          ))}
         </div>
       </div>
     </div>

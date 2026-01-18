@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { Link } from "react-router-dom";
 import { AlbumCard } from "@/components/AlbumCard";
 import { SectionHeader } from "@/components/SectionHeader";
 import { albums, featuredPlaylists } from "@/data/mockData";
@@ -31,7 +32,7 @@ function useDragScroll<T extends HTMLElement>() {
     if (!el || !state.current.isDown) return;
     e.preventDefault();
     const x = e.pageX - el.offsetLeft;
-    const walk = (x - state.current.startX) * 1.2; // drag speed
+    const walk = (x - state.current.startX) * 1.2;
     el.scrollLeft = state.current.scrollLeft - walk;
   };
 
@@ -70,7 +71,7 @@ function useDragScroll<T extends HTMLElement>() {
 function scrollRow(ref: React.RefObject<HTMLDivElement>, direction: "left" | "right") {
   const el = ref.current;
   if (!el) return;
-  const amount = Math.max(260, Math.floor(el.clientWidth * 0.8)); // nice “page” scroll
+  const amount = Math.max(260, Math.floor(el.clientWidth * 0.8));
   el.scrollBy({
     left: direction === "left" ? -amount : amount,
     behavior: "smooth",
@@ -83,16 +84,14 @@ const Index = () => {
   const popularAlbumsDrag = useDragScroll<HTMLDivElement>();
 
   const scrollerClassName = [
-    "-mt-2", // tighten subtitle -> cards
+    "-mt-2",
     "overflow-x-auto",
     "scroll-smooth",
     "cursor-grab active:cursor-grabbing",
     "pb-2",
-    // hide scrollbar
     "[scrollbar-width:none]",
     "[-ms-overflow-style:none]",
     "[&::-webkit-scrollbar]:hidden",
-    // better touch behavior
     "overscroll-x-contain",
     "touch-pan-x",
   ].join(" ");
@@ -103,8 +102,6 @@ const Index = () => {
         type="button"
         onClick={() => scrollRow(targetRef, "left")}
         className="h-9 w-9 rounded-full border border-border bg-background/70 hover:bg-accent transition-colors grid place-items-center"
-        aria-label="Scroll left"
-        title="Scroll left"
       >
         <ChevronLeft className="w-5 h-5" />
       </button>
@@ -113,8 +110,6 @@ const Index = () => {
         type="button"
         onClick={() => scrollRow(targetRef, "right")}
         className="h-9 w-9 rounded-full border border-border bg-background/70 hover:bg-accent transition-colors grid place-items-center"
-        aria-label="Scroll right"
-        title="Scroll right"
       >
         <ChevronRight className="w-5 h-5" />
       </button>
@@ -132,7 +127,6 @@ const Index = () => {
               Not what’s popular, but what’s next.
             </h1>
 
-            {/* Decorative watermark */}
             <div className="pointer-events-none absolute left-0 top-10 md:top-14 text-5xl md:text-7xl font-bold text-gradient opacity-10 select-none">
               Favorite Sound
             </div>
@@ -143,13 +137,16 @@ const Index = () => {
             Explore new artists, scenes, and sounds before they break through.
           </p>
 
-          <button className="inline-flex items-center gap-2 px-6 py-3 mt-6 bg-primary text-primary-foreground rounded-full font-semibold hover:scale-105 transition-transform">
+          {/* UPDATED CTA */}
+          <Link
+            to="/recommendations"
+            className="inline-flex items-center gap-2 px-6 py-3 mt-6 bg-primary text-primary-foreground rounded-full font-semibold hover:scale-105 transition-transform"
+          >
             <Play className="w-5 h-5" />
-            Start Listening
-          </button>
+            Recommend Me Something
+          </Link>
         </div>
 
-        {/* Decorative Elements */}
         <div className="absolute right-0 top-0 w-1/2 h-full opacity-20">
           <div className="absolute right-10 top-10 w-32 h-32 rounded-full bg-primary/20 blur-3xl" />
           <div className="absolute right-32 bottom-10 w-48 h-48 rounded-full bg-accent/30 blur-3xl" />
@@ -166,10 +163,7 @@ const Index = () => {
         <div ref={madeForYouDrag.ref} {...madeForYouDrag} className={scrollerClassName}>
           <div className="flex gap-4 snap-x snap-mandatory pr-2">
             {featuredPlaylists.map((playlist) => (
-              <div
-                key={playlist.id}
-                className="snap-start shrink-0 w-[170px] sm:w-[190px] md:w-[210px]"
-              >
+              <div key={playlist.id} className="snap-start shrink-0 w-[170px] sm:w-[190px] md:w-[210px]">
                 <AlbumCard album={playlist} />
               </div>
             ))}
@@ -187,10 +181,7 @@ const Index = () => {
         <div ref={newReleasesDrag.ref} {...newReleasesDrag} className={scrollerClassName}>
           <div className="flex gap-4 snap-x snap-mandatory pr-2">
             {albums.slice(0, 6).map((album) => (
-              <div
-                key={album.id}
-                className="snap-start shrink-0 w-[170px] sm:w-[190px] md:w-[210px]"
-              >
+              <div key={album.id} className="snap-start shrink-0 w-[170px] sm:w-[190px] md:w-[210px]">
                 <AlbumCard album={album} />
               </div>
             ))}
@@ -208,10 +199,7 @@ const Index = () => {
         <div ref={popularAlbumsDrag.ref} {...popularAlbumsDrag} className={scrollerClassName}>
           <div className="flex gap-4 snap-x snap-mandatory pr-2">
             {albums.slice(2, 8).map((album) => (
-              <div
-                key={album.id}
-                className="snap-start shrink-0 w-[170px] sm:w-[190px] md:w-[210px]"
-              >
+              <div key={album.id} className="snap-start shrink-0 w-[170px] sm:w-[190px] md:w-[210px]">
                 <AlbumCard album={album} />
               </div>
             ))}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Bell, Search, User, Settings, ExternalLink } from "lucide-react";
+import { Bell, Search, User, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useNavigate } from "react-router-dom";
 
@@ -14,53 +14,41 @@ export const Header = ({
   onNotificationsClick,
   notificationsOpen,
 }: HeaderProps) => {
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const navigate = useNavigate();
 
-  // Close on outside click + ESC
   useEffect(() => {
-    if (!settingsOpen) return;
+    if (!profileMenuOpen) return;
 
     const onMouseDown = (e: MouseEvent) => {
       if (!menuRef.current) return;
-      if (!menuRef.current.contains(e.target as Node)) setSettingsOpen(false);
+      if (!menuRef.current.contains(e.target as Node)) {
+        setProfileMenuOpen(false);
+      }
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSettingsOpen(false);
+      if (e.key === "Escape") setProfileMenuOpen(false);
     };
 
     window.addEventListener("mousedown", onMouseDown);
     window.addEventListener("keydown", onKeyDown);
+
     return () => {
       window.removeEventListener("mousedown", onMouseDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [settingsOpen]);
+  }, [profileMenuOpen]);
 
   const go = (path: string) => {
-    setSettingsOpen(false);
+    setProfileMenuOpen(false);
     navigate(path);
   };
 
   return (
     <header className="sticky top-0 z-30 bg-background/80 backdrop-blur border-b border-border">
       <div className="h-16 px-4 lg:px-8 flex items-center gap-3">
-        {/* Left controls (optional) */}
-        <div className="flex items-center gap-2">
-          {onMenuClick && (
-            <button
-              type="button"
-              onClick={onMenuClick}
-              className="lg:hidden h-9 w-9 rounded-md hover:bg-accent grid place-items-center"
-              aria-label="Open menu"
-            >
-              <span className="sr-only">Menu</span>
-              {/* Intentionally empty (no icon). Add lucide Menu icon if you want. */}
-            </button>
-          )}
-        </div>
 
         {/* Search */}
         <div className="flex-1">
@@ -78,7 +66,8 @@ export const Header = ({
         </div>
 
         {/* Right controls */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+
           {/* Notifications */}
           <button
             type="button"
@@ -87,109 +76,70 @@ export const Header = ({
               "relative h-11 w-11 rounded-full border border-border bg-card",
               "grid place-items-center hover:bg-accent transition-colors"
             )}
-            aria-label="Notifications"
-            aria-expanded={notificationsOpen ? "true" : "false"}
           >
             <Bell className="w-5 h-5" />
-            {!notificationsOpen && (
-              <span className="absolute top-3 right-3 h-2 w-2 rounded-full bg-primary border-2 border-background" />
-            )}
           </button>
 
-          {/* Settings dropdown */}
+          {/* Settings icon (direct navigation only) */}
+          <button
+            type="button"
+            onClick={() => navigate("/settings")}
+            className={cn(
+              "h-11 w-11 rounded-full border border-border bg-card grid place-items-center",
+              "hover:bg-accent transition-colors"
+            )}
+            aria-label="Settings"
+          >
+            <Settings className="w-5 h-5" />
+          </button>
+
+          {/* Profile with dropdown */}
           <div className="relative" ref={menuRef}>
             <button
               type="button"
-              onClick={() => setSettingsOpen((v) => !v)}
+              onClick={() => setProfileMenuOpen((v) => !v)}
               className={cn(
                 "h-11 w-11 rounded-full border border-border bg-card grid place-items-center",
                 "hover:bg-accent transition-colors",
-                settingsOpen && "bg-accent"
+                profileMenuOpen && "bg-accent"
               )}
-              aria-label="Settings menu"
-              aria-expanded={settingsOpen ? "true" : "false"}
               aria-haspopup="menu"
+              aria-expanded={profileMenuOpen}
+              aria-label="Profile menu"
             >
-              <Settings className="w-5 h-5" />
+              <User className="w-5 h-5" />
             </button>
 
-            {settingsOpen && (
-              <div
-                role="menu"
-                className={cn(
-                  "absolute right-0 mt-2 w-72 rounded-2xl border border-border bg-card shadow-2xl",
-                  "overflow-hidden"
-                )}
-              >
-                <div className="px-4 py-3 text-sm text-muted-foreground border-b border-border">
-                  Account
-                </div>
+            {profileMenuOpen && (
+              <div className="absolute right-0 mt-2 w-72 rounded-2xl border border-border bg-card shadow-2xl overflow-hidden">
 
-                {/* Account */}
+                {/* ONLY PROFILE ITEM NOW */}
                 <button
-                  role="menuitem"
-                  type="button"
-                  className="w-full px-4 py-3 text-left text-sm hover:bg-accent flex items-center justify-between"
-                  onClick={() => go("/account")}
-                >
-                  Account
-                  <ExternalLink className="w-4 h-4 text-muted-foreground" />
-                </button>
-
-                {/* Profile */}
-                <button
-                  role="menuitem"
-                  type="button"
                   className="w-full px-4 py-3 text-left text-sm hover:bg-accent"
                   onClick={() => go("/profile")}
+                  role="menuitem"
                 >
                   Profile
                 </button>
 
-                {/* Support (choose one option) */}
-                <button
-                  role="menuitem"
-                  type="button"
-                  className="w-full px-4 py-3 text-left text-sm hover:bg-accent flex items-center justify-between"
-                  onClick={() => {
-                    setSettingsOpen(false);
-
-                    // Option A: internal support page (only if you add a route)
-                    // navigate("/support");
-
-                    // Option B: keep external placeholder
-                    window.open("https://example.com/support", "_blank", "noopener,noreferrer");
-                  }}
-                >
-                  Support
-                  <ExternalLink className="w-4 h-4 text-muted-foreground" />
-                </button>
-
+                {/* Optional logout if you want later */}
+                {/*
                 <div className="h-px bg-border" />
-
-                {/* Settings */}
                 <button
+                  className="w-full px-4 py-3 text-left text-sm hover:bg-accent text-destructive"
+                  onClick={() => {
+                    setProfileMenuOpen(false);
+                    // logout()
+                  }}
                   role="menuitem"
-                  type="button"
-                  className="w-full px-4 py-3 text-left text-sm hover:bg-accent"
-                  onClick={() => go("/settings")}
                 >
-                  Settings
+                  Log out
                 </button>
+                */}
               </div>
             )}
           </div>
 
-          {/* Profile icon (goes to profile page) */}
-          <button
-            type="button"
-            className="h-11 w-11 rounded-full border border-border bg-card grid place-items-center hover:bg-accent transition-colors"
-            aria-label="Profile"
-            title="Profile"
-            onClick={() => navigate("/profile")}
-          >
-            <User className="w-5 h-5" />
-          </button>
         </div>
       </div>
     </header>

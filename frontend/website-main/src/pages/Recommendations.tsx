@@ -39,6 +39,7 @@ function SeedInput({
   return (
     <div className="relative">
       <label className="text-sm font-medium">{label}</label>
+
       <div className="mt-2 flex items-center gap-2 rounded-xl border border-border bg-background px-4 focus-within:ring-2 focus-within:ring-black/10">
         <Search className="h-4 w-4 text-muted-foreground" />
         <input
@@ -154,14 +155,15 @@ export default function Recommendations() {
   async function onSubmit() {
     setError("");
     setSubmitting(true);
+
     try {
-      const seeds: SeedSong[] = [
+      const songs: SeedSong[] = [
         picked1 ?? (seed1.trim() ? { title: seed1.trim() } : null),
         picked2 ?? (seed2.trim() ? { title: seed2.trim() } : null),
         picked3 ?? (seed3.trim() ? { title: seed3.trim() } : null),
       ].filter(Boolean) as SeedSong[];
 
-      const data = await apiRecommend(seeds, 9, mode);
+      const data = await apiRecommend(songs, 9, mode);
       setRecs(data.recommendations as Rec[]);
     } catch (e: any) {
       setError(e?.message || "Something went wrong.");
@@ -176,10 +178,11 @@ export default function Recommendations() {
         <div className="grid h-11 w-11 place-items-center rounded-2xl bg-black text-white">
           <Sparkles className="h-5 w-5" />
         </div>
+
         <div>
           <h1 className="text-2xl font-semibold">Recommendations</h1>
           <p className="text-sm text-muted-foreground">
-            Pick up to 3 seed songs, then we’ll generate 9 recommendations.
+            Pick up to 3 songs, then we’ll generate 9 recommendations.
           </p>
         </div>
       </div>
@@ -187,7 +190,7 @@ export default function Recommendations() {
       <div className="mt-8 grid gap-4 rounded-2xl border border-border bg-card p-5 shadow-sm md:grid-cols-2">
         <div className="grid gap-4">
           <SeedInput
-            label="Seed song 1"
+            label="Song 1"
             placeholder="Search by title or artist…"
             value={seed1}
             onValueChange={(v) => {
@@ -198,13 +201,18 @@ export default function Recommendations() {
             loading={loading1}
             onPick={(r) => {
               setSeed1(formatResult(r));
-              setPicked1({ title: r.title, artist: r.artist, year: r.year ?? null, id: r.id ?? null });
+              setPicked1({
+                title: r.title,
+                artist: r.artist,
+                year: r.year ?? null,
+                id: r.id ?? null,
+              });
               setR1([]);
             }}
           />
 
           <SeedInput
-            label="Seed song 2"
+            label="Song 2"
             placeholder="Search by title or artist…"
             value={seed2}
             onValueChange={(v) => {
@@ -215,13 +223,18 @@ export default function Recommendations() {
             loading={loading2}
             onPick={(r) => {
               setSeed2(formatResult(r));
-              setPicked2({ title: r.title, artist: r.artist, year: r.year ?? null, id: r.id ?? null });
+              setPicked2({
+                title: r.title,
+                artist: r.artist,
+                year: r.year ?? null,
+                id: r.id ?? null,
+              });
               setR2([]);
             }}
           />
 
           <SeedInput
-            label="Seed song 3"
+            label="Song 3"
             placeholder="Search by title or artist…"
             value={seed3}
             onValueChange={(v) => {
@@ -232,7 +245,12 @@ export default function Recommendations() {
             loading={loading3}
             onPick={(r) => {
               setSeed3(formatResult(r));
-              setPicked3({ title: r.title, artist: r.artist, year: r.year ?? null, id: r.id ?? null });
+              setPicked3({
+                title: r.title,
+                artist: r.artist,
+                year: r.year ?? null,
+                id: r.id ?? null,
+              });
               setR3([]);
             }}
           />
@@ -245,6 +263,7 @@ export default function Recommendations() {
                 <Music2 className="h-4 w-4 text-muted-foreground" />
                 <span className="text-sm font-medium">Popularity mode</span>
               </div>
+
               <select
                 value={mode}
                 onChange={(e) => setMode(e.target.value as any)}
@@ -255,6 +274,7 @@ export default function Recommendations() {
                 <option value="mainstream">Mainstream</option>
               </select>
             </div>
+
             <p className="mt-2 text-sm text-muted-foreground">
               Indie filters for lower popularity; Mainstream filters for higher popularity.
             </p>
@@ -279,27 +299,37 @@ export default function Recommendations() {
 
       <div className="mt-10">
         <h2 className="text-lg font-semibold">Results</h2>
+
         {recs.length === 0 ? (
           <p className="mt-2 text-sm text-muted-foreground">
-            No recommendations yet — add seeds and click “Get recommendations”.
+            No recommendations yet — add songs and click “Get recommendations”.
           </p>
         ) : (
           <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {recs.map((r) => (
-              <div key={r.id} className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+              <div
+                key={r.id}
+                className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm"
+              >
                 <div className="aspect-[16/10] w-full bg-muted">
                   {r.imageUrl ? (
-                    <img src={r.imageUrl} alt={r.title} className="h-full w-full object-cover" />
+                    <img
+                      src={r.imageUrl}
+                      alt={r.title}
+                      className="h-full w-full object-cover"
+                    />
                   ) : (
                     <div className="flex h-full w-full items-center justify-center text-3xl font-semibold text-white bg-muted">
-                    ♪
+                      ♪
                     </div>
                   )}
                 </div>
+
                 <div className="p-4">
                   <div className="text-sm font-semibold">{r.title}</div>
                   <div className="text-sm text-muted-foreground">
-                    {r.artist}{r.year ? ` • ${r.year}` : ""}
+                    {r.artist}
+                    {r.year ? ` • ${r.year}` : ""}
                   </div>
                 </div>
               </div>

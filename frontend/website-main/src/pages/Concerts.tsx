@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import mapboxgl, { Map, Marker, Popup } from "mapbox-gl";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { ConcertCard } from "@/components/ConcertCard";
 import { SectionHeader } from "@/components/SectionHeader";
@@ -18,6 +19,9 @@ type ConcertLike = {
   coverUrl?: string;
   lat?: number;
   lng?: number;
+  // optional future fields:
+  genre?: string;
+  price?: string;
 };
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined;
@@ -49,6 +53,9 @@ function getConcertCoords(c: ConcertLike, index: number) {
 }
 
 const Concerts = () => {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
   const [viewMode, setViewMode] = useState<"list" | "map">("list");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
@@ -59,6 +66,48 @@ const Concerts = () => {
   const popupRef = useRef<Popup | null>(null);
 
   const typedConcerts = concerts as unknown as ConcertLike[];
+
+  // --- NEW: filter concerts based on query params ---
+  const filteredConcerts = useMemo(() => {
+    const city = searchParams.get("city") || "any";
+    const date = searchParams.get("date") || "any"; // "weekend" | "month" | "any"
+    const genre = searchParams.get("genre") || "any"; // optional
+    const price = searchParams.get("price") || "any"; // "free" | "under50" | "any"
+
+    return typedConcerts.filter((c) => {
+      // City filter
+      if (city !== "any") {
+        const cCity = (c.city || "").toLowerCase();
+        if (!cCity.includes(city.toLowerCase())) return false;
+      }
+
+      // Date bucket filter (light demo logic)
+      if (date !== "any") {
+        const d = (c.date || "").toLowerCase();
+        if (date === "weekend" && !d.includes("sat") && !d.includes("sun")) return false;
+        if (date === "month" && !d) return false;
+      }
+
+      // Optional: Genre filter (only works if data has `genre`)
+      if (genre !== "any") {
+        const g = (c.genre || "").toLowerCase();
+        if (!g.includes(genre.toLowerCase())) return false;
+      }
+
+      // Optional: Price filter (only works if data has `price`)
+      if (price !== "any") {
+        const p = (c.price || "").toLowerCase();
+        if (price === "free" && !p.includes("free")) return false;
+
+        if (price === "under50") {
+          const num = Number(p.replace(/[^0-9]/g, ""));
+          if (Number.isFinite(num) && num > 50) return false;
+        }
+      }
+
+      return true;
+    });
+  }, [searchParams, typedConcerts]);
 
   const selectedConcert = useMemo(() => {
     if (!selectedId) return null;
@@ -223,7 +272,12 @@ const Concerts = () => {
         </div>
 
         <div className="flex items-center gap-3">
-          <Button variant="secondary" size="sm">
+          {/* NEW: Navigate to filters page */}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => navigate("/concerts/filters")}
+          >
             <Filter className="w-4 h-4 mr-2" />
             Filters
           </Button>
@@ -261,7 +315,8 @@ const Concerts = () => {
         <section>
           <SectionHeader title="Upcoming Events" subtitle="Don't miss these shows" />
           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {typedConcerts.map((concert) => (
+            {/* NEW: render filteredConcerts */}
+            {filteredConcerts.map((concert) => (
               <ConcertCard key={concert.id} concert={concert as any} />
             ))}
           </div>
@@ -276,8 +331,15 @@ const Concerts = () => {
                 </div>
                 <h3 className="text-lg font-semibold">Mapbox token missing</h3>
                 <p className="text-sm text-muted-foreground mt-2">
-                  Add <code className="px-1 py-0.5 rounded bg-secondary">VITE_MAPBOX_TOKEN</code> in{" "}
-                  <code className="px-1 py-0.5 rounded bg-secondary">.env.local</code>, then restart the dev server.
+                  Add{" "}
+                  <code className="px-1 py-0.5 rounded bg-secondary">
+                    VITE_MAPBOX_TOKEN
+                  </code>{" "}
+                  in{" "}
+                  <code className="px-1 py-0.5 rounded bg-secondary">
+                    .env.local
+                  </code>
+                  , then restart the dev server.
                 </p>
               </div>
             </div>
@@ -296,11 +358,27 @@ const Concerts = () => {
                 <div className="absolute inset-0 flex items-center justify-center p-6 text-center bg-background/70 backdrop-blur">
                   <div className="max-w-md rounded-2xl border border-border bg-card p-5 shadow-xl">
                     <h3 className="text-lg font-semibold">Map couldn’t load</h3>
-                    <p className="text-sm text-muted-foreground mt-2">{mapError}</p>
+                    <p className="text-sm text-muted-foreground mt-2">
+                      {mapError}
+                    </p>
                     <p className="text-xs text-muted-foreground mt-3">
-                      Common fixes: restart <code className="px-1 py-0.5 rounded bg-secondary">npm run dev</code> after adding env vars,
-                      confirm your token allows <code className="px-1 py-0.5 rounded bg-secondary">localhost</code>, and ensure
-                      <code className="px-1 py-0.5 rounded bg-secondary">mapbox-gl/dist/mapbox-gl.css</code> is imported in <code className="px-1 py-0.5 rounded bg-secondary">main.tsx</code>.
+                      Common fixes: restart{" "}
+                      <code className="px-1 py-0.5 rounded bg-secondary">
+                        npm run dev
+                      </code>{" "}
+                      after adding env vars, confirm your token allows{" "}
+                      <code className="px-1 py-0.5 rounded bg-secondary">
+                        localhost
+                      </code>
+                      , and ensure
+                      <code className="px-1 py-0.5 rounded bg-secondary">
+                        mapbox-gl/dist/mapbox-gl.css
+                      </code>{" "}
+                      is imported in{" "}
+                      <code className="px-1 py-0.5 rounded bg-secondary">
+                        main.tsx
+                      </code>
+                      .
                     </p>
                   </div>
                 </div>

@@ -4,9 +4,7 @@ import { Header } from "./Header";
 import { PlayerBar } from "./PlayerBar";
 import { MobileNav } from "./MobileNav";
 import { NotificationsDrawer } from "./NotificationsDrawer";
-import { Sparkles } from "lucide-react";
-
-import { Home, Library, Map, ShoppingBag } from "lucide-react";
+import { Sparkles, Home, Library, Map, ShoppingBag, Search } from "lucide-react";
 
 interface LayoutProps {
   children: ReactNode;
@@ -27,6 +25,11 @@ export const Layout = ({ children }: LayoutProps) => {
   const navItems = useMemo(
     () => [
       { label: "Home", to: "/", icon: <Home className="h-5 w-5 text-black" /> },
+      {
+        label: "Search",
+        to: "/search",
+        icon: <Search className="h-5 w-5 text-black" />,
+      },
       { label: "Concerts", to: "/concerts", icon: <Map className="h-5 w-5 text-black" /> },
       { label: "Library", to: "/liked", icon: <Library className="h-5 w-5 text-black" /> },
       { label: "Merch", to: "/merch", icon: <ShoppingBag className="h-5 w-5 text-black" /> },
@@ -40,13 +43,11 @@ export const Layout = ({ children }: LayoutProps) => {
       {/* Desktop / tablet layout (keep sidebar from md and up) */}
       <div className="hidden md:flex min-h-screen">
         {/* Sidebar */}
-        <div
-          className="shrink-0"
-          style={{ width: sidebarCollapsed ? 88 : sidebarWidth }}
-        >
+        <div className="shrink-0" style={{ width: sidebarCollapsed ? 88 : sidebarWidth }}>
           <Sidebar
             items={navItems}
             initialWidth={280}
+            width={sidebarWidth}
             collapsed={sidebarCollapsed}
             onCollapsedChange={setSidebarCollapsed}
             onWidthChange={(w) => setSidebarWidth(w)}
@@ -76,7 +77,6 @@ export const Layout = ({ children }: LayoutProps) => {
           onNotificationsClick={() => setNotificationsOpen(true)}
           notificationsOpen={notificationsOpen}
         />
-
         <main className="pb-[calc(var(--player-height)+60px)]">{children}</main>
       </div>
 
@@ -87,10 +87,7 @@ export const Layout = ({ children }: LayoutProps) => {
 
       <PlayerBar />
 
-      <NotificationsDrawer
-        open={notificationsOpen}
-        onClose={() => setNotificationsOpen(false)}
-      />
+      <NotificationsDrawer open={notificationsOpen} onClose={() => setNotificationsOpen(false)} />
     </div>
   );
 };

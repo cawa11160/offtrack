@@ -127,9 +127,9 @@ function ToggleRow({
       >
         <span
           className={[
-            "absolute top-0.5 h-6 w-6 rounded-full bg-white shadow-sm transition-transform",
-            checked ? "translate-x-5" : "translate-x-0.5",
-            checked ? "bg-white" : "bg-black",
+            // PERFECTLY CENTERED KNOB
+            "absolute inset-y-0 my-auto left-0.5 h-6 w-6 rounded-full shadow-sm transition-transform",
+            checked ? "translate-x-5 bg-white" : "translate-x-0 bg-black",
           ].join(" ")}
         />
       </button>

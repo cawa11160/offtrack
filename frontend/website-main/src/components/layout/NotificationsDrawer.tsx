@@ -1,4 +1,5 @@
 import { useEffect, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { X, Bell, Sparkles, Music2, MapPin, ArrowRight, CheckCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -12,7 +13,9 @@ type NotificationItem = {
   time: string;
   unread?: boolean;
   ctaLabel?: string;
-  onCta?: () => void;
+
+  // ✅ Optional: explicit deep link if you want per-notification routing
+  link?: string;
 };
 
 type NotificationsDrawerProps = {
@@ -34,6 +37,8 @@ function iconFor(type: NotificationType) {
 }
 
 export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps) {
+  const navigate = useNavigate();
+
   const items: NotificationItem[] = useMemo(
     () => [
       {
@@ -44,6 +49,7 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
         time: "2h ago",
         unread: true,
         ctaLabel: "Open",
+        // link: "/release/123", // (future)
       },
       {
         id: "n2",
@@ -53,6 +59,7 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
         time: "Today",
         unread: true,
         ctaLabel: "View map",
+        // link: "/concerts?highlight=n2", // (future)
       },
       {
         id: "n3",
@@ -62,6 +69,7 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
         time: "Yesterday",
         unread: false,
         ctaLabel: "Listen",
+        // link: "/recommendations", // (future)
       },
       {
         id: "n4",
@@ -70,6 +78,7 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
         description: "Drag the carousel to browse releases faster.",
         time: "2d ago",
         unread: false,
+        // link: "/profile", // (future)
       },
     ],
     []
@@ -85,6 +94,27 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open, onClose]);
+
+  const routeFor = (n: NotificationItem) => {
+    if (n.link) return n.link;
+
+    switch (n.type) {
+      case "event":
+        return "/concerts";
+      case "playlist":
+        return "/recommendations";
+      case "release":
+        return "/release/demo"; // replace with real release id when you have it
+      case "system":
+      default:
+        return "/profile";
+    }
+  };
+
+  const goTo = (path: string) => {
+    onClose();          // close drawer first
+    navigate(path);     // then navigate
+  };
 
   if (!open) return null;
 
@@ -122,7 +152,6 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
             <p className="text-sm text-muted-foreground">Updates from artists, playlists, and events.</p>
           </div>
 
-          {/* Only close button now */}
           <button
             type="button"
             className="h-9 w-9 rounded-md hover:bg-accent grid place-items-center"
@@ -157,12 +186,15 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
           <div className="p-3 space-y-2">
             {items.map((n) => {
               const Icon = iconFor(n.type);
+              const target = routeFor(n);
 
               return (
-                <div
+                <button
                   key={n.id}
+                  type="button"
+                  onClick={() => goTo(target)}
                   className={cn(
-                    "rounded-2xl border border-border bg-card p-4",
+                    "w-full text-left rounded-2xl border border-border bg-card p-4",
                     "transition-colors hover:bg-accent/40"
                   )}
                 >
@@ -192,12 +224,13 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
 
                       {n.ctaLabel && (
                         <div className="mt-3">
+                          {/* CTA button should not double-trigger card click */}
                           <button
                             type="button"
                             className="inline-flex items-center gap-2 text-sm font-semibold"
-                            onClick={() => {
-                              n.onCta?.();
-                              onClose();
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              goTo(target);
                             }}
                           >
                             {n.ctaLabel}
@@ -207,7 +240,7 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
                       )}
                     </div>
                   </div>
-                </div>
+                </button>
               );
             })}
           </div>
@@ -219,9 +252,7 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
                   <Bell className="w-6 h-6 text-muted-foreground" />
                 </div>
                 <h3 className="text-xl font-semibold mt-4">All caught up</h3>
-                <p className="text-muted-foreground mt-2">
-                  When there’s something new, it’ll show up here.
-                </p>
+                <p className="text-muted-foreground mt-2">When there’s something new, it’ll show up here.</p>
               </div>
             </div>
           )}

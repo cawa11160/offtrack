@@ -9,7 +9,7 @@ type Rec = {
   year?: number | null;
   imageUrl?: string;
 
-  // ✅ streaming enrichment from backend/api.py
+  // streaming enrichment from backend/api.py
   previewUrl?: string | null;
   spotifyUrl?: string | null;
   spotifyUri?: string | null;
@@ -108,7 +108,7 @@ export default function Recommendations() {
   const [error, setError] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
 
-  // ✅ one shared audio player for the whole page
+  // one shared audio player for the whole page (hidden)
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playingId, setPlayingId] = useState<string>("");
   const [nowPlaying, setNowPlaying] = useState<string>("");
@@ -351,22 +351,15 @@ export default function Recommendations() {
         </div>
       </div>
 
-      {/* ✅ Shared audio control for previews */}
-      <div className="mt-6 rounded-2xl border border-border bg-card p-4 shadow-sm">
-        <div className="text-sm font-medium">Preview Player</div>
-        <div className="mt-1 text-sm text-muted-foreground">
-          {nowPlaying ? `Now playing: ${nowPlaying}` : "Click “Play preview” on a result (Spotify preview is 30s)."}
-        </div>
-        <audio
-          ref={audioRef}
-          controls
-          className="mt-3 w-full"
-          onEnded={() => {
-            setPlayingId("");
-            setNowPlaying("");
-          }}
-        />
-      </div>
+      {/* Hidden audio element used for preview playback */}
+      <audio
+        ref={audioRef}
+        className="hidden"
+        onEnded={() => {
+          setPlayingId("");
+          setNowPlaying("");
+        }}
+      />
 
       <div className="mt-10">
         <h2 className="text-lg font-semibold">Results</h2>
@@ -390,7 +383,7 @@ export default function Recommendations() {
                       className="h-full w-full object-cover"
                     />
                   ) : (
-                    <div className="flex h-full w-full items-center justify-center text-3xl font-semibold text-white bg-muted">
+                    <div className="flex h-full w-full items-center justify-center bg-muted text-3xl font-semibold text-white">
                       ♪
                     </div>
                   )}
@@ -403,14 +396,20 @@ export default function Recommendations() {
                     {r.year ? ` • ${r.year}` : ""}
                   </div>
 
-                  {/* ✅ Preview + Spotify buttons */}
+                  {/* Preview + Spotify buttons */}
                   <div className="mt-3 flex items-center gap-2">
                     <button
                       type="button"
                       onClick={() => playPreview(r)}
                       disabled={!r.previewUrl && !r.spotifyUrl}
                       className="inline-flex items-center gap-2 rounded-xl bg-black px-3 py-2 text-xs font-medium text-white disabled:opacity-50"
-                      title={r.previewUrl ? "Play 30s preview" : r.spotifyUrl ? "Open in Spotify" : "No preview available"}
+                      title={
+                        r.previewUrl
+                          ? "Play 30s preview"
+                          : r.spotifyUrl
+                          ? "Open in Spotify"
+                          : "No preview available"
+                      }
                     >
                       {playingId === r.id ? (
                         <>
@@ -439,6 +438,13 @@ export default function Recommendations() {
                       No preview available for this track — Spotify link will open instead.
                     </div>
                   ) : null}
+
+                  {/* Optional debug text (remove if you don't want it) */}
+                  {/* {nowPlaying ? (
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      Now playing: {nowPlaying}
+                    </div>
+                  ) : null} */}
                 </div>
               </div>
             ))}

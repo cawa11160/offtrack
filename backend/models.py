@@ -33,5 +33,4 @@ class Track(Base):
     tempo: Mapped[float] = mapped_column(Float)
 
 
-# Helpful composite indexes for LIKE search
 Index("ix_tracks_name_artists", Track.name, Track.artists)

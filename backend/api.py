@@ -1,11 +1,12 @@
-# backend/api.py
 from __future__ import annotations
 
 import base64
 import os
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from urllib.parse import quote
+from functools import lru_cache
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -15,39 +16,28 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, text
 
-try:
-    # when running from backend/ (e.g., `cd backend && uvicorn api:app`)
-    from db import get_db
-    from models import Track
-    from recommender import get_recommender
-except ImportError:
-    # when running from repo root (e.g., `uvicorn backend.api:app`)
-    from backend.db import get_db
-    from backend.models import Track
-    from backend.recommender import get_recommender
+from db import get_db, SessionLocal, engine, wait_for_db
+from models import Track, Base
+from recommender import get_recommender
+
+from fastapi.responses import RedirectResponse
 
 load_dotenv()
 
 app = FastAPI(title="Offtrack API")
 
 # -----------------------------
-# CORS (dev-safe)
+# CORS
 # -----------------------------
 ALLOW_ORIGINS = os.getenv(
-    "ALLOW_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080").split(",")
+    "ALLOW_ORIGINS",
+    "http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000",
+).split(",")
 ALLOW_ORIGINS = [o.strip() for o in ALLOW_ORIGINS if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    # allow_origins=ALLOW_ORIGINS,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=ALLOW_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,8 +52,12 @@ SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "").strip()
 _token = {"value": "", "expires_at": 0}
 
 
+def spotify_enabled() -> bool:
+    return bool(SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET)
+
+
 def get_spotify_token() -> str:
-    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+    if not spotify_enabled():
         return ""
 
     now = int(time.time())
@@ -71,7 +65,9 @@ def get_spotify_token() -> str:
         return _token["value"]
 
     auth = base64.b64encode(
-        f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
+        f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()
+    ).decode()
+
     r = requests.post(
         "https://accounts.spotify.com/api/token",
         headers={"Authorization": f"Basic {auth}"},
@@ -99,83 +95,96 @@ def _safe_year(y: Optional[int]) -> Optional[int]:
     return None
 
 
-def spotify_search(q: str, limit: int = 8):
+def _track_to_playback_fields(track_obj: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "previewUrl": track_obj.get("preview_url"),
+        "spotifyUrl": (track_obj.get("external_urls") or {}).get("spotify"),
+        "spotifyUri": track_obj.get("uri"),
+        "durationMs": track_obj.get("duration_ms"),
+    }
+
+
+@lru_cache(maxsize=2048)
+def spotify_track_lookup(title: str, artist: str) -> Optional[Dict[str, Any]]:
     token = get_spotify_token()
     if not token:
-        return []
+        return None
 
-    url = f"https://api.spotify.com/v1/search?type=track&limit={int(limit)}&q={quote(q)}"
-    try:
-        r = requests.get(
-            url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
-    except requests.RequestException:
-        return []
-
-    if r.status_code != 200:
-        return []
-
-    items = (r.json().get("tracks") or {}).get("items") or []
-    out = []
-    for it in items:
-        title = it.get("name", "")
-        artists = it.get("artists") or []
-        artist = artists[0].get("name", "") if artists else ""
-        tid = it.get("id", "")
-
-        album = it.get("album") or {}
-        release_date = (album.get("release_date") or "")
-        year = _safe_year(int(release_date[:4])) if isinstance(
-            release_date, str) and release_date[:4].isdigit() else None
-
-        images = (album.get("images") or [])
-        image_url = ""
-        if len(images) >= 2:
-            image_url = images[1].get("url", "") or images[0].get("url", "")
-        elif len(images) == 1:
-            image_url = images[0].get("url", "")
-
-        out.append({
-            "title": title,
-            "artist": artist,
-            "year": year,
-            "id": tid,  # Spotify id (not DB id)
-            "imageUrl": image_url,
-            "source": "spotify",
-        })
-    return out
-
-
-def spotify_cover(title: str, artist: str) -> str:
-    token = get_spotify_token()
-    if not token:
-        return ""
-
+    headers = {"Authorization": f"Bearer {token}"}
     q = f'track:"{title}" artist:"{artist}"'
-    url = f"https://api.spotify.com/v1/search?type=track&limit=1&q={quote(q)}"
+    url = "https://api.spotify.com/v1/search"
+    params = {"q": q, "type": "track", "limit": 1}
 
     try:
-        r = requests.get(
-            url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
+        r = requests.get(url, headers=headers, params=params, timeout=15)
     except requests.RequestException:
-        return ""
+        return None
 
     if r.status_code != 200:
-        return ""
+        return None
 
     items = (r.json().get("tracks") or {}).get("items") or []
     if not items:
-        return ""
+        return None
 
-    images = ((items[0].get("album") or {}).get("images") or [])
-    if len(images) >= 2:
-        return images[1].get("url", "") or images[0].get("url", "")
-    if len(images) == 1:
-        return images[0].get("url", "")
-    return ""
+    t = items[0]
+    images = (t.get("album") or {}).get("images") or []
+    image_url = images[0]["url"] if images else None
+
+    return {
+        "spotifyId": t.get("id"),
+        "imageUrl": image_url,
+        "album": (t.get("album") or {}).get("name"),
+        **_track_to_playback_fields(t),
+    }
+
+
+def spotify_search(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    token = get_spotify_token()
+    if not token:
+        return []
+
+    headers = {"Authorization": f"Bearer {token}"}
+    url = "https://api.spotify.com/v1/search"
+    params = {"q": query, "type": "track", "limit": int(limit)}
+
+    try:
+        response = requests.get(url, headers=headers,
+                                params=params, timeout=15)
+    except requests.RequestException:
+        return []
+
+    if response.status_code != 200:
+        return []
+
+    tracks = (response.json().get("tracks") or {}).get("items") or []
+    results: List[Dict[str, Any]] = []
+
+    for track in tracks:
+        images = (track.get("album") or {}).get("images") or []
+        image_url = images[0]["url"] if images else None
+
+        year: Optional[str] = None
+        release_date = (track.get("album") or {}).get("release_date")
+        if release_date:
+            year = release_date.split("-")[0]
+
+        results.append(
+            {
+                "id": track.get("id"),
+                "title": track.get("name"),
+                "artist": (track.get("artists") or [{}])[0].get("name"),
+                "year": year,
+                "imageUrl": image_url,
+                "source": "spotify",
+                **_track_to_playback_fields(track),
+            }
+        )
+
+    return results
 
 
 def itunes_cover(title: str, artist: str) -> str:
-    # No auth required; reliable fallback
     term = quote(f"{title} {artist}".strip())
     url = f"https://itunes.apple.com/search?term={term}&entity=song&limit=1"
     try:
@@ -189,27 +198,37 @@ def itunes_cover(title: str, artist: str) -> str:
             "artworkUrl60") or ""
         if not art:
             return ""
-        # upgrade to larger size when possible
-        art = art.replace("100x100bb.jpg", "600x600bb.jpg").replace(
-            "60x60bb.jpg", "600x600bb.jpg")
-        return art
+        return (
+            art.replace("100x100bb.jpg", "600x600bb.jpg")
+            .replace("60x60bb.jpg", "600x600bb.jpg")
+        )
     except Exception:
         return ""
 
 
 def cover_for(title: str, artist: str) -> str:
-    # Prefer Spotify (if configured), else iTunes
-    url = spotify_cover(title, artist).strip()
-    if not url:
-        url = itunes_cover(title, artist).strip()
-    return url
+    # Prefer Spotify if configured
+    if spotify_enabled():
+        token = get_spotify_token()
+        if token:
+            q = f'track:"{title}" artist:"{artist}"'
+            url = f"https://api.spotify.com/v1/search?type=track&limit=1&q={quote(q)}"
+            try:
+                r = requests.get(
+                    url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
+                if r.status_code == 200:
+                    items = (r.json().get("tracks") or {}).get("items") or []
+                    if items:
+                        images = (
+                            (items[0].get("album") or {}).get("images") or [])
+                        if images:
+                            return images[0].get("url", "") or ""
+            except Exception:
+                pass
+    return itunes_cover(title, artist).strip()
 
 
 def _try_reload_recommender() -> str:
-    """
-    If startup failed (e.g., DB empty), try loading again now.
-    Returns "" if ready, else error string.
-    """
     try:
         get_recommender().load()
         app.state.recommender_error = ""
@@ -218,36 +237,64 @@ def _try_reload_recommender() -> str:
         app.state.recommender_error = str(e)
         return app.state.recommender_error
 
+
 # -----------------------------
 # API Models
 # -----------------------------
-
-
 class SeedSong(BaseModel):
     title: str
     artist: Optional[str] = ""
     year: Optional[int] = None
-    id: Optional[str] = None  # DB track id preferred (if you have it)
+    id: Optional[str] = None
 
 
 class RecommendRequest(BaseModel):
     seeds: List[SeedSong]
     n: int = 9
-    mode: str = "all"   # "all" | "indie" | "mainstream"
+    mode: str = "all"  # "all" | "indie" | "mainstream"
+
 
 # -----------------------------
-# Startup: load recommender from DB
+# Startup
 # -----------------------------
-
-
 @app.on_event("startup")
 def _startup():
-    # Preload so first request is fast; raise a readable error if DB isn't seeded
+    app.state.recommender_error = ""
     try:
+        wait_for_db(timeout_s=45)
+        Base.metadata.create_all(engine)
         get_recommender().load()
+        app.state.recommender_error = ""
     except Exception as e:
-        # Don't crash the server; /api/ping will still work and show error.
         app.state.recommender_error = str(e)
+
+
+# -----------------------------
+# Health + DB Status
+# -----------------------------
+@app.get("/api/ping")
+def ping():
+    err = getattr(app.state, "recommender_error", "")
+    if err:
+        err = _try_reload_recommender()
+    return {"ok": True, "recommender_ready": not bool(err), "recommender_error": err}
+
+
+@app.get("/api/db_status")
+def db_status():
+    try:
+        wait_for_db(timeout_s=10)
+        Base.metadata.create_all(engine)
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text("SELECT to_regclass('public.tracks')")).scalar_one()
+            if not exists:
+                return {"ok": True, "tracks_exists": False, "tracks_count": 0}
+            cnt = int(conn.execute(
+                text("SELECT COUNT(*) FROM tracks")).scalar_one())
+            return {"ok": True, "tracks_exists": True, "tracks_count": cnt}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
 
 @app.post("/api/reload")
@@ -256,24 +303,9 @@ def reload_now():
     return {"ok": True, "recommender_ready": not bool(err), "recommender_error": err}
 
 
-@app.get("/api/ping")
-def ping():
-    err = getattr(app.state, "recommender_error", "")
-    if err:
-        # If DB was empty at startup, it may be seeded now -> retry load
-        err = _try_reload_recommender()
-
-    return {
-        "ok": True,
-        "recommender_ready": not bool(err),
-        "recommender_error": err,
-    }
-
 # -----------------------------
-# Search: Spotify if configured, else Postgres
+# Search
 # -----------------------------
-
-
 def db_search(db: Session, q: str, limit: int = 8):
     q2 = f"%{q}%"
     rows = (
@@ -288,10 +320,13 @@ def db_search(db: Session, q: str, limit: int = 8):
             "title": r.name,
             "artist": r.artists,
             "year": int(r.year),
-            "id": r.id,          # DB id
-            # we can fill via spotify on the client if desired
+            "id": r.id,
             "imageUrl": (getattr(r, "image_url", "") or ""),
             "source": "db",
+            "previewUrl": None,
+            "spotifyUrl": None,
+            "spotifyUri": None,
+            "durationMs": None,
         }
         for r in rows
     ]
@@ -303,23 +338,20 @@ def search_endpoint(q: str, limit: int = 8, db: Session = Depends(get_db)):
     if len(q) < 2:
         return {"results": []}
 
-    # Prefer Spotify results if available
     res = spotify_search(q, limit=limit)
     if res:
         return {"results": res}
 
     return {"results": db_search(db, q, limit=limit)}
 
-# -----------------------------
-# Recommend: DB is source of truth
-# -----------------------------
 
-
+# -----------------------------
+# Recommend
+# -----------------------------
 @app.post("/api/recommend")
 def recommend_endpoint(req: RecommendRequest):
     err = getattr(app.state, "recommender_error", "")
     if err:
-        # Try reloading in case DB was seeded after startup
         err = _try_reload_recommender()
     if err:
         raise HTTPException(
@@ -327,12 +359,14 @@ def recommend_endpoint(req: RecommendRequest):
 
     seeds = []
     for s in req.seeds:
-        seeds.append({
-            "title": s.title,
-            "artist": s.artist or "",
-            "year": _safe_year(s.year),
-            "id": (s.id or "").strip() or None,
-        })
+        seeds.append(
+            {
+                "title": s.title,
+                "artist": s.artist or "",
+                "year": _safe_year(s.year),
+                "id": (s.id or "").strip() or None,
+            }
+        )
 
     try:
         recs = get_recommender().recommend(seeds, n=req.n, mode=req.mode)
@@ -342,22 +376,39 @@ def recommend_endpoint(req: RecommendRequest):
 
     out = []
     for r in recs:
-        title = r.get("title", "")
-        artist = r.get("artist", "")
-        image_url = (r.get("imageUrl", "") or "").strip()
+        title = (r.get("title") or "").strip()
+        artist = (r.get("artist") or "").strip()
+
+        raw_image = r.get("imageUrl", "")
+        image_url = (raw_image if isinstance(raw_image, str) else "").strip()
         if not image_url:
             image_url = cover_for(title, artist).strip()
 
-        # Cache to DB if we got a URL and track id looks like a DB id
+        preview_url = r.get("previewUrl")
+        spotify_url = r.get("spotifyUrl")
+        spotify_uri = r.get("spotifyUri")
+        duration_ms = r.get("durationMs")
+
+        if spotify_enabled():
+            details = spotify_track_lookup(title, artist)
+            if details:
+                preview_url = details.get("previewUrl") or preview_url
+                spotify_url = details.get("spotifyUrl") or spotify_url
+                spotify_uri = details.get("spotifyUri") or spotify_uri
+                duration_ms = details.get("durationMs") or duration_ms
+                if not image_url:
+                    dimg = details.get("imageUrl")
+                    if isinstance(dimg, str) and dimg.strip():
+                        image_url = dimg.strip()
+
+        # ✅ safe DB update (no leaking generator sessions)
         tid = (r.get("id") or "").strip()
         if image_url and tid:
             try:
-                # Use a short-lived DB session and update only if empty
-                db = next(get_db())
+                db = SessionLocal()
                 db.execute(
                     text(
-                        "UPDATE tracks "
-                        "SET image_url = :u "
+                        "UPDATE tracks SET image_url = :u "
                         "WHERE id = :i AND (image_url IS NULL OR image_url = '')"
                     ),
                     {"u": image_url, "i": tid},
@@ -365,7 +416,69 @@ def recommend_endpoint(req: RecommendRequest):
                 db.commit()
             except Exception:
                 pass
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
-        out.append({**r, "imageUrl": image_url})
+        out.append(
+            {
+                **r,
+                "imageUrl": image_url,
+                "previewUrl": preview_url,
+                "spotifyUrl": spotify_url,
+                "spotifyUri": spotify_uri,
+                "durationMs": duration_ms,
+            }
+        )
 
     return {"recommendations": out}
+
+
+class PreviewRequest(BaseModel):
+    title: str
+    artist: Optional[str] = ""
+
+
+@app.post("/api/preview")
+def preview_endpoint(req: PreviewRequest):
+    """
+    Returns previewUrl + spotifyUrl for a track, if Spotify is configured.
+    """
+    if not spotify_enabled():
+        return {"ok": False, "error": "Spotify not configured", "previewUrl": None, "spotifyUrl": None}
+
+    title = (req.title or "").strip()
+    artist = (req.artist or "").strip()
+
+    details = spotify_track_lookup(title, artist)
+    if not details:
+        return {"ok": False, "error": "No Spotify match", "previewUrl": None, "spotifyUrl": None}
+
+    return {
+        "ok": True,
+        "previewUrl": details.get("previewUrl"),
+        "spotifyUrl": details.get("spotifyUrl"),
+        "spotifyUri": details.get("spotifyUri"),
+        "durationMs": details.get("durationMs"),
+        "imageUrl": details.get("imageUrl"),
+    }
+
+
+@app.get("/api/open_spotify")
+def open_spotify(title: str, artist: str = ""):
+    """
+    Demo endpoint: redirects user to Spotify track page if found.
+    """
+    if not spotify_enabled():
+        raise HTTPException(status_code=400, detail="Spotify not configured")
+
+    title = (title or "").strip()
+    artist = (artist or "").strip()
+
+    details = spotify_track_lookup(title, artist)
+    if not details or not details.get("spotifyUrl"):
+        raise HTTPException(status_code=404, detail="No Spotify link found")
+
+    return RedirectResponse(url=details["spotifyUrl"], status_code=302)

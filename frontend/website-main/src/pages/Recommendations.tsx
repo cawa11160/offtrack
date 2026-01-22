@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Sparkles, Search, Music2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Sparkles, Search, Music2, Play, Pause, ExternalLink } from "lucide-react";
 import { apiRecommend, apiSearch, type SearchResult, type SeedSong } from "@/lib/api";
 
 type Rec = {
@@ -8,6 +8,12 @@ type Rec = {
   artist: string;
   year?: number | null;
   imageUrl?: string;
+
+  // ✅ streaming enrichment from backend/api.py
+  previewUrl?: string | null;
+  spotifyUrl?: string | null;
+  spotifyUri?: string | null;
+  durationMs?: number | null;
 };
 
 function formatResult(r: SearchResult) {
@@ -101,6 +107,54 @@ export default function Recommendations() {
   const [recs, setRecs] = useState<Rec[]>([]);
   const [error, setError] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
+
+  // ✅ one shared audio player for the whole page
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playingId, setPlayingId] = useState<string>("");
+  const [nowPlaying, setNowPlaying] = useState<string>("");
+
+  function stopAudio() {
+    const a = audioRef.current;
+    if (!a) return;
+    a.pause();
+    a.currentTime = 0;
+  }
+
+  async function playPreview(rec: Rec) {
+    const a = audioRef.current;
+    if (!a) return;
+
+    // toggle pause if clicking the same track
+    if (playingId && playingId === rec.id && !a.paused) {
+      a.pause();
+      setPlayingId("");
+      return;
+    }
+
+    // if no previewUrl, quickest demo fallback: open spotify page if present
+    if (!rec.previewUrl) {
+      if (rec.spotifyUrl) window.open(rec.spotifyUrl, "_blank");
+      return;
+    }
+
+    try {
+      a.src = rec.previewUrl;
+      await a.play();
+      setPlayingId(rec.id);
+      setNowPlaying(`${rec.title} — ${rec.artist}`);
+    } catch {
+      // autoplay blocked or invalid previewUrl; fallback to Spotify
+      if (rec.spotifyUrl) window.open(rec.spotifyUrl, "_blank");
+    }
+  }
+
+  // stop playing when recommendations list changes
+  useEffect(() => {
+    stopAudio();
+    setPlayingId("");
+    setNowPlaying("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recs.length]);
 
   // Debounced search (simple)
   useEffect(() => {
@@ -297,6 +351,23 @@ export default function Recommendations() {
         </div>
       </div>
 
+      {/* ✅ Shared audio control for previews */}
+      <div className="mt-6 rounded-2xl border border-border bg-card p-4 shadow-sm">
+        <div className="text-sm font-medium">Preview Player</div>
+        <div className="mt-1 text-sm text-muted-foreground">
+          {nowPlaying ? `Now playing: ${nowPlaying}` : "Click “Play preview” on a result (Spotify preview is 30s)."}
+        </div>
+        <audio
+          ref={audioRef}
+          controls
+          className="mt-3 w-full"
+          onEnded={() => {
+            setPlayingId("");
+            setNowPlaying("");
+          }}
+        />
+      </div>
+
       <div className="mt-10">
         <h2 className="text-lg font-semibold">Results</h2>
 
@@ -331,6 +402,43 @@ export default function Recommendations() {
                     {r.artist}
                     {r.year ? ` • ${r.year}` : ""}
                   </div>
+
+                  {/* ✅ Preview + Spotify buttons */}
+                  <div className="mt-3 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => playPreview(r)}
+                      disabled={!r.previewUrl && !r.spotifyUrl}
+                      className="inline-flex items-center gap-2 rounded-xl bg-black px-3 py-2 text-xs font-medium text-white disabled:opacity-50"
+                      title={r.previewUrl ? "Play 30s preview" : r.spotifyUrl ? "Open in Spotify" : "No preview available"}
+                    >
+                      {playingId === r.id ? (
+                        <>
+                          <Pause className="h-4 w-4" /> Pause
+                        </>
+                      ) : (
+                        <>
+                          <Play className="h-4 w-4" /> Play preview
+                        </>
+                      )}
+                    </button>
+
+                    {r.spotifyUrl ? (
+                      <button
+                        type="button"
+                        onClick={() => window.open(r.spotifyUrl!, "_blank")}
+                        className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium"
+                      >
+                        <ExternalLink className="h-4 w-4" /> Spotify
+                      </button>
+                    ) : null}
+                  </div>
+
+                  {!r.previewUrl && r.spotifyUrl ? (
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      No preview available for this track — Spotify link will open instead.
+                    </div>
+                  ) : null}
                 </div>
               </div>
             ))}

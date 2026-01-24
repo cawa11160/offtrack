@@ -25,7 +25,7 @@ services:
       - db
 
   frontend:
-    build: ./frontend/website-main
+    build: ./frontend/
     ports:
       - "8080:8080"
     environment:

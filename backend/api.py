@@ -10,15 +10,16 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, text
 
 from db import get_db, SessionLocal, engine, wait_for_db
-from models import Track, Base
+from models import Track, Interaction, Base
 from recommender import get_recommender
+from analytics import get_analytics
 
 from fastapi.responses import RedirectResponse
 
@@ -252,6 +253,20 @@ class RecommendRequest(BaseModel):
     seeds: List[SeedSong]
     n: int = 9
     mode: str = "all"  # "all" | "indie" | "mainstream"
+    # Avoid repeats across sessions / refreshes (frontend keeps a rolling list)
+    already_shown_ids: Optional[List[str]] = None
+    distinct_id: Optional[str] = None  # for analytics (PostHog)
+
+class FeedbackRequest(BaseModel):
+    """
+    Anonymous interaction feedback used for personalization and analytics.
+    Recommended events: "like", "dislike", "play", "open_spotify".
+    """
+    track_id: str
+    event: str
+    distinct_id: Optional[str] = None  # optional; otherwise derived from request headers
+    context: Optional[Dict[str, Any]] = None
+
 
 
 # -----------------------------
@@ -333,31 +348,60 @@ def db_search(db: Session, q: str, limit: int = 8):
 
 
 @app.get("/api/search")
-def search_endpoint(q: str, limit: int = 8, db: Session = Depends(get_db)):
+def search_endpoint(
+    q: str,
+    limit: int = 8,
+    request: Request = None,
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db),
+):
     q = (q or "").strip()
-    if len(q) < 2:
-        return {"results": []}
+    limit = int(limit)
 
-    res = spotify_search(q, limit=limit)
-    if res:
-        return {"results": res}
+    source = "db"
+    results: List[Dict[str, Any]] = []
 
-    return {"results": db_search(db, q, limit=limit)}
+    if len(q) >= 2:
+        res = spotify_search(q, limit=limit)
+        if res:
+            source = "spotify"
+            results = res
+        else:
+            results = db_search(db, q, limit=limit)
+
+    # analytics (never blocks)
+    try:
+        if request is not None and background_tasks is not None:
+            a = get_analytics()
+            did = a.distinct_id(request)
+            a.capture(
+                background_tasks,
+                distinct_id=did,
+                event="search",
+                properties={
+                    "q_len": len(q),
+                    "limit": limit,
+                    "source": source,
+                },
+            )
+    except Exception:
+        pass
+
+    return {"results": results}
 
 
 # -----------------------------
 # Recommend
 # -----------------------------
 @app.post("/api/recommend")
-def recommend_endpoint(req: RecommendRequest):
+def recommend_endpoint(req: RecommendRequest, request: Request = None, background_tasks: BackgroundTasks = None, db: Session = Depends(get_db)):
     err = getattr(app.state, "recommender_error", "")
     if err:
         err = _try_reload_recommender()
     if err:
-        raise HTTPException(
-            status_code=500, detail=f"Recommender not ready: {err}")
+        raise HTTPException(status_code=500, detail=f"Recommender not ready: {err}")
 
-    seeds = []
+    seeds: List[Dict[str, Any]] = []
     for s in req.seeds:
         seeds.append(
             {
@@ -369,12 +413,67 @@ def recommend_endpoint(req: RecommendRequest):
         )
 
     try:
-        recs = get_recommender().recommend(seeds, n=req.n, mode=req.mode)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Recommender failed: {str(e)}")
+        did = None
+        try:
+            if request is not None:
+                did = get_analytics().distinct_id(request, explicit=req.distinct_id)
+        except Exception:
+            did = req.distinct_id
 
-    out = []
+        # Personalization signals from feedback (best-effort)
+        liked_ids: List[str] = []
+        disliked_ids: List[str] = []
+        if did:
+            try:
+                rows = (
+                    db.query(Interaction)
+                    .filter(Interaction.distinct_id == did)
+                    .order_by(Interaction.created_at.desc())
+                    .limit(200)
+                    .all()
+                )
+                for r0 in rows:
+                    if r0.event == "like":
+                        liked_ids.append(r0.track_id)
+                    elif r0.event == "dislike":
+                        disliked_ids.append(r0.track_id)
+            except Exception:
+                pass
+
+        exclude_ids = [x for x in (req.already_shown_ids or []) if isinstance(x, str) and x.strip()]
+        recs = get_recommender().recommend(
+            seeds,
+            n=req.n,
+            mode=req.mode,
+            liked_ids=liked_ids,
+            disliked_ids=disliked_ids,
+            exclude_ids=exclude_ids,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Recommender failed: {str(e)}")
+
+    # analytics (never blocks)
+    try:
+        if request is not None and background_tasks is not None:
+            a = get_analytics()
+            did = a.distinct_id(request, explicit=req.distinct_id)
+            a.capture(
+                background_tasks,
+                distinct_id=did,
+                event="recommend",
+                properties={
+                    "n": int(req.n),
+                    "mode": (req.mode or "all"),
+                    "seeds_count": len(req.seeds or []),
+                    "already_shown_count": len(req.already_shown_ids or []),
+                },
+            )
+    except Exception:
+        pass
+
+    out: List[Dict[str, Any]] = []
+    updates: List[Dict[str, str]] = []  # for bulk image_url persistence
+
     for r in recs:
         title = (r.get("title") or "").strip()
         artist = (r.get("artist") or "").strip()
@@ -401,26 +500,9 @@ def recommend_endpoint(req: RecommendRequest):
                     if isinstance(dimg, str) and dimg.strip():
                         image_url = dimg.strip()
 
-        # ✅ safe DB update (no leaking generator sessions)
         tid = (r.get("id") or "").strip()
         if image_url and tid:
-            try:
-                db = SessionLocal()
-                db.execute(
-                    text(
-                        "UPDATE tracks SET image_url = :u "
-                        "WHERE id = :i AND (image_url IS NULL OR image_url = '')"
-                    ),
-                    {"u": image_url, "i": tid},
-                )
-                db.commit()
-            except Exception:
-                pass
-            finally:
-                try:
-                    db.close()
-                except Exception:
-                    pass
+            updates.append({"u": image_url, "i": tid})
 
         out.append(
             {
@@ -433,16 +515,86 @@ def recommend_endpoint(req: RecommendRequest):
             }
         )
 
+    # Best-effort bulk persistence (single session)
+    if updates:
+        try:
+            db = SessionLocal()
+            db.execute(
+                text(
+                    "UPDATE tracks SET image_url = :u "
+                    "WHERE id = :i AND (image_url IS NULL OR image_url = '')"
+                ),
+                updates,
+            )
+            db.commit()
+        except Exception:
+            pass
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
     return {"recommendations": out}
+
+
+
+
+@app.post("/api/feedback")
+def feedback_endpoint(
+    req: FeedbackRequest,
+    request: Request = None,
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Records a user interaction. This enables:
+      - "thumbs up/down" personalization
+      - better re-ranking (avoid disliked tracks)
+      - product analytics (PostHog)
+    """
+    event = (req.event or "").strip().lower()
+    if event not in {"like", "dislike", "play", "open_spotify", "click_recommendation"}:
+        raise HTTPException(status_code=400, detail="Invalid event")
+
+    track_id = (req.track_id or "").strip()
+    if not track_id:
+        raise HTTPException(status_code=400, detail="Missing track_id")
+
+    distinct_id = None
+    try:
+        if request is not None:
+            distinct_id = get_analytics().distinct_id(request, explicit=req.distinct_id)
+    except Exception:
+        distinct_id = (req.distinct_id or "").strip() or "anonymous"
+
+    # persist interaction
+    try:
+        db.add(Interaction(distinct_id=distinct_id, track_id=track_id, event=event))
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    # analytics (never blocks)
+    try:
+        if request is not None and background_tasks is not None:
+            a = get_analytics()
+            did = a.distinct_id(request, explicit=distinct_id)
+            a.capture(background_tasks, distinct_id=did, event="feedback", properties={"event": event})
+    except Exception:
+        pass
+
+    return {"ok": True}
 
 
 class PreviewRequest(BaseModel):
     title: str
     artist: Optional[str] = ""
+    distinct_id: Optional[str] = None  # for analytics (PostHog)
 
 
 @app.post("/api/preview")
-def preview_endpoint(req: PreviewRequest):
+def preview_endpoint(req: PreviewRequest, request: Request = None, background_tasks: BackgroundTasks = None):
     """
     Returns previewUrl + spotifyUrl for a track, if Spotify is configured.
     """
@@ -454,7 +606,24 @@ def preview_endpoint(req: PreviewRequest):
 
     details = spotify_track_lookup(title, artist)
     if not details:
+        # analytics (never blocks)
+        try:
+            if request is not None and background_tasks is not None:
+                a = get_analytics()
+                did = a.distinct_id(request, explicit=req.distinct_id)
+                a.capture(background_tasks, distinct_id=did, event="preview_lookup", properties={"has_match": False})
+        except Exception:
+            pass
         return {"ok": False, "error": "No Spotify match", "previewUrl": None, "spotifyUrl": None}
+
+    # analytics (never blocks)
+    try:
+        if request is not None and background_tasks is not None:
+            a = get_analytics()
+            did = a.distinct_id(request, explicit=req.distinct_id)
+            a.capture(background_tasks, distinct_id=did, event="preview_lookup", properties={"has_match": True})
+    except Exception:
+        pass
 
     return {
         "ok": True,
@@ -467,7 +636,7 @@ def preview_endpoint(req: PreviewRequest):
 
 
 @app.get("/api/open_spotify")
-def open_spotify(title: str, artist: str = ""):
+def open_spotify(title: str, artist: str = "", request: Request = None, background_tasks: BackgroundTasks = None):
     """
     Demo endpoint: redirects user to Spotify track page if found.
     """
@@ -478,7 +647,44 @@ def open_spotify(title: str, artist: str = ""):
     artist = (artist or "").strip()
 
     details = spotify_track_lookup(title, artist)
+
+    # analytics (never blocks)
+    try:
+        if request is not None and background_tasks is not None:
+            a = get_analytics()
+            did = a.distinct_id(request)
+            a.capture(background_tasks, distinct_id=did, event="open_spotify", properties={"has_match": bool(details)})
+    except Exception:
+        pass
+
     if not details or not details.get("spotifyUrl"):
         raise HTTPException(status_code=404, detail="No Spotify link found")
+
+    # best-effort persistence (never blocks)
+    db = None
+    try:
+        if request is not None:
+            did = get_analytics().distinct_id(request)
+            db = SessionLocal()
+            db.add(
+                Interaction(
+                    distinct_id=did,
+                    track_id=str(details.get("spotifyId") or ""),
+                    event="open_spotify",
+                )
+            )
+            db.commit()
+    except Exception:
+        try:
+            if db is not None:
+                db.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            if db is not None:
+                db.close()
+        except Exception:
+            pass
 
     return RedirectResponse(url=details["spotifyUrl"], status_code=302)

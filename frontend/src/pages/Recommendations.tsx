@@ -1,20 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Sparkles, Search, Music2, Play, Pause, ExternalLink } from "lucide-react";
-import { apiRecommend, apiSearch, type SearchResult, type SeedSong } from "@/lib/api";
+import { apiFeedback, apiRecommend, apiSearch, type RecItem, type SearchResult, type SeedSong } from "@/lib/api";
+import { addAlreadyShownIds, getAlreadyShownIds } from "@/lib/analytics";
+import { phCapture } from "@/lib/posthog";
 
-type Rec = {
-  id: string;
-  title: string;
-  artist: string;
-  year?: number | null;
-  imageUrl?: string;
-
-  // streaming enrichment from backend/api.py
-  previewUrl?: string | null;
-  spotifyUrl?: string | null;
-  spotifyUri?: string | null;
-  durationMs?: number | null;
-};
+type Rec = RecItem;
 
 function formatResult(r: SearchResult) {
   const bits = [
@@ -133,7 +123,11 @@ export default function Recommendations() {
 
     // if no previewUrl, quickest demo fallback: open spotify page if present
     if (!rec.previewUrl) {
-      if (rec.spotifyUrl) window.open(rec.spotifyUrl, "_blank");
+      if (rec.spotifyUrl) {
+        phCapture("open_spotify", { track_id: rec.id, title: rec.title, artist: rec.artist });
+        apiFeedback(rec.id, "open_spotify");
+        window.open(rec.spotifyUrl, "_blank");
+      }
       return;
     }
 
@@ -142,9 +136,17 @@ export default function Recommendations() {
       await a.play();
       setPlayingId(rec.id);
       setNowPlaying(`${rec.title} — ${rec.artist}`);
+      phCapture("play_preview", { track_id: rec.id, title: rec.title, artist: rec.artist });
+      apiFeedback(rec.id, "play");
+      phCapture("play_preview", { track_id: rec.id, title: rec.title, artist: rec.artist });
+      apiFeedback(rec.id, "play");
     } catch {
       // autoplay blocked or invalid previewUrl; fallback to Spotify
-      if (rec.spotifyUrl) window.open(rec.spotifyUrl, "_blank");
+      if (rec.spotifyUrl) {
+        phCapture("open_spotify", { track_id: rec.id, title: rec.title, artist: rec.artist });
+        apiFeedback(rec.id, "open_spotify");
+        window.open(rec.spotifyUrl, "_blank");
+      }
     }
   }
 
@@ -217,8 +219,12 @@ export default function Recommendations() {
         picked3 ?? (seed3.trim() ? { title: seed3.trim() } : null),
       ].filter(Boolean) as SeedSong[];
 
-      const data = await apiRecommend(songs, 9, mode);
-      setRecs(data.recommendations as Rec[]);
+      const alreadyShown = getAlreadyShownIds();
+      const data = await apiRecommend(songs, 9, mode, alreadyShown);
+      const next = data.recommendations as Rec[];
+      setRecs(next);
+      addAlreadyShownIds(next.map((x) => x.id));
+      phCapture("recommend_results", { n: next.length, mode, seeds_count: songs.length });
     } catch (e: any) {
       setError(e?.message || "Something went wrong.");
     } finally {
@@ -395,12 +401,22 @@ export default function Recommendations() {
                     {r.artist}
                     {r.year ? ` • ${r.year}` : ""}
                   </div>
+                  {r.reasons?.length ? (
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {r.reasons.slice(0, 2).join(" • ")}
+                    </div>
+                  ) : null}
+
 
                   {/* Preview + Spotify buttons */}
                   <div className="mt-3 flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => playPreview(r)}
+                      onClick={() => {
+                          phCapture("click_recommendation", { track_id: r.id, title: r.title, artist: r.artist, action: "play" });
+                          apiFeedback(r.id, "click_recommendation");
+                          playPreview(r);
+                        }}
                       disabled={!r.previewUrl && !r.spotifyUrl}
                       className="inline-flex items-center gap-2 rounded-xl bg-black px-3 py-2 text-xs font-medium text-white disabled:opacity-50"
                       title={
@@ -422,10 +438,40 @@ export default function Recommendations() {
                       )}
                     </button>
 
+                    <button
+                      type="button"
+                      onClick={() => {
+                        phCapture("like_track", { track_id: r.id, title: r.title, artist: r.artist });
+                        apiFeedback(r.id, "like");
+                      }}
+                      className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium"
+                      title="Like"
+                    >
+                      <span aria-hidden="true">👍</span> Like
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        phCapture("dislike_track", { track_id: r.id, title: r.title, artist: r.artist });
+                        apiFeedback(r.id, "dislike");
+                      }}
+                      className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium"
+                      title="Dislike"
+                    >
+                      <span aria-hidden="true">👎</span> Dislike
+                    </button>
+
                     {r.spotifyUrl ? (
                       <button
                         type="button"
-                        onClick={() => window.open(r.spotifyUrl!, "_blank")}
+                        onClick={() => {
+                          phCapture("click_recommendation", { track_id: r.id, title: r.title, artist: r.artist, action: "spotify" });
+                          apiFeedback(r.id, "click_recommendation");
+                          phCapture("open_spotify", { track_id: r.id, title: r.title, artist: r.artist });
+                          apiFeedback(r.id, "open_spotify");
+                          window.open(r.spotifyUrl!, "_blank");
+                        }}
                         className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium"
                       >
                         <ExternalLink className="h-4 w-4" /> Spotify

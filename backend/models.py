@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import Text, String, Integer, Float, Boolean, Index
+from sqlalchemy import Text, String, Integer, Float, Boolean, Index, DateTime, func
 
 
 class Base(DeclarativeBase):
@@ -33,4 +33,21 @@ class Track(Base):
     tempo: Mapped[float] = mapped_column(Float)
 
 
+class Interaction(Base):
+    """
+    Anonymous interaction log (optional but recommended).
+    This is your bridge toward Spotify-like personalization without requiring accounts.
+
+    Frontend should send a stable `distinct_id` (e.g., uuid in localStorage).
+    """
+    __tablename__ = "interactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    distinct_id: Mapped[str] = mapped_column(String(128), index=True)
+    track_id: Mapped[str] = mapped_column(String, index=True)
+    event: Mapped[str] = mapped_column(String(32), index=True)  # like/dislike/play/open_spotify/etc.
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 Index("ix_tracks_name_artists", Track.name, Track.artists)
+Index("ix_interactions_distinct_track", Interaction.distinct_id, Interaction.track_id)

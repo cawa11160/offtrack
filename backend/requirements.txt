@@ -8,3 +8,4 @@ python-dotenv
 sqlalchemy>=2.0
 psycopg2-binary>=2.9
 alembic>=1.13
+posthog>=3.0

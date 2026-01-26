@@ -19,6 +19,10 @@ services:
       # Optional Spotify creds:
       SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID-}
       SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET-}
+      # Optional PostHog analytics (safe to leave unset):
+      POSTHOG_ENABLED: ${POSTHOG_ENABLED-true}
+      POSTHOG_HOST: ${POSTHOG_HOST-https://app.posthog.com}
+      POSTHOG_API_KEY: ${POSTHOG_API_KEY-}
     ports:
       - "8000:8000"
     depends_on:

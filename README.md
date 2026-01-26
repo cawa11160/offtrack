@@ -56,3 +56,13 @@ npm run dev
 ```
 
 Frontend proxies `/api/*` to the backend.
+
+## Analytics (PostHog, optional)
+
+Set these env vars (backend):
+
+- `POSTHOG_ENABLED=true`
+- `POSTHOG_HOST=https://app.posthog.com` (or your self-hosted URL)
+- `POSTHOG_API_KEY=...`
+
+The backend will emit events for search/recommend/preview/open_spotify and you can also call `POST /api/feedback` for likes/dislikes.

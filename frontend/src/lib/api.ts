@@ -36,46 +36,38 @@ export type RecommendResponse = {
   recommendations: RecItem[];
 };
 
-// ✅ Production-safe API base:
-// - Local dev: leave VITE_API_BASE unset → uses same-origin "/api/..."
-// - Vercel/prod: set VITE_API_BASE="https://your-backend-domain" → calls that host
-const API_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
+// If you set VITE_API_BASE_URL on Vercel (e.g. https://your-backend.com),
+// we’ll call it directly. Otherwise we use same-origin (/api/*) which works
+// great with a Vercel rewrite.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").trim().replace(/\/$/, "");
 
 function withDistinct(headers?: HeadersInit): HeadersInit {
   const h = new Headers(headers);
-  const did = getDistinctId();
-  if (did) h.set("X-Posthog-Distinct-Id", did);
+  // keep both: header for server logs + body field for explicit tracking
+  h.set("X-Posthog-Distinct-Id", getDistinctId());
   return h;
 }
 
-function buildUrl(path: string): string {
-  // path expected like "/api/..."
-  if (!API_BASE) return path;
-  return `${API_BASE}${path.startsWith("/") ? "" : "/"}${path}`;
-}
-
 async function apiFetch(path: string, init: RequestInit = {}) {
-  const url = buildUrl(path);
+  const url = API_BASE ? `${API_BASE}${path}` : path;
   return fetch(url, { ...init, headers: withDistinct(init.headers) });
 }
 
-async function readErrorMessage(r: Response): Promise<string> {
-  // backend might return JSON or text
+async function readError(r: Response): Promise<string> {
+  // try json first, then text
   const ct = r.headers.get("content-type") ?? "";
   if (ct.includes("application/json")) {
     const j = await r.json().catch(() => null);
     const msg =
-      (j && (j.detail || j.message || j.error)) ??
-      (typeof j === "string" ? j : null);
-    return msg ? String(msg) : "";
+      (j && (j.error || j.message || j.detail)) ? String(j.error || j.message || j.detail) : "";
+    if (msg) return msg;
   }
-  return await r.text().catch(() => "");
+  const t = await r.text().catch(() => "");
+  return t || `${r.status} ${r.statusText}`;
 }
 
 export async function apiSearch(q: string, limit = 8): Promise<SearchResult[]> {
-  const r = await apiFetch(
-    `/api/search?q=${encodeURIComponent(q)}&limit=${limit}`
-  );
+  const r = await apiFetch(`/api/search?q=${encodeURIComponent(q)}&limit=${limit}`);
   if (!r.ok) return [];
   const data = await r.json().catch(() => ({}));
   return (data?.results ?? []) as SearchResult[];
@@ -95,15 +87,13 @@ export async function apiRecommend(
       n,
       mode,
       already_shown_ids: alreadyShownIds,
-      distinct_id: getDistinctId(),
+      distinct_id: getDistinctId()
     }),
   });
 
   if (!r.ok) {
-    const msg = await readErrorMessage(r);
-    throw new Error(msg || `Recommend failed (${r.status})`);
+    throw new Error(await readError(r));
   }
-
   return (await r.json()) as RecommendResponse;
 }
 
@@ -116,6 +106,6 @@ export async function apiFeedback(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ track_id: trackId, event, distinct_id: getDistinctId() }),
   });
-  // feedback shouldn't hard-fail the UI
+  // feedback is best-effort
   if (!r.ok) return;
 }

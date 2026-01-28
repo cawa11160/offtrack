@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Bell, Search, User, Settings } from "lucide-react";
+import { Search, User, Settings, Music2 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { useNavigate } from "react-router-dom";
 
@@ -47,99 +48,74 @@ export const Header = ({
   };
 
   return (
-    <header className="sticky top-0 z-30 bg-background/80 backdrop-blur border-b border-border">
-      <div className="h-16 px-4 lg:px-8 flex items-center gap-3">
+    <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur">
+      <div className="flex h-16 items-center gap-4 px-4 lg:px-8">
+        {/* Logo + Offtrack */}
+        <Link
+          to="/"
+          className="flex shrink-0 items-center gap-2 text-foreground no-underline"
+        >
+          <div className="grid h-9 w-9 place-items-center rounded-lg bg-foreground/10">
+            <Music2 className="h-5 w-5 text-foreground" />
+          </div>
+          <span className="text-lg font-semibold tracking-tight">Offtrack</span>
+        </Link>
 
-        {/* Search */}
-        <div className="flex-1">
-          <div className="relative max-w-2xl mx-auto">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+        {/* Search — centered */}
+        <div className="flex flex-1 justify-center">
+          <div className="relative w-full max-w-xl">
+            <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <input
               type="text"
-              placeholder="Search artists, albums, or songs..."
+              placeholder="Enter your search..."
               className={cn(
-                "w-full h-11 pl-11 pr-4 rounded-full bg-secondary/60",
-                "border border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+                "h-11 w-full rounded-full border border-border bg-muted/50 pl-11 pr-4",
+                "placeholder:text-muted-foreground",
+                "focus:border-foreground/30 focus:outline-none focus:ring-2 focus:ring-foreground/10"
               )}
             />
           </div>
         </div>
 
-        {/* Right controls */}
-        <div className="flex items-center gap-3">
-
-          {/* Notifications */}
-          <button
-            type="button"
-            onClick={onNotificationsClick}
-            className={cn(
-              "relative h-11 w-11 rounded-full border border-border bg-card",
-              "grid place-items-center hover:bg-accent transition-colors"
-            )}
-          >
-            <Bell className="w-5 h-5" />
-          </button>
-
-          {/* Settings icon (direct navigation only) */}
-          <button
-            type="button"
-            onClick={() => navigate("/settings")}
-            className={cn(
-              "h-11 w-11 rounded-full border border-border bg-card grid place-items-center",
-              "hover:bg-accent transition-colors"
-            )}
-            aria-label="Settings"
-          >
-            <Settings className="w-5 h-5" />
-          </button>
-
-          {/* Profile with dropdown */}
+        {/* User + Settings */}
+        <div className="flex shrink-0 items-center gap-2">
           <div className="relative" ref={menuRef}>
             <button
               type="button"
               onClick={() => setProfileMenuOpen((v) => !v)}
               className={cn(
-                "h-11 w-11 rounded-full border border-border bg-card grid place-items-center",
-                "hover:bg-accent transition-colors",
-                profileMenuOpen && "bg-accent"
+                "grid h-10 w-10 place-items-center rounded-full border border-border bg-background",
+                "hover:bg-muted transition-colors",
+                profileMenuOpen && "bg-muted"
               )}
               aria-haspopup="menu"
               aria-expanded={profileMenuOpen}
               aria-label="Profile menu"
             >
-              <User className="w-5 h-5" />
+              <User className="h-5 w-5 text-foreground" />
             </button>
 
             {profileMenuOpen && (
-              <div className="absolute right-0 mt-2 w-72 rounded-2xl border border-border bg-card shadow-2xl overflow-hidden">
-
-                {/* ONLY PROFILE ITEM NOW */}
+              <div className="absolute right-0 z-50 mt-2 w-56 overflow-hidden rounded-xl border border-border bg-card shadow-xl">
                 <button
-                  className="w-full px-4 py-3 text-left text-sm hover:bg-accent"
+                  className="w-full px-4 py-3 text-left text-sm hover:bg-muted"
                   onClick={() => go("/profile")}
                   role="menuitem"
                 >
                   Profile
                 </button>
-
-                {/* Optional logout if you want later */}
-                {/*
-                <div className="h-px bg-border" />
-                <button
-                  className="w-full px-4 py-3 text-left text-sm hover:bg-accent text-destructive"
-                  onClick={() => {
-                    setProfileMenuOpen(false);
-                    // logout()
-                  }}
-                  role="menuitem"
-                >
-                  Log out
-                </button>
-                */}
               </div>
             )}
           </div>
 
+          <button
+            type="button"
+            onClick={() => navigate("/settings")}
+            className="grid h-10 w-10 place-items-center rounded-full border border-border bg-background hover:bg-muted transition-colors"
+            aria-label="Settings"
+          >
+            <Settings className="h-5 w-5 text-foreground" />
+          </button>
         </div>
       </div>
     </header>

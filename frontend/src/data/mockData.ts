@@ -53,6 +53,39 @@ export const featuredPlaylists: Album[] = [
   { id: 'p4', title: 'Chill Beats', artist: 'Curated', coverUrl: 'https://images.unsplash.com/photo-1483412033650-1015ddeb83d1?w=400&h=400&fit=crop', year: 2024 },
 ];
 
+export const HOME_USER_NAME = "Melissa";
+
+export interface UsageStats {
+  avgHours: string;
+  typicalTime: string;
+  topGenres: string[];
+  topArtists: string[];
+}
+
+export const usageStats: UsageStats = {
+  avgHours: "1 hr",
+  typicalTime: "at night",
+  topGenres: ["Indie rock", "Pop", "Punk rock"],
+  topArtists: ["Wet Leg", "Ramones", "The Wallows"],
+};
+
+/** Recently played albums (reference: Ramones, Moisturiser/Wet Leg, Models/The Wallows) */
+export const recentlyPlayed: Album[] = [
+  { id: 'rp1', title: 'Ramones', artist: 'Ramones', coverUrl: 'https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?w=400&h=400&fit=crop', year: 1976 },
+  { id: 'rp2', title: 'Moisturiser', artist: 'Wet Leg', coverUrl: 'https://images.unsplash.com/photo-1571330735066-03aaa9429d89?w=400&h=400&fit=crop', year: 2022 },
+  { id: 'rp3', title: 'Models', artist: 'The Wallows', coverUrl: 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=400&h=400&fit=crop', year: 2024 },
+  { id: 'rp4', title: 'Electric Dreams', artist: 'Voltage', coverUrl: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400&h=400&fit=crop', year: 2023 },
+  { id: 'rp5', title: 'Urban Poetry', artist: 'Street Echo', coverUrl: 'https://images.unsplash.com/photo-1571330735066-03aaa9429d89?w=400&h=400&fit=crop', year: 2024 },
+];
+
+/** Recommended for you */
+export const recommendedForYou: Album[] = [
+  { id: 'rec1', title: 'Ramones', artist: 'Ramones', coverUrl: 'https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?w=400&h=400&fit=crop', year: 1976 },
+  { id: 'rec2', title: 'Moisturiser', artist: 'Wet Leg', coverUrl: 'https://images.unsplash.com/photo-1571330735066-03aaa9429d89?w=400&h=400&fit=crop', year: 2022 },
+  { id: 'rec3', title: 'Models', artist: 'The Wallows', coverUrl: 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=400&h=400&fit=crop', year: 2024 },
+  ...albums.slice(0, 5),
+];
+
 export const currentTrack: Track = {
   id: 't1',
   title: 'Midnight Drive',

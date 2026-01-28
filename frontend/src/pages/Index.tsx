@@ -1,9 +1,12 @@
 import { useRef } from "react";
-import { Link } from "react-router-dom";
 import { AlbumCard } from "@/components/AlbumCard";
-import { SectionHeader } from "@/components/SectionHeader";
-import { albums, featuredPlaylists } from "@/data/mockData";
-import { Play, TrendingUp, ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  recentlyPlayed,
+  recommendedForYou,
+  usageStats,
+  HOME_USER_NAME,
+} from "@/data/mockData";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
 type DragState = {
   isDown: boolean;
@@ -78,110 +81,95 @@ function scrollRow(ref: React.RefObject<HTMLDivElement>, direction: "left" | "ri
   });
 }
 
-const Index = () => {
-  const madeForYouDrag = useDragScroll<HTMLDivElement>();
-  const newReleasesDrag = useDragScroll<HTMLDivElement>();
-  const popularAlbumsDrag = useDragScroll<HTMLDivElement>();
+const scrollerClassName = [
+  "-mt-2 overflow-x-auto scroll-smooth cursor-grab active:cursor-grabbing pb-2",
+  "[scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden",
+  "overscroll-x-contain touch-pan-x",
+].join(" ");
 
-  const scrollerClassName = [
-    "-mt-2",
-    "overflow-x-auto",
-    "scroll-smooth",
-    "cursor-grab active:cursor-grabbing",
-    "pb-2",
-    "[scrollbar-width:none]",
-    "[-ms-overflow-style:none]",
-    "[&::-webkit-scrollbar]:hidden",
-    "overscroll-x-contain",
-    "touch-pan-x",
-  ].join(" ");
-
-  const ArrowButtons = ({ targetRef }: { targetRef: React.RefObject<HTMLDivElement> }) => (
+function ArrowButtons({ targetRef }: { targetRef: React.RefObject<HTMLDivElement> }) {
+  return (
     <div className="flex items-center gap-2">
       <button
         type="button"
         onClick={() => scrollRow(targetRef, "left")}
-        className="h-9 w-9 rounded-full border border-border bg-background/70 hover:bg-accent transition-colors grid place-items-center"
+        className="grid h-9 w-9 place-items-center rounded-full border border-border bg-muted/50 text-foreground transition hover:bg-muted"
+        aria-label="Scroll left"
       >
-        <ChevronLeft className="w-5 h-5" />
+        <ChevronLeft className="h-5 w-5" />
       </button>
-
       <button
         type="button"
         onClick={() => scrollRow(targetRef, "right")}
-        className="h-9 w-9 rounded-full border border-border bg-background/70 hover:bg-accent transition-colors grid place-items-center"
+        className="grid h-9 w-9 place-items-center rounded-full border border-border bg-muted/50 text-foreground transition hover:bg-muted"
+        aria-label="Scroll right"
       >
-        <ChevronRight className="w-5 h-5" />
+        <ChevronRight className="h-5 w-5" />
       </button>
     </div>
   );
+}
+
+const Index = () => {
+  const recentlyDrag = useDragScroll<HTMLDivElement>();
+  const recommendedDrag = useDragScroll<HTMLDivElement>();
 
   return (
-    <div className="p-4 lg:p-8 space-y-10 animate-fade-in">
-      {/* Hero Section */}
-      <section className="relative rounded-2xl overflow-hidden bg-gradient-to-br from-secondary via-card to-accent p-6 md:p-10">
-        <div className="relative z-10 max-w-2xl">
+    <div className="space-y-10 animate-fade-in">
+      {/* Welcome */}
+      <section className="rounded-2xl bg-muted/40 px-6 py-6 md:px-8 md:py-8">
+        <h1 className="text-2xl font-bold tracking-tight text-foreground md:text-3xl">
+          Welcome back {HOME_USER_NAME},
+        </h1>
+        <p className="mt-2 max-w-2xl text-[15px] leading-snug text-muted-foreground">
+          A streaming experience built for discovering new voices, new scenes, and new sounds.
+          Explore new artists, scenes, and sounds before they break through.
+        </p>
+      </section>
 
-          <div className="relative">
-            <h1 className="text-3xl md:text-5xl font-bold leading-[1.05]">
-              Not what’s popular, but what’s next.
-            </h1>
-
-            <div className="pointer-events-none absolute left-0 top-10 md:top-14 text-5xl md:text-7xl font-bold text-gradient opacity-10 select-none">
-              Favorite Sound
-            </div>
-          </div>
-
-          <p className="text-muted-foreground max-w-md mt-2 leading-snug">
-            A streaming experience built for discovering new voices, new scenes, and new sounds.
-            Explore new artists, scenes, and sounds before they break through.
+      {/* Stats cards */}
+      <section className="grid gap-4 md:grid-cols-2">
+        <div className="rounded-2xl bg-muted/40 px-6 py-5">
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+            Your daily usage pattern
+          </h3>
+          <p className="mt-2 text-[15px] text-foreground">
+            On average, you have spent {usageStats.avgHours} on Offtrack
           </p>
-
-          {/* UPDATED CTA */}
-          <Link
-            to="/recommendations"
-            className="inline-flex items-center gap-2 px-6 py-3 mt-6 bg-primary text-primary-foreground rounded-full font-semibold hover:scale-105 transition-transform"
-          >
-            <Play className="w-5 h-5" />
-            Recommend Me Something
-          </Link>
+          <p className="mt-1 text-[15px] text-foreground">
+            You typically use Offtrack {usageStats.typicalTime}.
+          </p>
         </div>
-
-        <div className="absolute right-0 top-0 w-1/2 h-full opacity-20">
-          <div className="absolute right-10 top-10 w-32 h-32 rounded-full bg-primary/20 blur-3xl" />
-          <div className="absolute right-32 bottom-10 w-48 h-48 rounded-full bg-accent/30 blur-3xl" />
-        </div>
-      </section>
-
-      {/* Featured Playlists */}
-      <section>
-        <div className="flex items-end justify-between gap-4">
-          <SectionHeader title="Made For You" subtitle="Playlists curated based on your taste" />
-          <ArrowButtons targetRef={madeForYouDrag.ref} />
-        </div>
-
-        <div ref={madeForYouDrag.ref} {...madeForYouDrag} className={scrollerClassName}>
-          <div className="flex gap-4 snap-x snap-mandatory pr-2">
-            {featuredPlaylists.map((playlist) => (
-              <div key={playlist.id} className="snap-start shrink-0 w-[170px] sm:w-[190px] md:w-[210px]">
-                <AlbumCard album={playlist} />
-              </div>
-            ))}
-          </div>
+        <div className="rounded-2xl bg-muted/40 px-6 py-5">
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+            Most streamed genres for you are currently…
+          </h3>
+          <p className="mt-2 text-[15px] text-foreground">
+            {usageStats.topGenres.join(", ")}
+          </p>
+          <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+            Most streamed musicians for you are currently…
+          </h3>
+          <p className="mt-2 text-[15px] text-foreground">
+            {usageStats.topArtists.join(", ")}
+          </p>
         </div>
       </section>
 
-      {/* New Releases */}
+      {/* Recently played */}
       <section>
-        <div className="flex items-end justify-between gap-4">
-          <SectionHeader title="New Releases" subtitle="Fresh music from your favorite artists" />
-          <ArrowButtons targetRef={newReleasesDrag.ref} />
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <h2 className="text-xl font-bold text-foreground md:text-2xl">Recently played</h2>
+          <ArrowButtons targetRef={recentlyDrag.ref} />
         </div>
-
-        <div ref={newReleasesDrag.ref} {...newReleasesDrag} className={scrollerClassName}>
-          <div className="flex gap-4 snap-x snap-mandatory pr-2">
-            {albums.slice(0, 6).map((album) => (
-              <div key={album.id} className="snap-start shrink-0 w-[170px] sm:w-[190px] md:w-[210px]">
+        <div
+          ref={recentlyDrag.ref}
+          {...recentlyDrag}
+          className={scrollerClassName}
+        >
+          <div className="flex gap-4 pr-2">
+            {recentlyPlayed.map((album) => (
+              <div key={album.id} className="w-[170px] shrink-0 sm:w-[190px] md:w-[210px]">
                 <AlbumCard album={album} />
               </div>
             ))}
@@ -189,17 +177,20 @@ const Index = () => {
         </div>
       </section>
 
-      {/* Popular Albums */}
+      {/* Recommended for you */}
       <section>
-        <div className="flex items-end justify-between gap-4">
-          <SectionHeader title="Popular Albums" subtitle="What everyone's listening to right now" />
-          <ArrowButtons targetRef={popularAlbumsDrag.ref} />
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <h2 className="text-xl font-bold text-foreground md:text-2xl">Recommended for you</h2>
+          <ArrowButtons targetRef={recommendedDrag.ref} />
         </div>
-
-        <div ref={popularAlbumsDrag.ref} {...popularAlbumsDrag} className={scrollerClassName}>
-          <div className="flex gap-4 snap-x snap-mandatory pr-2">
-            {albums.slice(2, 8).map((album) => (
-              <div key={album.id} className="snap-start shrink-0 w-[170px] sm:w-[190px] md:w-[210px]">
+        <div
+          ref={recommendedDrag.ref}
+          {...recommendedDrag}
+          className={scrollerClassName}
+        >
+          <div className="flex gap-4 pr-2">
+            {recommendedForYou.map((album) => (
+              <div key={album.id} className="w-[170px] shrink-0 sm:w-[190px] md:w-[210px]">
                 <AlbumCard album={album} />
               </div>
             ))}

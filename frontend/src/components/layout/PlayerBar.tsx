@@ -13,7 +13,6 @@ import {
   Mic2,
   Airplay,
   Music,
-  Minimize2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { currentTrack } from "@/data/mockData";
@@ -44,14 +43,12 @@ function clamp(n: number, min: number, max: number) {
 export const PlayerBar = () => {
   const [isPlaying, setIsPlaying] = useState(false);
 
-  // 0..100
   const [progress, setProgress] = useState<number[]>([35]);
   const [volume, setVolume] = useState<number[]>([75]);
 
   const [isLiked, setIsLiked] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  const [expandedPlayer, setExpandedPlayer] = useState(false);
 
-  // UI toggles
   const [shuffleOn, setShuffleOn] = useState(false);
   const [repeatMode, setRepeatMode] = useState<RepeatMode>("off");
 
@@ -59,18 +56,22 @@ export const PlayerBar = () => {
   const [queueOpen, setQueueOpen] = useState(false);
   const [airplayOn, setAirplayOn] = useState(false);
 
-  // ✅ NEW: minimize/expand the entire player bar
-  const [barMinimized, setBarMinimized] = useState(false);
+  // ✅ bar collapsed/expanded (matches reference)
+  const [barExpanded, setBarExpanded] = useState(false);
 
-  // ✅ NEW: draggable pink music note (position in px)
+  // ✅ draggable unit position (the DOT anchors the unit)
+  const DOT = 64; // px
+  const GAP = 18; // px gap between bar and dot
   const [notePos, setNotePos] = useState<{ x: number; y: number }>(() => {
-    // default: right-ish, mid-ish
     if (typeof window === "undefined") return { x: 0, y: 0 };
-    return { x: window.innerWidth - 120, y: window.innerHeight - 280 };
+    // place dot near lower-right-ish
+    return { x: window.innerWidth - 120, y: window.innerHeight - 220 };
   });
 
   const draggingRef = useRef(false);
-  const dragOffsetRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
+  const movedRef = useRef(false);
+  const startPointerRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const startPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
   const hidePanelsTimerRef = useRef<number | null>(null);
   const PANEL_AUTO_HIDE_MS = 3000;
@@ -100,32 +101,6 @@ export const PlayerBar = () => {
     };
   }, [lyricsOn, queueOpen, airplayOn]);
 
-  useEffect(() => {
-    const onMove = (e: PointerEvent) => {
-      if (!draggingRef.current) return;
-
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-
-      // note size ~64px
-      const nextX = clamp(e.clientX - dragOffsetRef.current.dx, 12, vw - 76);
-      const nextY = clamp(e.clientY - dragOffsetRef.current.dy, 12, vh - 76);
-
-      setNotePos({ x: nextX, y: nextY });
-    };
-
-    const onUp = () => {
-      draggingRef.current = false;
-    };
-
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    return () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-  }, []);
-
   const elapsed = useMemo(
     () => formatTimeFromPercent(currentTrack.duration, progress[0] ?? 0),
     [progress]
@@ -140,66 +115,92 @@ export const PlayerBar = () => {
   const activeIconClass = "text-black";
   const inactiveIconClass = "text-black/60 hover:text-black";
 
+  // ✅ derived: bar width depending on screen size (like reference)
+  const barWidth = useMemo(() => {
+    if (typeof window === "undefined") return 980;
+    const w = window.innerWidth;
+    // keep some margin, but allow big bar on desktop
+    return clamp(w - 220, 680, 1120);
+  }, []);
+
+  // ✅ Compute the unit's left/top from dot position
+  // The unit container will be placed so the DOT is at (notePos.x, notePos.y)
+  // and the bar expands to the LEFT of the dot.
+  const unitLeft = barExpanded ? notePos.x - (barWidth + GAP) : notePos.x; // only dot visible when collapsed
+  const unitTop = notePos.y;
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (!draggingRef.current) return;
+
+      const dx = e.clientX - startPointerRef.current.x;
+      const dy = e.clientY - startPointerRef.current.y;
+
+      // treat as drag if moved > a few px (so click still works)
+      if (Math.abs(dx) + Math.abs(dy) > 6) movedRef.current = true;
+
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+
+      // clamp DOT within viewport; since DOT is the anchor, clamp using DOT size
+      const nextX = clamp(startPosRef.current.x + dx, 12, vw - (DOT + 12));
+      const nextY = clamp(startPosRef.current.y + dy, 12, vh - (DOT + 12));
+
+      setNotePos({ x: nextX, y: nextY });
+    };
+
+    const onUp = () => {
+      draggingRef.current = false;
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [DOT]);
+
   return (
     <>
-      {/* ✅ Draggable pink music-note toggle */}
+      {/* ✅ One fixed unit: bar expands from the dot (attached like reference) */}
       <div
-        className="fixed z-[60]"
-        style={{ left: notePos.x, top: notePos.y }}
+        className="fixed z-[60] pointer-events-none"
+        style={{ left: unitLeft, top: unitTop }}
       >
-        <button
-          type="button"
-          onClick={() => setBarMinimized((v) => !v)}
-          onPointerDown={(e) => {
-            // allow drag + click
-            draggingRef.current = true;
-            const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-            dragOffsetRef.current = { dx: e.clientX - rect.left, dy: e.clientY - rect.top };
-            (e.currentTarget as HTMLButtonElement).setPointerCapture?.(e.pointerId);
-          }}
-          className={[
-            "h-16 w-16 rounded-full",
-            "bg-[#ff8f95] text-black",
-            "shadow-[0_18px_50px_rgba(0,0,0,0.25)]",
-            "grid place-items-center",
-            "hover:scale-[1.02] active:scale-[0.98] transition",
-            "cursor-grab active:cursor-grabbing",
-          ].join(" ")}
-          aria-label={barMinimized ? "Expand player bar" : "Minimize player bar"}
-          title={barMinimized ? "Expand player" : "Minimize player"}
-        >
-          <Music className="h-7 w-7" />
-        </button>
-      </div>
-
-      {/* ✅ Player bar (hidden when minimized) */}
-      {!barMinimized && (
-        <div className="fixed bottom-0 left-0 right-0 z-50 pointer-events-none">
-          <div className="pointer-events-auto mx-auto w-[min(1100px,calc(100%-24px))] pb-4">
-            {/* Pink “new” bar look */}
-            <div className="rounded-[30px] border border-black/10 bg-[#ff8f95]/85 backdrop-blur-xl shadow-lg">
-              <div className="px-4 py-3 md:px-5">
-                <div className="flex items-center gap-4">
-                  {/* LEFT */}
-                  <div className="flex items-center gap-3 min-w-[220px] w-[28%]">
+        <div className="relative pointer-events-none">
+          {/* BAR (expands left of dot) */}
+          <div
+            className={[
+              "absolute right-[calc(64px+18px)] top-1/2 -translate-y-1/2",
+              "pointer-events-auto",
+              "transition-all duration-300 ease-out",
+              barExpanded ? "opacity-100 scale-100" : "opacity-0 scale-95 pointer-events-none",
+            ].join(" ")}
+            style={{ width: barWidth }}
+          >
+            <div className="rounded-[40px] border border-black/10 bg-[#ff8f95]/85 backdrop-blur-xl shadow-lg">
+              <div className="px-6 py-4">
+                <div className="flex items-center gap-5">
+                  {/* LEFT: cover + title */}
+                  <div className="flex items-center gap-4 min-w-[240px] w-[30%]">
                     <img
                       src={currentTrack.coverUrl}
                       alt={currentTrack.title}
-                      className="h-12 w-12 rounded-xl object-cover border border-black/10"
+                      className="h-14 w-14 rounded-2xl object-cover border border-black/10"
                     />
 
                     <div className="min-w-0">
-                      <p className="text-sm font-semibold text-black truncate">
+                      <p className="text-base font-semibold text-black truncate">
                         {currentTrack.title}
                       </p>
-                      <p className="text-xs text-black/70 truncate">
-                        {currentTrack.artist}
-                      </p>
+                      <p className="text-sm text-black/70 truncate">{currentTrack.artist}</p>
                     </div>
 
                     <button
                       onClick={() => setIsLiked((v) => !v)}
-                      className="ml-1 grid h-9 w-9 place-items-center rounded-xl hover:bg-black/10"
+                      className="ml-1 grid h-10 w-10 place-items-center rounded-2xl hover:bg-black/10"
                       aria-label={isLiked ? "Unlike" : "Like"}
                       title={isLiked ? "Unlike" : "Like"}
                       type="button"
@@ -207,14 +208,14 @@ export const PlayerBar = () => {
                       <Heart
                         className={
                           isLiked
-                            ? "h-4 w-4 fill-black text-black"
-                            : "h-4 w-4 text-black/70"
+                            ? "h-5 w-5 fill-black text-black"
+                            : "h-5 w-5 text-black/70"
                         }
                       />
                     </button>
                   </div>
 
-                  {/* CENTER */}
+                  {/* CENTER: controls + progress */}
                   <div className="flex-1">
                     <div className="flex items-center justify-center gap-2 md:gap-3">
                       <button
@@ -225,9 +226,7 @@ export const PlayerBar = () => {
                         onClick={() => setShuffleOn((v) => !v)}
                       >
                         <Shuffle
-                          className={`h-4 w-4 ${
-                            shuffleOn ? activeIconClass : inactiveIconClass
-                          }`}
+                          className={`h-4 w-4 ${shuffleOn ? activeIconClass : inactiveIconClass}`}
                         />
                       </button>
 
@@ -242,7 +241,7 @@ export const PlayerBar = () => {
 
                       <button
                         onClick={() => setIsPlaying((v) => !v)}
-                        className="grid h-11 w-11 place-items-center rounded-full border border-black/10 bg-black text-white hover:bg-black/90 active:scale-[0.99]"
+                        className="grid h-12 w-12 place-items-center rounded-full border border-black/10 bg-black text-white hover:bg-black/90"
                         type="button"
                         aria-label={isPlaying ? "Pause" : "Play"}
                         title={isPlaying ? "Pause" : "Play"}
@@ -284,7 +283,7 @@ export const PlayerBar = () => {
                       </button>
                     </div>
 
-                    <div className="mt-2 flex items-center gap-3">
+                    <div className="mt-3 flex items-center gap-3">
                       <span className="w-10 text-right text-[11px] text-black/60 tabular-nums">
                         {elapsed}
                       </span>
@@ -303,8 +302,8 @@ export const PlayerBar = () => {
                     </div>
                   </div>
 
-                  {/* RIGHT */}
-                  <div className="flex items-center justify-end gap-1 min-w-[240px] w-[28%]">
+                  {/* RIGHT: panels + volume + expand */}
+                  <div className="flex items-center justify-end gap-1 min-w-[260px] w-[30%]">
                     <button
                       className="grid h-9 w-9 place-items-center rounded-xl hover:bg-black/10"
                       type="button"
@@ -312,11 +311,7 @@ export const PlayerBar = () => {
                       title="Lyrics"
                       onClick={() => setLyricsOn((v) => !v)}
                     >
-                      <Mic2
-                        className={`h-4 w-4 ${
-                          lyricsOn ? activeIconClass : inactiveIconClass
-                        }`}
-                      />
+                      <Mic2 className={`h-4 w-4 ${lyricsOn ? activeIconClass : inactiveIconClass}`} />
                     </button>
 
                     <button
@@ -327,9 +322,7 @@ export const PlayerBar = () => {
                       onClick={() => setQueueOpen((v) => !v)}
                     >
                       <ListMusic
-                        className={`h-4 w-4 ${
-                          queueOpen ? activeIconClass : inactiveIconClass
-                        }`}
+                        className={`h-4 w-4 ${queueOpen ? activeIconClass : inactiveIconClass}`}
                       />
                     </button>
 
@@ -341,9 +334,7 @@ export const PlayerBar = () => {
                       onClick={() => setAirplayOn((v) => !v)}
                     >
                       <Airplay
-                        className={`h-4 w-4 ${
-                          airplayOn ? activeIconClass : inactiveIconClass
-                        }`}
+                        className={`h-4 w-4 ${airplayOn ? activeIconClass : inactiveIconClass}`}
                       />
                     </button>
 
@@ -366,21 +357,10 @@ export const PlayerBar = () => {
                       onClick={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        setExpanded(true);
+                        setExpandedPlayer(true);
                       }}
                     >
                       <Maximize2 className="h-4 w-4 text-black/80" />
-                    </button>
-
-                    {/* Optional explicit minimize button (in addition to the pink note) */}
-                    <button
-                      className="ml-1 grid h-9 w-9 place-items-center rounded-xl hover:bg-black/10"
-                      type="button"
-                      aria-label="Minimize player bar"
-                      title="Minimize"
-                      onClick={() => setBarMinimized(true)}
-                    >
-                      <Minimize2 className="h-4 w-4 text-black/80" />
                     </button>
                   </div>
                 </div>
@@ -392,13 +372,11 @@ export const PlayerBar = () => {
                         Lyrics panel (UI) — wire this to your lyrics source later.
                       </div>
                     )}
-
                     {queueOpen && (
                       <div className="rounded-2xl border border-black/10 bg-white/60 px-4 py-3 text-sm text-black/70">
                         Queue panel (UI) — show upcoming tracks here later.
                       </div>
                     )}
-
                     {airplayOn && (
                       <div className="rounded-2xl border border-black/10 bg-white/60 px-4 py-3 text-sm text-black/70">
                         Devices panel (UI) — choose output device here later.
@@ -409,12 +387,45 @@ export const PlayerBar = () => {
               </div>
             </div>
           </div>
+
+          {/* DOT (always visible, attached to the right end of the bar when expanded) */}
+          <div className="relative pointer-events-auto">
+            <button
+              type="button"
+              onClick={() => {
+                // only toggle if this was a click, not a drag
+                if (!movedRef.current) setBarExpanded((v) => !v);
+                movedRef.current = false;
+              }}
+              onPointerDown={(e) => {
+                draggingRef.current = true;
+                movedRef.current = false;
+
+                startPointerRef.current = { x: e.clientX, y: e.clientY };
+                startPosRef.current = { ...notePos };
+
+                (e.currentTarget as HTMLButtonElement).setPointerCapture?.(e.pointerId);
+              }}
+              className={[
+                "h-16 w-16 rounded-full",
+                "bg-[#ff8f95] text-black",
+                "shadow-[0_18px_50px_rgba(0,0,0,0.25)]",
+                "grid place-items-center",
+                "hover:scale-[1.02] active:scale-[0.98] transition",
+                "cursor-grab active:cursor-grabbing",
+              ].join(" ")}
+              aria-label={barExpanded ? "Minimize player bar" : "Expand player bar"}
+              title={barExpanded ? "Minimize player" : "Expand player"}
+            >
+              <Music className="h-7 w-7" />
+            </button>
+          </div>
         </div>
-      )}
+      </div>
 
       <ExpandedPlayer
-        open={expanded}
-        onClose={() => setExpanded(false)}
+        open={expandedPlayer}
+        onClose={() => setExpandedPlayer(false)}
         title={currentTrack.title}
         artist={currentTrack.artist}
         coverUrl={currentTrack.coverUrl}

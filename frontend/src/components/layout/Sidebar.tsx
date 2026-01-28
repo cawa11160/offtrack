@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { NavLink } from "react-router-dom";
-import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
 type SidebarItem = { to: string; label: string; icon?: React.ReactNode };
 
@@ -8,7 +8,7 @@ type SidebarProps = {
   items?: SidebarItem[];
 
   initialWidth?: number;
-  minWidth?: number; // collapsed width
+  minWidth?: number;
   maxWidth?: number;
 
   width?: number;
@@ -21,11 +21,97 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+function degToRad(d: number) {
+  return (d * Math.PI) / 180;
+}
+
+/**
+ * Places content on a circle with center (cx, cy) and radius r.
+ * angleDeg: 0° is to the right, 90° is down (screen coords),
+ * but we use standard math with +y down by flipping sin usage accordingly.
+ *
+ * Tangent rotation: angleDeg + 90 makes text follow the circle.
+ */
+function CurvedLabel({
+  cx,
+  cy,
+  r,
+  angleDeg,
+  children,
+  className = "",
+  align = "left",
+  active = false,
+  asLink,
+  title,
+  onClick,
+}: {
+  cx: number;
+  cy: number;
+  r: number;
+  angleDeg: number;
+  children: React.ReactNode;
+  className?: string;
+  align?: "left" | "center" | "right";
+  active?: boolean;
+  asLink?: { to: string };
+  title?: string;
+  onClick?: () => void;
+}) {
+  // screen coordinates: x = cx + r*cos, y = cy + r*sin
+  const a = degToRad(angleDeg);
+  const x = cx + r * Math.cos(a);
+  const y = cy + r * Math.sin(a);
+
+  // Tangent rotation
+  const rot = angleDeg + 90;
+
+  const alignClass =
+    align === "center" ? "-translate-x-1/2" : align === "right" ? "-translate-x-full" : "";
+
+  const base = [
+    "absolute select-none whitespace-nowrap",
+    alignClass,
+    "origin-left",
+    "transition",
+    active ? "bg-white/10" : "hover:bg-white/10",
+    "rounded-full",
+    "px-4 py-2",
+    className,
+  ].join(" ");
+
+  const style: React.CSSProperties = {
+    left: x,
+    top: y,
+    transform: `rotate(${rot}deg)`,
+    // NOTE: we rotate the pill; inside text stays aligned.
+  };
+
+  const inner = (
+    <div className={base} style={style} title={title} onClick={onClick}>
+      {children}
+    </div>
+  );
+
+  if (asLink) {
+    return (
+      <NavLink
+        to={asLink.to}
+        className="contents"
+        // prevents NavLink default styling; we style the inner pill
+      >
+        {inner}
+      </NavLink>
+    );
+  }
+
+  return inner;
+}
+
 export function Sidebar({
   items,
   initialWidth = 360,
   minWidth = 96,
-  maxWidth = 420,
+  maxWidth = 440,
 
   width: controlledWidth,
   collapsed,
@@ -56,118 +142,200 @@ export function Sidebar({
     onWidthChange?.(v);
   };
 
+  /**
+   * Circle geometry:
+   * We draw a big circle and place labels at angles on the visible arc.
+   *
+   * You can tune:
+   * - circleRadius
+   * - circleLeft (push further left to get a thinner arc)
+   */
+  const circleRadius = isCollapsed ? 520 : 620;
+  const circleDiameter = circleRadius * 2;
+
+  // Push the circle left so only a “semi-circle” is visible
+  const circleLeft = isCollapsed ? -circleRadius + 36 : -circleRadius + 60;
+
+  // Circle center in the sidebar coordinate space
+  const cx = circleLeft + circleRadius;
+  const cy = 0.5 * 1000; // we'll use a relative container height; actual uses 100vh below
+
+  // We need cy in pixels. We'll compute using CSS: container is 100vh.
+  // We'll instead position using percentages by measuring with CSS?
+  // Simple approach: use a wrapper with height: 100vh and compute cy in JS via CSS variables is overkill.
+  // So: place labels using top based on actual viewport height via CSS calc:
+  // We do that by letting cy = "50vh" in CSS is not possible in JS geometry.
+  //
+  // Practical solution: use a positioning wrapper that sets a CSS var and uses translate.
+  // We'll do a different approach: do the math in a "vh-like" space by assuming 1000px,
+  // but keep the circle centered via translateY(-50%) so the arc stays centered.
+  //
+  // ✅ Easiest reliable: render a relative wrapper and absolutely position the circle at 50% with translateY.
+  // Then compute label positions relative to that circle wrapper, not viewport.
+
+  // Library list for the arc
+  const playlists = ["Playlist name 1", "Playlist name 2", "Playlist name 3", "Playlist name 4"];
+
   return (
-    <aside className="relative h-screen w-full" aria-label="Sidebar">
-      {/* Big-circle geometry: we render a HUGE circle and keep only the left chunk visible */}
-      <div className="relative h-full w-full overflow-hidden">
-        {/* The giant circle */}
+    <aside className="relative h-screen w-full overflow-hidden" aria-label="Sidebar">
+      {/* This wrapper defines our coordinate space */}
+      <div className="relative h-full w-full">
+        {/* Big circle */}
         <div
           className="absolute top-1/2 -translate-y-1/2 bg-black"
           style={{
-            // circle pushed left so the right edge forms the arc you see
-            width: isCollapsed ? 740 : 980,
-            height: isCollapsed ? 740 : 980,
+            width: circleDiameter,
+            height: circleDiameter,
             borderRadius: 9999,
-            left: isCollapsed ? -630 : -820,
+            left: circleLeft,
           }}
         />
 
-        {/* Content column inside the curve (matches reference spacing) */}
+        {/* Labels placed on the circle - we place them within another wrapper that shares the same circle positioning */}
         <div
-          className={[
-            "relative h-full text-white",
-            isCollapsed ? "pl-6 pr-4 py-7" : "pl-16 pr-8 py-8",
-          ].join(" ")}
+          className="absolute top-1/2 -translate-y-1/2"
+          style={{
+            left: circleLeft,
+            width: circleDiameter,
+            height: circleDiameter,
+          }}
         >
-          {/* Brand */}
-          <div className="flex items-center gap-3">
-            <div className="text-3xl font-semibold tracking-tight">Offtrack</div>
-          </div>
-
-          {/* Library */}
-          <div className={["mt-12", isCollapsed ? "opacity-0 pointer-events-none" : ""].join(" ")}>
-            <div className="text-white/70 text-lg font-semibold">Your library</div>
-
-            <div className="mt-10 space-y-10 text-2xl font-medium tracking-tight">
-              <div>Playlist name 1</div>
-              <div>Playlist name 2</div>
-              <div>Playlist name 3</div>
-              <div>Playlist name 4</div>
-
-              <button
-                type="button"
-                className="flex items-center gap-5 text-2xl font-medium hover:text-white/90 transition"
-              >
-                <span className="text-3xl leading-none">+</span>
-                <span>New playlist</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Pages (reference is text-only, stacked) */}
-          <div
-            className={[
-              "absolute left-0",
-              isCollapsed ? "bottom-14 pl-6" : "bottom-16 pl-16",
-            ].join(" ")}
-          >
-            <div className={["text-white/70 font-semibold", isCollapsed ? "text-base" : "text-xl"].join(" ")}>
-              Pages
-            </div>
-
-            <nav className="mt-6">
-              <ul className={["space-y-7", isCollapsed ? "text-base" : "text-2xl"].join(" ")}>
-                {navItems.map((item) => (
-                  <li key={item.to}>
-                    <NavLink
-                      to={item.to}
-                      className={({ isActive }) =>
-                        [
-                          "block w-fit",
-                          "rounded-full",
-                          "px-6 py-3",
-                          "transition",
-                          isActive ? "bg-white/10" : "hover:bg-white/10",
-                          isCollapsed ? "px-0 py-0 rounded-none hover:bg-transparent" : "",
-                        ].join(" ")
-                      }
-                      title={item.label}
-                    >
-                      {isCollapsed ? "•" : item.label}
-                    </NavLink>
-                  </li>
-                ))}
-              </ul>
-            </nav>
-          </div>
-
-          {/* Optional resize strip (like before), only when expanded */}
+          {/* Brand (slightly inside the arc) */}
           {!isCollapsed && (
-            <div
-              className="absolute right-0 top-0 h-full w-2 cursor-col-resize"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                const startX = e.clientX;
-                const startW = width;
+            <CurvedLabel
+              cx={circleRadius}
+              cy={circleRadius}
+              r={circleRadius - 90}
+              angleDeg={210}
+              className="text-2xl font-semibold tracking-tight bg-transparent hover:bg-transparent px-0 py-0"
+              align="left"
+            >
+              Offtrack
+            </CurvedLabel>
+          )}
 
-                const onMove = (ev: MouseEvent) => {
-                  const dx = ev.clientX - startX;
-                  setExpandedWidth(startW + dx);
-                };
-                const onUp = () => {
-                  window.removeEventListener("mousemove", onMove);
-                  window.removeEventListener("mouseup", onUp);
-                };
+          {/* “Your library” header */}
+          {!isCollapsed && (
+            <CurvedLabel
+              cx={circleRadius}
+              cy={circleRadius}
+              r={circleRadius - 120}
+              angleDeg={235}
+              className="text-lg font-semibold text-white/70 bg-transparent hover:bg-transparent px-0 py-0"
+              align="left"
+            >
+              Your library
+            </CurvedLabel>
+          )}
 
-                window.addEventListener("mousemove", onMove);
-                window.addEventListener("mouseup", onUp);
+          {/* Playlists along curve */}
+          {!isCollapsed &&
+            playlists.map((p, idx) => (
+              <CurvedLabel
+                key={p}
+                cx={circleRadius}
+                cy={circleRadius}
+                r={circleRadius - 160}
+                // spread them downward along the arc
+                angleDeg={255 + idx * 14}
+                className="text-2xl font-medium tracking-tight"
+                align="left"
+              >
+                {p}
+              </CurvedLabel>
+            ))}
+
+          {/* + New playlist */}
+          {!isCollapsed && (
+            <CurvedLabel
+              cx={circleRadius}
+              cy={circleRadius}
+              r={circleRadius - 160}
+              angleDeg={255 + playlists.length * 14 + 14}
+              className="text-2xl font-medium tracking-tight"
+              align="left"
+              onClick={() => {
+                // hook up later if needed
               }}
-              aria-hidden="true"
-            />
+            >
+              <span className="mr-3 text-3xl leading-none">+</span>
+              New playlist
+            </CurvedLabel>
+          )}
+
+          {/* Pages header */}
+          {!isCollapsed && (
+            <CurvedLabel
+              cx={circleRadius}
+              cy={circleRadius}
+              r={circleRadius - 200}
+              angleDeg={300}
+              className="text-xl font-semibold text-white/70 bg-transparent hover:bg-transparent px-0 py-0"
+              align="left"
+            >
+              Pages
+            </CurvedLabel>
+          )}
+
+          {/* Pages links stacked along arc */}
+          {!isCollapsed &&
+            navItems.map((item, idx) => (
+              <NavLink key={item.to} to={item.to} className="contents">
+                {({ isActive }) => (
+                  <CurvedLabel
+                    cx={circleRadius}
+                    cy={circleRadius}
+                    r={circleRadius - 240}
+                    angleDeg={315 + idx * 10}
+                    className={[
+                      "text-2xl font-medium tracking-tight",
+                      isActive ? "bg-white/10" : "",
+                    ].join(" ")}
+                    align="left"
+                    active={isActive}
+                    asLink={{ to: item.to }}
+                    title={item.label}
+                  >
+                    {item.label}
+                  </CurvedLabel>
+                )}
+              </NavLink>
+            ))}
+
+          {/* Collapsed state: just show “Pages” dots on the arc */}
+          {isCollapsed && (
+            <>
+              <CurvedLabel
+                cx={circleRadius}
+                cy={circleRadius}
+                r={circleRadius - 210}
+                angleDeg={300}
+                className="text-white/70 text-base font-semibold bg-transparent hover:bg-transparent px-0 py-0"
+                align="left"
+              >
+                Pages
+              </CurvedLabel>
+
+              {navItems.slice(0, 6).map((it, i) => (
+                <CurvedLabel
+                  key={it.to}
+                  cx={circleRadius}
+                  cy={circleRadius}
+                  r={circleRadius - 250}
+                  angleDeg={320 + i * 10}
+                  className="text-white/80 text-xl bg-transparent hover:bg-transparent px-0 py-0"
+                  align="left"
+                  asLink={{ to: it.to }}
+                  title={it.label}
+                >
+                  •
+                </CurvedLabel>
+              ))}
+            </>
           )}
         </div>
 
-        {/* Toggle circle on the arc edge (matches reference placement) */}
+        {/* Toggle circle on arc edge */}
         <button
           type="button"
           onClick={toggle}
@@ -189,6 +357,31 @@ export function Sidebar({
             <ChevronLeft className="h-5 w-5 text-white" />
           )}
         </button>
+
+        {/* Optional resize handle (expanded only) */}
+        {!isCollapsed && (
+          <div
+            className="absolute right-0 top-0 h-full w-2 cursor-col-resize"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              const startX = e.clientX;
+              const startW = width;
+
+              const onMove = (ev: MouseEvent) => {
+                const dx = ev.clientX - startX;
+                setExpandedWidth(startW + dx);
+              };
+              const onUp = () => {
+                window.removeEventListener("mousemove", onMove);
+                window.removeEventListener("mouseup", onUp);
+              };
+
+              window.addEventListener("mousemove", onMove);
+              window.addEventListener("mouseup", onUp);
+            }}
+            aria-hidden="true"
+          />
+        )}
       </div>
     </aside>
   );

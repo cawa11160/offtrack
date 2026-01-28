@@ -36,7 +36,7 @@ export const Layout = ({ children }: LayoutProps) => {
   );
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background overflow-x-hidden">
       <div className="hidden md:flex min-h-screen">
         {/* Sidebar */}
         <div className="shrink-0" style={{ width: sidebarCollapsed ? 96 : sidebarWidth }}>
@@ -61,7 +61,9 @@ export const Layout = ({ children }: LayoutProps) => {
           />
 
           <main className="pb-[calc(var(--player-height)+60px)] md:pb-player">
-            {children}
+            <div className="mx-auto w-full max-w-[1200px] px-6 lg:px-10 py-6">
+              {children}
+            </div>
           </main>
         </div>
       </div>
@@ -73,7 +75,9 @@ export const Layout = ({ children }: LayoutProps) => {
           onNotificationsClick={() => setNotificationsOpen(true)}
           notificationsOpen={notificationsOpen}
         />
-        <main className="pb-[calc(var(--player-height)+60px)]">{children}</main>
+        <main className="pb-[calc(var(--player-height)+60px)]">
+          <div className="mx-auto w-full max-w-[1200px] px-4 py-5">{children}</div>
+        </main>
       </div>
 
       <div className="md:hidden">

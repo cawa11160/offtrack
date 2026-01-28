@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { ChevronRight, Plus, Music2 } from "lucide-react";
 
@@ -24,18 +24,14 @@ function degToRad(d: number) {
   return (d * Math.PI) / 180;
 }
 
-function polarToXY(cx: number, cy: number, r: number, angleDeg: number) {
+function polar(cx: number, cy: number, r: number, angleDeg: number) {
   const a = degToRad(angleDeg);
-  return {
-    x: cx + r * Math.cos(a),
-    y: cy + r * Math.sin(a),
-  };
+  return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
 }
 
 /**
- * Places a "pill" on a circle and rotates it tangentially.
- * - angleDeg: 0° points right, 90° points down (screen coords)
- * - tangent rotation is angleDeg + 90
+ * Places an element on a circle arc in SIDEBAR coordinate space,
+ * then rotates it tangentially so it “follows” the curve.
  */
 function ArcItem({
   cx,
@@ -43,10 +39,10 @@ function ArcItem({
   r,
   angleDeg,
   children,
-  className,
+  className = "",
   active = false,
-  onClick,
   title,
+  onClick,
 }: {
   cx: number;
   cy: number;
@@ -55,31 +51,29 @@ function ArcItem({
   children: React.ReactNode;
   className?: string;
   active?: boolean;
-  onClick?: () => void;
   title?: string;
+  onClick?: () => void;
 }) {
-  const { x, y } = polarToXY(cx, cy, r, angleDeg);
+  const { x, y } = polar(cx, cy, r, angleDeg);
   const rot = angleDeg + 90;
 
   return (
     <div
       className={[
-        "absolute",
+        "absolute whitespace-nowrap select-none",
         "origin-left",
-        "rounded-full",
-        "px-4 py-2",
-        "text-white",
-        "transition",
+        "rounded-full px-4 py-2",
+        "text-white transition",
         active ? "bg-white/10" : "hover:bg-white/10",
-        className ?? "",
+        className,
       ].join(" ")}
       style={{
         left: x,
         top: y,
         transform: `rotate(${rot}deg)`,
       }}
-      onClick={onClick}
       title={title}
+      onClick={onClick}
     >
       {children}
     </div>
@@ -104,12 +98,15 @@ export function Sidebar({
 
   const isCollapsed = typeof collapsed === "boolean" ? collapsed : width <= minWidth;
 
-  const navItems = useMemo(() => {
-    return (items?.length ? items : []).map((it) => ({
-      ...it,
-      to: it.to,
-    }));
-  }, [items]);
+  const navItems = useMemo(() => (items?.length ? items : []), [items]);
+
+  // ✅ We need viewport height to place items along the arc reliably
+  const [vh, setVh] = useState(() => (typeof window !== "undefined" ? window.innerHeight : 800));
+  useEffect(() => {
+    const onResize = () => setVh(window.innerHeight);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   const toggle = () => {
     const nextCollapsed = !isCollapsed;
@@ -130,60 +127,65 @@ export function Sidebar({
   };
 
   /**
-   * ✅ Bigger circle so labels are visible + easier to place on arc
-   * Tune these 3 knobs to match your screenshot:
-   * - radius (bigger = more gentle curve)
-   * - leftShift (more negative = circle moves left, thinner visible slice)
-   * - rText (distance from center to text)
+   * ✅ Bigger circle + correct center placement
+   *
+   * Place circle center OUTSIDE the sidebar to the left,
+   * so the visible right edge becomes the arc.
+   *
+   * TUNE:
+   * - radius: bigger = less aggressive curve + more room
+   * - cx: negative pushes center left
+   * - rText: where the text sits on the arc
    */
-  const radius = isCollapsed ? 520 : 680; // BIGGER than before
-  const diameter = radius * 2;
-  const leftShift = isCollapsed ? -radius + 40 : -radius + 70; // pushes circle off-screen
-  const rText = isCollapsed ? radius - 140 : radius - 190; // where text sits on arc
+  const radius = isCollapsed ? 650 : 820; // ✅ BIGGER
+  const cy = vh / 2;
 
-  // angles to lay out items down the arc (increase spacing by adding more degrees)
-  const angleBrand = 210;
-  const angleLibraryHeader = 235;
-  const anglePlaylistsStart = 255;
+  // Center is outside left edge; inset controls how “thick” the arc slice appears
+  const inset = isCollapsed ? 30 : 60;
+  const cx = -radius + inset;
+
+  const rText = isCollapsed ? radius - 170 : radius - 230;
+
+  // Angles (0° right, 90° down)
+  const angleBrand = 215;
+  const angleLibHeader = 238;
+  const anglePlaylistsStart = 258;
   const anglePlaylistsStep = 14;
-  const anglePagesHeader = 300;
-  const anglePagesStart = 315;
+
+  const anglePagesHeader = 302;
+  const anglePagesStart = 318;
   const anglePagesStep = 10;
 
   const playlists = ["Playlist name 1", "Playlist name 2", "Playlist name 3", "Playlist name 4"];
 
   return (
-    <aside className="relative h-screen" aria-label="Sidebar">
-      <div className="relative h-full w-full overflow-hidden">
-        {/* ✅ Real big circle (semi-circle look) */}
-        <div
-          className="absolute top-1/2 -translate-y-1/2 bg-black"
-          style={{
-            width: diameter,
-            height: diameter,
-            left: leftShift,
-            borderRadius: 9999,
-            boxShadow: "0 18px 60px rgba(0,0,0,0.25)",
-          }}
-        />
+    <aside className="relative h-screen w-full" aria-label="Sidebar">
+      <div className="relative h-full w-full">
+        {/* ✅ Circle layer is clipped */}
+        <div className="absolute inset-0 overflow-hidden">
+          <div
+            className="absolute bg-black"
+            style={{
+              width: radius * 2,
+              height: radius * 2,
+              left: cx - radius,
+              top: cy - radius,
+              borderRadius: 9999,
+              boxShadow: "0 18px 60px rgba(0,0,0,0.25)",
+            }}
+          />
+        </div>
 
-        {/* ✅ Arc-coordinate layer (same position/size as circle) */}
-        <div
-          className="absolute top-1/2 -translate-y-1/2"
-          style={{
-            left: leftShift,
-            width: diameter,
-            height: diameter,
-          }}
-        >
-          {/* center of circle in this layer is (radius, radius) */}
+        {/* ✅ Labels layer is NOT clipped so text stays visible */}
+        <div className="absolute inset-0 overflow-visible pointer-events-none">
+          {/* Brand */}
           {!isCollapsed && (
             <ArcItem
-              cx={radius}
-              cy={radius}
+              cx={cx}
+              cy={cy}
               r={rText}
               angleDeg={angleBrand}
-              className="bg-transparent hover:bg-transparent px-0 py-0 text-2xl font-semibold tracking-tight"
+              className="pointer-events-auto bg-transparent hover:bg-transparent px-0 py-0 text-2xl font-semibold tracking-tight"
             >
               <span className="inline-flex items-center gap-3">
                 <span className="grid h-9 w-9 place-items-center rounded-2xl bg-white/10">
@@ -194,14 +196,14 @@ export function Sidebar({
             </ArcItem>
           )}
 
-          {/* Library header */}
+          {/* Your library header */}
           {!isCollapsed && (
             <ArcItem
-              cx={radius}
-              cy={radius}
+              cx={cx}
+              cy={cy}
               r={rText}
-              angleDeg={angleLibraryHeader}
-              className="bg-transparent hover:bg-transparent px-0 py-0 text-lg font-semibold text-white/70"
+              angleDeg={angleLibHeader}
+              className="pointer-events-none bg-transparent hover:bg-transparent px-0 py-0 text-lg font-semibold text-white/70"
             >
               Your library
             </ArcItem>
@@ -212,11 +214,11 @@ export function Sidebar({
             playlists.map((name, idx) => (
               <ArcItem
                 key={name}
-                cx={radius}
-                cy={radius}
+                cx={cx}
+                cy={cy}
                 r={rText}
                 angleDeg={anglePlaylistsStart + idx * anglePlaylistsStep}
-                className="text-2xl font-medium tracking-tight"
+                className="pointer-events-auto text-2xl font-medium tracking-tight"
                 title={name}
               >
                 {name}
@@ -226,11 +228,11 @@ export function Sidebar({
           {/* New playlist */}
           {!isCollapsed && (
             <ArcItem
-              cx={radius}
-              cy={radius}
+              cx={cx}
+              cy={cy}
               r={rText}
               angleDeg={anglePlaylistsStart + playlists.length * anglePlaylistsStep + 14}
-              className="text-2xl font-medium tracking-tight"
+              className="pointer-events-auto text-2xl font-medium tracking-tight"
               onClick={() => navigate("/playlists")}
               title="New playlist"
             >
@@ -242,27 +244,27 @@ export function Sidebar({
           {/* Pages header */}
           {!isCollapsed && (
             <ArcItem
-              cx={radius}
-              cy={radius}
-              r={rText - 40}
+              cx={cx}
+              cy={cy}
+              r={rText - 50}
               angleDeg={anglePagesHeader}
-              className="bg-transparent hover:bg-transparent px-0 py-0 text-xl font-semibold text-white/70"
+              className="pointer-events-none bg-transparent hover:bg-transparent px-0 py-0 text-xl font-semibold text-white/70"
             >
               Pages
             </ArcItem>
           )}
 
-          {/* Pages list (curved) */}
+          {/* Pages items */}
           {!isCollapsed &&
             navItems.map((item, idx) => (
               <NavLink key={item.to} to={item.to} className="contents">
                 {({ isActive }) => (
                   <ArcItem
-                    cx={radius}
-                    cy={radius}
-                    r={rText - 70}
+                    cx={cx}
+                    cy={cy}
+                    r={rText - 85}
                     angleDeg={anglePagesStart + idx * anglePagesStep}
-                    className="text-2xl font-medium tracking-tight"
+                    className="pointer-events-auto text-2xl font-medium tracking-tight"
                     active={isActive}
                     title={item.label}
                   >
@@ -271,42 +273,9 @@ export function Sidebar({
                 )}
               </NavLink>
             ))}
-
-          {/* Collapsed: show dots along arc */}
-          {isCollapsed && (
-            <>
-              <ArcItem
-                cx={radius}
-                cy={radius}
-                r={rText - 40}
-                angleDeg={anglePagesHeader}
-                className="bg-transparent hover:bg-transparent px-0 py-0 text-base font-semibold text-white/70"
-              >
-                Pages
-              </ArcItem>
-
-              {navItems.slice(0, 6).map((it, i) => (
-                <NavLink key={it.to} to={it.to} className="contents">
-                  {({ isActive }) => (
-                    <ArcItem
-                      cx={radius}
-                      cy={radius}
-                      r={rText - 70}
-                      angleDeg={anglePagesStart + i * 10}
-                      className="bg-transparent hover:bg-transparent px-0 py-0 text-2xl"
-                      active={isActive}
-                      title={it.label}
-                    >
-                      •
-                    </ArcItem>
-                  )}
-                </NavLink>
-              ))}
-            </>
-          )}
         </div>
 
-        {/* Optional resize handle (expanded only) */}
+        {/* Resize strip (optional) */}
         {!isCollapsed && (
           <div
             className="absolute right-0 top-0 h-full w-2 cursor-col-resize"
@@ -319,7 +288,6 @@ export function Sidebar({
                 const dx = ev.clientX - startX;
                 setExpandedWidth(startW + dx);
               };
-
               const onUp = () => {
                 window.removeEventListener("mousemove", onMove);
                 window.removeEventListener("mouseup", onUp);
@@ -332,7 +300,7 @@ export function Sidebar({
           />
         )}
 
-        {/* Toggle button on edge */}
+        {/* Toggle circle */}
         <button
           type="button"
           onClick={toggle}

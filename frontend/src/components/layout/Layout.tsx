@@ -13,46 +13,42 @@ interface LayoutProps {
 export const Layout = ({ children }: LayoutProps) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Track the sidebar width (draggable)
-  const [sidebarWidth, setSidebarWidth] = useState<number>(280);
-
-  // Track collapsed state (chevron button)
+  // Sidebar width + collapsed
+  const [sidebarWidth, setSidebarWidth] = useState<number>(300);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
-  // Notifications drawer
   const [notificationsOpen, setNotificationsOpen] = useState(false);
 
   const navItems = useMemo(
     () => [
-      { label: "Home", to: "/", icon: <Home className="h-5 w-5 text-black" /> },
+      { label: "Home", to: "/", icon: <Home className="h-5 w-5 text-white" /> },
+      { label: "Search", to: "/search", icon: <Search className="h-5 w-5 text-white" /> },
+      { label: "Concerts", to: "/concerts", icon: <Map className="h-5 w-5 text-white" /> },
+      { label: "Library", to: "/liked", icon: <Library className="h-5 w-5 text-white" /> },
+      { label: "Merch", to: "/merch", icon: <ShoppingBag className="h-5 w-5 text-white" /> },
       {
-        label: "Search",
-        to: "/search",
-        icon: <Search className="h-5 w-5 text-black" />,
+        label: "Recommendations",
+        to: "/recommendations",
+        icon: <Sparkles className="h-5 w-5 text-white" />,
       },
-      { label: "Concerts", to: "/concerts", icon: <Map className="h-5 w-5 text-black" /> },
-      { label: "Library", to: "/liked", icon: <Library className="h-5 w-5 text-black" /> },
-      { label: "Merch", to: "/merch", icon: <ShoppingBag className="h-5 w-5 text-black" /> },
-      { label: "Recommendations", to: "/recommendations", icon: <Sparkles className="h-5 w-5 text-black" /> },
     ],
     []
   );
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Desktop / tablet layout (keep sidebar from md and up) */}
       <div className="hidden md:flex min-h-screen">
         {/* Sidebar */}
-        <div className="shrink-0" style={{ width: sidebarCollapsed ? 88 : sidebarWidth }}>
+        <div className="shrink-0" style={{ width: sidebarCollapsed ? 96 : sidebarWidth }}>
           <Sidebar
             items={navItems}
-            initialWidth={280}
+            initialWidth={300}
             width={sidebarWidth}
             collapsed={sidebarCollapsed}
             onCollapsedChange={setSidebarCollapsed}
             onWidthChange={(w) => setSidebarWidth(w)}
-            minWidth={88}
-            maxWidth={360}
+            minWidth={96}
+            maxWidth={380}
           />
         </div>
 
@@ -70,7 +66,7 @@ export const Layout = ({ children }: LayoutProps) => {
         </div>
       </div>
 
-      {/* Mobile layout (phones only) */}
+      {/* Mobile */}
       <div className="md:hidden">
         <Header
           onMenuClick={() => setMobileMenuOpen(!mobileMenuOpen)}
@@ -80,7 +76,6 @@ export const Layout = ({ children }: LayoutProps) => {
         <main className="pb-[calc(var(--player-height)+60px)]">{children}</main>
       </div>
 
-      {/* Mobile bottom nav only on phones */}
       <div className="md:hidden">
         <MobileNav />
       </div>

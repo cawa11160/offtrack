@@ -1,17 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { NavLink, useLocation, useNavigate } from "react-router-dom";
-import {
-  Home,
-  Library,
-  Map,
-  ShoppingBag,
-  ChevronLeft,
-  ChevronRight,
-  Plus,
-  Music2,
-  ListMusic,
-  Search,
-} from "lucide-react";
+import React, { useMemo, useState } from "react";
+import { NavLink, useNavigate } from "react-router-dom";
+import { ChevronRight, Plus, Music2 } from "lucide-react";
 
 type SidebarItem = { to: string; label: string; icon: React.ReactNode };
 
@@ -21,28 +10,20 @@ type SidebarProps = {
   minWidth?: number;
   maxWidth?: number;
 
-  // NEW: allow Layout to control collapse/width (optional)
   width?: number;
   collapsed?: boolean;
   onCollapsedChange?: (next: boolean) => void;
   onWidthChange?: (next: number) => void;
 };
 
-function inferRoute(label: string): string {
-  const key = label.trim().toLowerCase();
-  if (key === "home") return "/";
-  if (key === "search") return "/search";
-  if (key === "library") return "/library";
-  if (key === "playlists") return "/playlists";
-  if (key === "concert map" || key === "concertmap") return "/concert-map";
-  if (key === "merchandise" || key === "merch") return "/merch";
-  return `/${key.replace(/\s+/g, "-")}`;
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
 }
 
 export function Sidebar({
   items,
-  initialWidth = 240,
-  minWidth = 86,
+  initialWidth = 280,
+  minWidth = 88,
   maxWidth = 360,
 
   width: controlledWidth,
@@ -50,198 +31,194 @@ export function Sidebar({
   onCollapsedChange,
   onWidthChange,
 }: SidebarProps) {
-  const location = useLocation();
   const navigate = useNavigate();
 
-  // If Layout passes width, keep an internal mirror so the resize handle works smoothly.
   const [uncontrolledWidth, setUncontrolledWidth] = useState<number>(initialWidth);
   const width = typeof controlledWidth === "number" ? controlledWidth : uncontrolledWidth;
 
-  const [isResizing, setIsResizing] = useState<boolean>(false);
-
-  const startXRef = useRef<number>(0);
-  const startWidthRef = useRef<number>(initialWidth);
-
-  const isCompact = collapsed ?? width <= 100;
-
-  const fallbackNav: SidebarItem[] = [
-    {
-      to: "/",
-      label: "Home",
-      icon: <Home className="text-black" size={22} strokeWidth={1.8} />,
-    },
-    {
-      to: "/search",
-      label: "Search",
-      icon: <Search className="text-black" size={22} strokeWidth={1.8} />,
-    },
-    {
-      to: "/library",
-      label: "Library",
-      icon: <Library className="text-black" size={22} strokeWidth={1.8} />,
-    },
-    {
-      to: "/playlists",
-      label: "Playlists",
-      icon: <ListMusic className="text-black" size={22} strokeWidth={1.8} />,
-    },
-    {
-      to: "/concert-map",
-      label: "Concert Map",
-      icon: <Map className="text-black" size={22} strokeWidth={1.8} />,
-    },
-    {
-      to: "/merch",
-      label: "Merchandise",
-      icon: <ShoppingBag className="text-black" size={22} strokeWidth={1.8} />,
-    },
-  ];
+  const isCollapsed = typeof collapsed === "boolean" ? collapsed : width <= minWidth;
 
   const navItems = useMemo(() => {
-    if (items && items.length) {
-      return items.map((it) => ({
-        ...it,
-        to: it.to ?? inferRoute(it.label),
-      }));
-    }
-    return fallbackNav;
+    return (items?.length ? items : []).map((it) => ({
+      ...it,
+      to: it.to,
+    }));
   }, [items]);
 
-  useEffect(() => {
-    function onMove(e: MouseEvent) {
-      if (!isResizing) return;
-      const dx = e.clientX - startXRef.current;
-      const next = Math.min(maxWidth, Math.max(minWidth, startWidthRef.current + dx));
-      setUncontrolledWidth(next);
-      onWidthChange?.(next);
-    }
-    function onUp() {
-      setIsResizing(false);
-    }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [isResizing, minWidth, maxWidth, onWidthChange]);
+  const toggle = () => {
+    const nextCollapsed = !isCollapsed;
 
-  const startResize = (e: React.MouseEvent) => {
-    setIsResizing(true);
-    startXRef.current = e.clientX;
-    startWidthRef.current = width;
+    if (typeof collapsed === "boolean" && onCollapsedChange) {
+      onCollapsedChange(nextCollapsed);
+    } else {
+      const nextWidth = nextCollapsed ? minWidth : initialWidth;
+      setUncontrolledWidth(nextWidth);
+      onWidthChange?.(nextWidth);
+    }
   };
 
-  const toggleCompact = () => {
-    // If parent is controlling collapse, delegate
-    if (typeof collapsed === "boolean" && onCollapsedChange) {
-      onCollapsedChange(!collapsed);
-      return;
-    }
-
-    // Otherwise fallback to local width-based compact mode
-    const next = width <= 100 ? initialWidth : minWidth;
-    setUncontrolledWidth(next);
-    onWidthChange?.(next);
+  const setExpandedWidth = (next: number) => {
+    const v = clamp(next, minWidth, maxWidth);
+    setUncontrolledWidth(v);
+    onWidthChange?.(v);
   };
 
   return (
-    <div
-      className="relative h-screen border-r border-black/10 bg-white"
-      style={{ width: "100%" }} // parent wrapper controls actual width
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 py-3">
-        {!isCompact ? (
-          <div className="text-xl font-semibold text-black">OffTrack</div>
-        ) : (
-          <div className="h-6" />
-        )}
+    <aside className="relative h-screen" aria-label="Sidebar">
+      {/* Wrapper width is controlled by Layout; this fills it */}
+      <div className="relative h-full w-full">
+        {/* Semi-circle body */}
+        <div
+          className={[
+            "relative h-full w-full overflow-hidden",
+            "bg-black text-white",
+            // makes the semi-circle “slice”
+            "rounded-r-[999px]",
+            "shadow-[0_18px_60px_rgba(0,0,0,0.25)]",
+          ].join(" ")}
+        >
+          {/* Content padding */}
+          <div className={["h-full", isCollapsed ? "px-3 py-4" : "px-7 py-6"].join(" ")}>
+            {/* Title */}
+            <div className="flex items-center gap-3">
+              <div className="grid h-10 w-10 place-items-center rounded-2xl bg-white/10">
+                <Music2 className="h-5 w-5 text-white" />
+              </div>
 
+              {!isCollapsed && (
+                <div className="min-w-0">
+                  <div className="text-xl font-semibold leading-none">Offtrack</div>
+                  <div className="mt-1 text-xs text-white/60">Your library</div>
+                </div>
+              )}
+            </div>
+
+            {/* Library list */}
+            <div className={["mt-10", isCollapsed ? "space-y-3" : "space-y-5"].join(" ")}>
+              {!isCollapsed && (
+                <div className="text-white/70">
+                  <div className="text-sm font-semibold">Your library</div>
+                </div>
+              )}
+
+              <div className={["space-y-2", isCollapsed ? "text-xs" : "text-base"].join(" ")}>
+                {["Playlist name 1", "Playlist name 2", "Playlist name 3", "Playlist name 4"].map(
+                  (name) => (
+                    <button
+                      key={name}
+                      type="button"
+                      className={[
+                        "w-full text-left",
+                        "rounded-2xl px-3 py-2",
+                        "hover:bg-white/10",
+                        "transition",
+                      ].join(" ")}
+                    >
+                      {isCollapsed ? "•" : name}
+                    </button>
+                  )
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => navigate("/playlists")}
+                  className={[
+                    "w-full text-left",
+                    "rounded-2xl px-3 py-2",
+                    "hover:bg-white/10 transition",
+                    "flex items-center gap-2",
+                  ].join(" ")}
+                >
+                  {isCollapsed ? (
+                    <Plus className="h-4 w-4" />
+                  ) : (
+                    <>
+                      <Plus className="h-4 w-4" />
+                      <span>New playlist</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Pages */}
+              <div className="pt-6">
+                {!isCollapsed && (
+                  <div className="text-sm font-semibold text-white/80 mb-2">Pages</div>
+                )}
+
+                <nav aria-label="Primary navigation">
+                  <ul className="space-y-1">
+                    {navItems.map((item) => (
+                      <li key={item.to}>
+                        <NavLink
+                          to={item.to}
+                          className={({ isActive }) =>
+                            [
+                              "flex items-center gap-3 rounded-2xl px-3 py-2",
+                              "text-white/90 hover:bg-white/10 transition",
+                              isActive ? "bg-white/10" : "",
+                              isCollapsed ? "justify-center" : "",
+                            ].join(" ")
+                          }
+                          title={item.label}
+                        >
+                          <span className="shrink-0">{item.icon}</span>
+                          {!isCollapsed && <span className="text-base">{item.label}</span>}
+                        </NavLink>
+                      </li>
+                    ))}
+                  </ul>
+                </nav>
+              </div>
+            </div>
+
+            {/* Optional: allow “drag width” only when expanded */}
+            {!isCollapsed && (
+              <div className="absolute right-0 top-0 h-full w-2 cursor-col-resize"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  const startX = e.clientX;
+                  const startW = width;
+
+                  const onMove = (ev: MouseEvent) => {
+                    const dx = ev.clientX - startX;
+                    setExpandedWidth(startW + dx);
+                  };
+
+                  const onUp = () => {
+                    window.removeEventListener("mousemove", onMove);
+                    window.removeEventListener("mouseup", onUp);
+                  };
+
+                  window.addEventListener("mousemove", onMove);
+                  window.addEventListener("mouseup", onUp);
+                }}
+                aria-hidden="true"
+              />
+            )}
+          </div>
+        </div>
+
+        {/* Little black circle toggle on the outside edge */}
         <button
           type="button"
-          onClick={toggleCompact}
-          className="grid h-9 w-9 place-items-center rounded-xl border border-black/10 bg-white text-black hover:bg-black/5"
-          aria-label={isCompact ? "Expand sidebar" : "Collapse sidebar"}
+          onClick={toggle}
+          className={[
+            "absolute top-1/2 -translate-y-1/2",
+            // keep the circle slightly outside the sidebar edge
+            "right-[-14px]",
+            "h-7 w-7 rounded-full bg-black",
+            "shadow-[0_10px_30px_rgba(0,0,0,0.35)]",
+            "grid place-items-center",
+            "hover:scale-[1.03] active:scale-[0.98] transition",
+            "border border-white/10",
+          ].join(" ")}
+          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={isCollapsed ? "Expand" : "Collapse"}
         >
-          {isCompact ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+          <ChevronRight className={["h-4 w-4 text-white", isCollapsed ? "" : "rotate-180"].join(" ")} />
         </button>
       </div>
-
-      {/* Main Nav */}
-      <nav className="px-2">
-        <ul className="space-y-1">
-          {navItems.map((item) => (
-            <li key={item.to}>
-              <NavLink
-                to={item.to}
-                className={({ isActive }) =>
-                  [
-                    "flex items-center gap-3 rounded-2xl px-3 py-2",
-                    "text-black hover:bg-black/5",
-                    isActive ? "bg-black/5" : "",
-                  ].join(" ")
-                }
-              >
-                <div className="shrink-0">{item.icon}</div>
-                {!isCompact && <div className="text-base">{item.label}</div>}
-              </NavLink>
-            </li>
-          ))}
-        </ul>
-      </nav>
-
-      {/* Library Section */}
-      <div className="mt-6 px-4">
-        <div className="flex items-center justify-between">
-          {!isCompact ? (
-            <div className="text-xs font-semibold tracking-[0.18em] text-black/40">
-              YOUR LIBRARY
-            </div>
-          ) : (
-            <div className="h-4" />
-          )}
-
-          <button
-            type="button"
-            onClick={() => navigate("/playlists")}
-            className="grid h-10 w-10 place-items-center rounded-xl border border-black/10 bg-white text-black hover:bg-black/5 active:scale-[0.98]"
-            aria-label="Create playlist"
-            title="Create playlist"
-          >
-            <Plus size={18} />
-          </button>
-        </div>
-
-        <div className="mt-3">
-          <button
-            type="button"
-            onClick={() => navigate("/playlists")}
-            className={[
-              "flex w-full items-center gap-3 rounded-2xl border border-black/10",
-              "bg-white px-4 py-4 text-left hover:bg-black/5 active:scale-[0.995]",
-            ].join(" ")}
-          >
-            <div className="grid h-10 w-10 place-items-center rounded-xl bg-black/5">
-              <Music2 size={18} className="text-black" />
-            </div>
-
-            {!isCompact && (
-              <div>
-                <div className="text-base font-semibold text-black">Create a playlist</div>
-                <div className="text-sm text-black/50">Add songs and episodes</div>
-              </div>
-            )}
-          </button>
-        </div>
-      </div>
-
-      {/* Resize handle */}
-      <div
-        onMouseDown={startResize}
-        className="absolute right-0 top-0 h-full w-1 cursor-col-resize bg-transparent"
-        aria-hidden="true"
-      />
-    </div>
+    </aside>
   );
 }

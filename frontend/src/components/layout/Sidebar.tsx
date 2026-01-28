@@ -1,12 +1,11 @@
 import React, { useMemo, useState } from "react";
-import { NavLink } from "react-router-dom";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { NavLink, useNavigate } from "react-router-dom";
+import { ChevronRight, Plus, Music2 } from "lucide-react";
 
-type SidebarItem = { to: string; label: string; icon?: React.ReactNode };
+type SidebarItem = { to: string; label: string; icon: React.ReactNode };
 
 type SidebarProps = {
   items?: SidebarItem[];
-
   initialWidth?: number;
   minWidth?: number;
   maxWidth?: number;
@@ -25,25 +24,29 @@ function degToRad(d: number) {
   return (d * Math.PI) / 180;
 }
 
+function polarToXY(cx: number, cy: number, r: number, angleDeg: number) {
+  const a = degToRad(angleDeg);
+  return {
+    x: cx + r * Math.cos(a),
+    y: cy + r * Math.sin(a),
+  };
+}
+
 /**
- * Places content on a circle with center (cx, cy) and radius r.
- * angleDeg: 0° is to the right, 90° is down (screen coords),
- * but we use standard math with +y down by flipping sin usage accordingly.
- *
- * Tangent rotation: angleDeg + 90 makes text follow the circle.
+ * Places a "pill" on a circle and rotates it tangentially.
+ * - angleDeg: 0° points right, 90° points down (screen coords)
+ * - tangent rotation is angleDeg + 90
  */
-function CurvedLabel({
+function ArcItem({
   cx,
   cy,
   r,
   angleDeg,
   children,
-  className = "",
-  align = "left",
+  className,
   active = false,
-  asLink,
-  title,
   onClick,
+  title,
 }: {
   cx: number;
   cy: number;
@@ -51,89 +54,73 @@ function CurvedLabel({
   angleDeg: number;
   children: React.ReactNode;
   className?: string;
-  align?: "left" | "center" | "right";
   active?: boolean;
-  asLink?: { to: string };
-  title?: string;
   onClick?: () => void;
+  title?: string;
 }) {
-  // screen coordinates: x = cx + r*cos, y = cy + r*sin
-  const a = degToRad(angleDeg);
-  const x = cx + r * Math.cos(a);
-  const y = cy + r * Math.sin(a);
-
-  // Tangent rotation
+  const { x, y } = polarToXY(cx, cy, r, angleDeg);
   const rot = angleDeg + 90;
 
-  const alignClass =
-    align === "center" ? "-translate-x-1/2" : align === "right" ? "-translate-x-full" : "";
-
-  const base = [
-    "absolute select-none whitespace-nowrap",
-    alignClass,
-    "origin-left",
-    "transition",
-    active ? "bg-white/10" : "hover:bg-white/10",
-    "rounded-full",
-    "px-4 py-2",
-    className,
-  ].join(" ");
-
-  const style: React.CSSProperties = {
-    left: x,
-    top: y,
-    transform: `rotate(${rot}deg)`,
-    // NOTE: we rotate the pill; inside text stays aligned.
-  };
-
-  const inner = (
-    <div className={base} style={style} title={title} onClick={onClick}>
+  return (
+    <div
+      className={[
+        "absolute",
+        "origin-left",
+        "rounded-full",
+        "px-4 py-2",
+        "text-white",
+        "transition",
+        active ? "bg-white/10" : "hover:bg-white/10",
+        className ?? "",
+      ].join(" ")}
+      style={{
+        left: x,
+        top: y,
+        transform: `rotate(${rot}deg)`,
+      }}
+      onClick={onClick}
+      title={title}
+    >
       {children}
     </div>
   );
-
-  if (asLink) {
-    return (
-      <NavLink
-        to={asLink.to}
-        className="contents"
-        // prevents NavLink default styling; we style the inner pill
-      >
-        {inner}
-      </NavLink>
-    );
-  }
-
-  return inner;
 }
 
 export function Sidebar({
   items,
-  initialWidth = 360,
-  minWidth = 96,
-  maxWidth = 440,
+  initialWidth = 280,
+  minWidth = 88,
+  maxWidth = 360,
 
   width: controlledWidth,
   collapsed,
   onCollapsedChange,
   onWidthChange,
 }: SidebarProps) {
+  const navigate = useNavigate();
+
   const [uncontrolledWidth, setUncontrolledWidth] = useState<number>(initialWidth);
   const width = typeof controlledWidth === "number" ? controlledWidth : uncontrolledWidth;
 
   const isCollapsed = typeof collapsed === "boolean" ? collapsed : width <= minWidth;
 
-  const navItems = useMemo(() => (items?.length ? items : []), [items]);
+  const navItems = useMemo(() => {
+    return (items?.length ? items : []).map((it) => ({
+      ...it,
+      to: it.to,
+    }));
+  }, [items]);
 
   const toggle = () => {
-    const next = !isCollapsed;
+    const nextCollapsed = !isCollapsed;
+
     if (typeof collapsed === "boolean" && onCollapsedChange) {
-      onCollapsedChange(next);
-      return;
+      onCollapsedChange(nextCollapsed);
+    } else {
+      const nextWidth = nextCollapsed ? minWidth : initialWidth;
+      setUncontrolledWidth(nextWidth);
+      onWidthChange?.(nextWidth);
     }
-    const nextW = next ? minWidth : initialWidth;
-    setUncontrolledWidth(nextW);
-    onWidthChange?.(nextW);
   };
 
   const setExpandedWidth = (next: number) => {
@@ -143,220 +130,181 @@ export function Sidebar({
   };
 
   /**
-   * Circle geometry:
-   * We draw a big circle and place labels at angles on the visible arc.
-   *
-   * You can tune:
-   * - circleRadius
-   * - circleLeft (push further left to get a thinner arc)
+   * ✅ Bigger circle so labels are visible + easier to place on arc
+   * Tune these 3 knobs to match your screenshot:
+   * - radius (bigger = more gentle curve)
+   * - leftShift (more negative = circle moves left, thinner visible slice)
+   * - rText (distance from center to text)
    */
-  const circleRadius = isCollapsed ? 520 : 620;
-  const circleDiameter = circleRadius * 2;
+  const radius = isCollapsed ? 520 : 680; // BIGGER than before
+  const diameter = radius * 2;
+  const leftShift = isCollapsed ? -radius + 40 : -radius + 70; // pushes circle off-screen
+  const rText = isCollapsed ? radius - 140 : radius - 190; // where text sits on arc
 
-  // Push the circle left so only a “semi-circle” is visible
-  const circleLeft = isCollapsed ? -circleRadius + 36 : -circleRadius + 60;
+  // angles to lay out items down the arc (increase spacing by adding more degrees)
+  const angleBrand = 210;
+  const angleLibraryHeader = 235;
+  const anglePlaylistsStart = 255;
+  const anglePlaylistsStep = 14;
+  const anglePagesHeader = 300;
+  const anglePagesStart = 315;
+  const anglePagesStep = 10;
 
-  // Circle center in the sidebar coordinate space
-  const cx = circleLeft + circleRadius;
-  const cy = 0.5 * 1000; // we'll use a relative container height; actual uses 100vh below
-
-  // We need cy in pixels. We'll compute using CSS: container is 100vh.
-  // We'll instead position using percentages by measuring with CSS?
-  // Simple approach: use a wrapper with height: 100vh and compute cy in JS via CSS variables is overkill.
-  // So: place labels using top based on actual viewport height via CSS calc:
-  // We do that by letting cy = "50vh" in CSS is not possible in JS geometry.
-  //
-  // Practical solution: use a positioning wrapper that sets a CSS var and uses translate.
-  // We'll do a different approach: do the math in a "vh-like" space by assuming 1000px,
-  // but keep the circle centered via translateY(-50%) so the arc stays centered.
-  //
-  // ✅ Easiest reliable: render a relative wrapper and absolutely position the circle at 50% with translateY.
-  // Then compute label positions relative to that circle wrapper, not viewport.
-
-  // Library list for the arc
   const playlists = ["Playlist name 1", "Playlist name 2", "Playlist name 3", "Playlist name 4"];
 
   return (
-    <aside className="relative h-screen w-full overflow-hidden" aria-label="Sidebar">
-      {/* This wrapper defines our coordinate space */}
-      <div className="relative h-full w-full">
-        {/* Big circle */}
+    <aside className="relative h-screen" aria-label="Sidebar">
+      <div className="relative h-full w-full overflow-hidden">
+        {/* ✅ Real big circle (semi-circle look) */}
         <div
           className="absolute top-1/2 -translate-y-1/2 bg-black"
           style={{
-            width: circleDiameter,
-            height: circleDiameter,
+            width: diameter,
+            height: diameter,
+            left: leftShift,
             borderRadius: 9999,
-            left: circleLeft,
+            boxShadow: "0 18px 60px rgba(0,0,0,0.25)",
           }}
         />
 
-        {/* Labels placed on the circle - we place them within another wrapper that shares the same circle positioning */}
+        {/* ✅ Arc-coordinate layer (same position/size as circle) */}
         <div
           className="absolute top-1/2 -translate-y-1/2"
           style={{
-            left: circleLeft,
-            width: circleDiameter,
-            height: circleDiameter,
+            left: leftShift,
+            width: diameter,
+            height: diameter,
           }}
         >
-          {/* Brand (slightly inside the arc) */}
+          {/* center of circle in this layer is (radius, radius) */}
           {!isCollapsed && (
-            <CurvedLabel
-              cx={circleRadius}
-              cy={circleRadius}
-              r={circleRadius - 90}
-              angleDeg={210}
-              className="text-2xl font-semibold tracking-tight bg-transparent hover:bg-transparent px-0 py-0"
-              align="left"
+            <ArcItem
+              cx={radius}
+              cy={radius}
+              r={rText}
+              angleDeg={angleBrand}
+              className="bg-transparent hover:bg-transparent px-0 py-0 text-2xl font-semibold tracking-tight"
             >
-              Offtrack
-            </CurvedLabel>
+              <span className="inline-flex items-center gap-3">
+                <span className="grid h-9 w-9 place-items-center rounded-2xl bg-white/10">
+                  <Music2 className="h-5 w-5 text-white" />
+                </span>
+                Offtrack
+              </span>
+            </ArcItem>
           )}
 
-          {/* “Your library” header */}
+          {/* Library header */}
           {!isCollapsed && (
-            <CurvedLabel
-              cx={circleRadius}
-              cy={circleRadius}
-              r={circleRadius - 120}
-              angleDeg={235}
-              className="text-lg font-semibold text-white/70 bg-transparent hover:bg-transparent px-0 py-0"
-              align="left"
+            <ArcItem
+              cx={radius}
+              cy={radius}
+              r={rText}
+              angleDeg={angleLibraryHeader}
+              className="bg-transparent hover:bg-transparent px-0 py-0 text-lg font-semibold text-white/70"
             >
               Your library
-            </CurvedLabel>
+            </ArcItem>
           )}
 
-          {/* Playlists along curve */}
+          {/* Playlists */}
           {!isCollapsed &&
-            playlists.map((p, idx) => (
-              <CurvedLabel
-                key={p}
-                cx={circleRadius}
-                cy={circleRadius}
-                r={circleRadius - 160}
-                // spread them downward along the arc
-                angleDeg={255 + idx * 14}
+            playlists.map((name, idx) => (
+              <ArcItem
+                key={name}
+                cx={radius}
+                cy={radius}
+                r={rText}
+                angleDeg={anglePlaylistsStart + idx * anglePlaylistsStep}
                 className="text-2xl font-medium tracking-tight"
-                align="left"
+                title={name}
               >
-                {p}
-              </CurvedLabel>
+                {name}
+              </ArcItem>
             ))}
 
-          {/* + New playlist */}
+          {/* New playlist */}
           {!isCollapsed && (
-            <CurvedLabel
-              cx={circleRadius}
-              cy={circleRadius}
-              r={circleRadius - 160}
-              angleDeg={255 + playlists.length * 14 + 14}
+            <ArcItem
+              cx={radius}
+              cy={radius}
+              r={rText}
+              angleDeg={anglePlaylistsStart + playlists.length * anglePlaylistsStep + 14}
               className="text-2xl font-medium tracking-tight"
-              align="left"
-              onClick={() => {
-                // hook up later if needed
-              }}
+              onClick={() => navigate("/playlists")}
+              title="New playlist"
             >
               <span className="mr-3 text-3xl leading-none">+</span>
               New playlist
-            </CurvedLabel>
+            </ArcItem>
           )}
 
           {/* Pages header */}
           {!isCollapsed && (
-            <CurvedLabel
-              cx={circleRadius}
-              cy={circleRadius}
-              r={circleRadius - 200}
-              angleDeg={300}
-              className="text-xl font-semibold text-white/70 bg-transparent hover:bg-transparent px-0 py-0"
-              align="left"
+            <ArcItem
+              cx={radius}
+              cy={radius}
+              r={rText - 40}
+              angleDeg={anglePagesHeader}
+              className="bg-transparent hover:bg-transparent px-0 py-0 text-xl font-semibold text-white/70"
             >
               Pages
-            </CurvedLabel>
+            </ArcItem>
           )}
 
-          {/* Pages links stacked along arc */}
+          {/* Pages list (curved) */}
           {!isCollapsed &&
             navItems.map((item, idx) => (
               <NavLink key={item.to} to={item.to} className="contents">
                 {({ isActive }) => (
-                  <CurvedLabel
-                    cx={circleRadius}
-                    cy={circleRadius}
-                    r={circleRadius - 240}
-                    angleDeg={315 + idx * 10}
-                    className={[
-                      "text-2xl font-medium tracking-tight",
-                      isActive ? "bg-white/10" : "",
-                    ].join(" ")}
-                    align="left"
+                  <ArcItem
+                    cx={radius}
+                    cy={radius}
+                    r={rText - 70}
+                    angleDeg={anglePagesStart + idx * anglePagesStep}
+                    className="text-2xl font-medium tracking-tight"
                     active={isActive}
-                    asLink={{ to: item.to }}
                     title={item.label}
                   >
                     {item.label}
-                  </CurvedLabel>
+                  </ArcItem>
                 )}
               </NavLink>
             ))}
 
-          {/* Collapsed state: just show “Pages” dots on the arc */}
+          {/* Collapsed: show dots along arc */}
           {isCollapsed && (
             <>
-              <CurvedLabel
-                cx={circleRadius}
-                cy={circleRadius}
-                r={circleRadius - 210}
-                angleDeg={300}
-                className="text-white/70 text-base font-semibold bg-transparent hover:bg-transparent px-0 py-0"
-                align="left"
+              <ArcItem
+                cx={radius}
+                cy={radius}
+                r={rText - 40}
+                angleDeg={anglePagesHeader}
+                className="bg-transparent hover:bg-transparent px-0 py-0 text-base font-semibold text-white/70"
               >
                 Pages
-              </CurvedLabel>
+              </ArcItem>
 
               {navItems.slice(0, 6).map((it, i) => (
-                <CurvedLabel
-                  key={it.to}
-                  cx={circleRadius}
-                  cy={circleRadius}
-                  r={circleRadius - 250}
-                  angleDeg={320 + i * 10}
-                  className="text-white/80 text-xl bg-transparent hover:bg-transparent px-0 py-0"
-                  align="left"
-                  asLink={{ to: it.to }}
-                  title={it.label}
-                >
-                  •
-                </CurvedLabel>
+                <NavLink key={it.to} to={it.to} className="contents">
+                  {({ isActive }) => (
+                    <ArcItem
+                      cx={radius}
+                      cy={radius}
+                      r={rText - 70}
+                      angleDeg={anglePagesStart + i * 10}
+                      className="bg-transparent hover:bg-transparent px-0 py-0 text-2xl"
+                      active={isActive}
+                      title={it.label}
+                    >
+                      •
+                    </ArcItem>
+                  )}
+                </NavLink>
               ))}
             </>
           )}
         </div>
-
-        {/* Toggle circle on arc edge */}
-        <button
-          type="button"
-          onClick={toggle}
-          className={[
-            "absolute top-1/2 -translate-y-1/2",
-            "right-[-14px]",
-            "h-10 w-10 rounded-full bg-black",
-            "grid place-items-center",
-            "shadow-[0_18px_55px_rgba(0,0,0,0.35)]",
-            "border border-white/10",
-            "hover:scale-[1.02] active:scale-[0.98] transition",
-          ].join(" ")}
-          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          title={isCollapsed ? "Expand" : "Collapse"}
-        >
-          {isCollapsed ? (
-            <ChevronRight className="h-5 w-5 text-white" />
-          ) : (
-            <ChevronLeft className="h-5 w-5 text-white" />
-          )}
-        </button>
 
         {/* Optional resize handle (expanded only) */}
         {!isCollapsed && (
@@ -371,6 +319,7 @@ export function Sidebar({
                 const dx = ev.clientX - startX;
                 setExpandedWidth(startW + dx);
               };
+
               const onUp = () => {
                 window.removeEventListener("mousemove", onMove);
                 window.removeEventListener("mouseup", onUp);
@@ -382,6 +331,26 @@ export function Sidebar({
             aria-hidden="true"
           />
         )}
+
+        {/* Toggle button on edge */}
+        <button
+          type="button"
+          onClick={toggle}
+          className={[
+            "absolute top-1/2 -translate-y-1/2 right-[-14px]",
+            "h-10 w-10 rounded-full bg-black",
+            "shadow-[0_18px_55px_rgba(0,0,0,0.35)]",
+            "grid place-items-center",
+            "hover:scale-[1.03] active:scale-[0.98] transition",
+            "border border-white/10",
+          ].join(" ")}
+          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={isCollapsed ? "Expand" : "Collapse"}
+        >
+          <ChevronRight
+            className={["h-5 w-5 text-white", isCollapsed ? "" : "rotate-180"].join(" ")}
+          />
+        </button>
       </div>
     </aside>
   );

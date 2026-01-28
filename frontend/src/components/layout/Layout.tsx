@@ -1,5 +1,5 @@
 import { ReactNode, useState } from "react";
-import { CircularSidebar } from "./CircularSidebar";
+import { CircularSidebar } from "@/components/layout/CircularSidebar";
 import { Header } from "./Header";
 import { PlayerBar } from "./PlayerBar";
 import { MobileNav } from "./MobileNav";

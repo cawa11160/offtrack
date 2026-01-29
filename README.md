@@ -50,7 +50,7 @@ uvicorn api:app --reload --port 8000
 ### Frontend
 
 ```bash
-cd frontend/website-main
+cd frontend
 npm install
 npm run dev
 ```

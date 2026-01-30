@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Bell, Search, User, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "@/lib/auth";
 
 type HeaderProps = {
   onMenuClick?: () => void;
@@ -17,6 +18,7 @@ export const Header = ({
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const navigate = useNavigate();
+  const { user, logout } = useAuth();
 
   useEffect(() => {
     if (!profileMenuOpen) return;
@@ -110,34 +112,68 @@ export const Header = ({
               <User className="w-5 h-5" />
             </button>
 
-            {profileMenuOpen && (
-              <div className="absolute right-0 mt-2 w-72 rounded-2xl border border-border bg-card shadow-2xl overflow-hidden">
+            
+{profileMenuOpen && (
+  <div className="absolute right-0 mt-2 w-72 rounded-2xl border border-border bg-card shadow-2xl overflow-hidden">
+    {user ? (
+      <>
+        <div className="px-4 py-3">
+          <div className="text-sm font-medium">{user.name ?? "Account"}</div>
+          <div className="text-xs text-muted-foreground">{user.email}</div>
+        </div>
 
-                {/* ONLY PROFILE ITEM NOW */}
-                <button
-                  className="w-full px-4 py-3 text-left text-sm hover:bg-accent"
-                  onClick={() => go("/profile")}
-                  role="menuitem"
-                >
-                  Profile
-                </button>
+        <div className="h-px bg-border" />
 
-                {/* Optional logout if you want later */}
-                {/*
-                <div className="h-px bg-border" />
-                <button
-                  className="w-full px-4 py-3 text-left text-sm hover:bg-accent text-destructive"
-                  onClick={() => {
-                    setProfileMenuOpen(false);
-                    // logout()
-                  }}
-                  role="menuitem"
-                >
-                  Log out
-                </button>
-                */}
-              </div>
-            )}
+        <button
+          className="w-full px-4 py-3 text-left text-sm hover:bg-accent"
+          onClick={() => go("/profile")}
+          role="menuitem"
+        >
+          Profile
+        </button>
+
+        <button
+          className="w-full px-4 py-3 text-left text-sm hover:bg-accent"
+          onClick={() => go("/account")}
+          role="menuitem"
+        >
+          Account
+        </button>
+
+        <div className="h-px bg-border" />
+
+        <button
+          className="w-full px-4 py-3 text-left text-sm hover:bg-accent text-destructive"
+          onClick={async () => {
+            setProfileMenuOpen(false);
+            await logout();
+            navigate("/");
+          }}
+          role="menuitem"
+        >
+          Log out
+        </button>
+      </>
+    ) : (
+      <>
+        <button
+          className="w-full px-4 py-3 text-left text-sm hover:bg-accent"
+          onClick={() => go("/login")}
+          role="menuitem"
+        >
+          Log in
+        </button>
+        <button
+          className="w-full px-4 py-3 text-left text-sm hover:bg-accent"
+          onClick={() => go("/signup")}
+          role="menuitem"
+        >
+          Sign up
+        </button>
+      </>
+    )}
+  </div>
+)}
           </div>
 
         </div>

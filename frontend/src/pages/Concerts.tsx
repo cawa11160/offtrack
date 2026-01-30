@@ -1,3 +1,5 @@
+import "mapbox-gl/dist/mapbox-gl.css";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import mapboxgl, { Map, Marker, Popup } from "mapbox-gl";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -24,7 +26,23 @@ type ConcertLike = {
   price?: string;
 };
 
-const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined;
+// IMPORTANT: trim to avoid subtle issues when env files contain leading/trailing spaces
+// (e.g. `VITE_MAPBOX_TOKEN= pk...` will fail unless trimmed).
+const MAPBOX_TOKEN = (import.meta.env.VITE_MAPBOX_TOKEN as string | undefined)?.trim();
+
+async function initMapboxCspWorker() {
+  // If your deployment uses a strict CSP that blocks 'blob:' workers, Mapbox GL
+  // can silently render a blank map. This Vite worker import fixes that.
+  try {
+    // Vite will bundle this as a Worker constructor.
+    // @ts-expect-error - Vite worker import
+    const mod = await import("mapbox-gl/dist/mapbox-gl-csp-worker?worker");
+    // @ts-expect-error - mapboxgl.workerClass is not typed in all versions
+    mapboxgl.workerClass = mod.default;
+  } catch {
+    // No-op: either not needed, or bundler doesn't support this import.
+  }
+}
 
 // Default coords so pins show up even without lat/lng
 const cityFallbackCoords: Record<string, { lng: number; lat: number }> = {
@@ -59,11 +77,15 @@ const Concerts = () => {
   const [viewMode, setViewMode] = useState<"list" | "map">("list");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
+  const [mapDiag, setMapDiag] = useState<string | null>(null);
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const markersRef = useRef<Marker[]>([]);
   const popupRef = useRef<Popup | null>(null);
+  const didRenderRef = useRef(false);
+  const didLoadRef = useRef(false);
+  const loadTimeoutRef = useRef<number | null>(null);
 
   const typedConcerts = concerts as unknown as ConcertLike[];
 
@@ -127,9 +149,27 @@ const Concerts = () => {
       mapRef.current?.remove();
       mapRef.current = null;
 
+      if (loadTimeoutRef.current) {
+        window.clearTimeout(loadTimeoutRef.current);
+        loadTimeoutRef.current = null;
+      }
+      didRenderRef.current = false;
+      didLoadRef.current = false;
+
       setMapError(null);
+      setMapDiag(null);
       return;
     }
+
+    // map mode:
+    // WebGL support check (blank maps happen when WebGL is disabled).
+    if (!mapboxgl.supported()) {
+      setMapError("WebGL is not available in this browser/device. Enable hardware acceleration and try again.");
+      return;
+    }
+
+    // Optional CSP worker setup (helps on some deployments).
+    void initMapboxCspWorker();
 
     // map mode:
     if (!MAPBOX_TOKEN) {
@@ -161,10 +201,37 @@ const Concerts = () => {
       });
 
       mapRef.current = map;
+      didRenderRef.current = false;
+      didLoadRef.current = false;
+      setMapDiag("initializing");
+
+      // If we never get a load/render event, show a helpful overlay.
+      if (loadTimeoutRef.current) window.clearTimeout(loadTimeoutRef.current);
+      loadTimeoutRef.current = window.setTimeout(() => {
+        if (!didLoadRef.current && !didRenderRef.current) {
+          setMapError(
+            "Map is not rendering. This is usually caused by a blocked Mapbox worker (CSP) or blocked mapbox.com requests (adblock/network). Open DevTools → Console/Network to see the error."
+          );
+        }
+      }, 7000);
+
+      map.on("render", () => {
+        didRenderRef.current = true;
+      });
+      map.on("styledata", () => setMapDiag("styledata"));
+      map.on("sourcedata", () => setMapDiag("sourcedata"));
+      map.on("idle", () => setMapDiag("idle"));
+
       map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
 
       // If Mapbox fails to load style/tiles, show an error instead of blank white.
       map.on("error", (e) => {
+        if (loadTimeoutRef.current) {
+          window.clearTimeout(loadTimeoutRef.current);
+          loadTimeoutRef.current = null;
+        }
+        setMapDiag("error");
+
         const msg =
           (e?.error && (e.error as any).message) ||
           "Map failed to load (token/style/network). Check console for details.";
@@ -181,6 +248,13 @@ const Concerts = () => {
       };
 
       map.on("load", () => {
+        didLoadRef.current = true;
+        if (loadTimeoutRef.current) {
+          window.clearTimeout(loadTimeoutRef.current);
+          loadTimeoutRef.current = null;
+        }
+        setMapDiag("loaded");
+
         resizeSoon();
         setTimeout(resizeSoon, 0);
         setTimeout(resizeSoon, 250);
@@ -361,7 +435,15 @@ const Concerts = () => {
                     <p className="text-sm text-muted-foreground mt-2">
                       {mapError}
                     </p>
+                    {mapDiag && (
+                      <p className="text-xs text-muted-foreground mt-2">
+                        Status: <code className="px-1 py-0.5 rounded bg-secondary">{mapDiag}</code>
+                      </p>
+                    )}
                     <p className="text-xs text-muted-foreground mt-3">
+                      Debug: <span className="font-mono">{mapDiag ?? 'n/a'}</span> · token: <span className="font-mono">{MAPBOX_TOKEN ? MAPBOX_TOKEN.slice(0, 8) + '…' : 'missing'}</span>
+                      <br />
+
                       Common fixes: restart{" "}
                       <code className="px-1 py-0.5 rounded bg-secondary">
                         npm run dev

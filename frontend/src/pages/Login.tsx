@@ -1,19 +1,29 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Music2 } from "lucide-react";
+import { useAuth } from "@/lib/auth";
 
 export default function Login() {
   const navigate = useNavigate();
+  const { login } = useAuth();
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  const onSubmit = (e: React.FormEvent) => {
+  const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // presentation-only
-    console.log("LOGIN", { email, password });
-
-    // optional: pretend login succeeded
-    navigate("/");
+    setErr(null);
+    setLoading(true);
+    try {
+      await login(email, password);
+      navigate("/");
+    } catch (e: any) {
+      setErr(e?.message ?? "Login failed");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -27,9 +37,13 @@ export default function Login() {
         </div>
 
         <h1 className="text-3xl font-semibold tracking-tight">Log in</h1>
-        <p className="mt-2 text-sm text-black/60">
-          Welcome back. This is a demo login (no database).
-        </p>
+        <p className="mt-2 text-sm text-black/60">Welcome back.</p>
+
+        {err && (
+          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {err}
+          </div>
+        )}
 
         <form onSubmit={onSubmit} className="mt-8 space-y-4">
           <div>
@@ -41,6 +55,7 @@ export default function Login() {
               placeholder="you@example.com"
               className="mt-2 h-11 w-full rounded-xl border border-black/10 bg-white px-4 outline-none focus:ring-2 focus:ring-black/10"
               required
+              autoComplete="email"
             />
           </div>
 
@@ -53,14 +68,16 @@ export default function Login() {
               placeholder="••••••••"
               className="mt-2 h-11 w-full rounded-xl border border-black/10 bg-white px-4 outline-none focus:ring-2 focus:ring-black/10"
               required
+              autoComplete="current-password"
             />
           </div>
 
           <button
             type="submit"
-            className="mt-2 h-11 w-full rounded-xl bg-black text-white hover:opacity-90 active:scale-[0.99]"
+            disabled={loading}
+            className="mt-2 h-11 w-full rounded-xl bg-black text-white hover:opacity-90 active:scale-[0.99] disabled:opacity-60"
           >
-            Log in
+            {loading ? "Logging in..." : "Log in"}
           </button>
 
           <button
@@ -77,10 +94,6 @@ export default function Login() {
           <Link to="/signup" className="font-medium text-black underline underline-offset-4">
             Sign up
           </Link>
-        </div>
-
-        <div className="mt-10 text-xs text-black/40">
-          Demo only — credentials aren’t stored.
         </div>
       </div>
     </div>

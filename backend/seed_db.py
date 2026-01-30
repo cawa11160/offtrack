@@ -110,9 +110,13 @@ def main():
     # Keep only required columns (prevents accidental mismatch)
     df = df[[c for c in REQUIRED_COLS if c in df.columns]]
 
-    # Create schema (drop + create to guarantee clean seed)
-    Base.metadata.drop_all(engine)
+    # Create schema (do NOT drop all tables; preserve users)
     Base.metadata.create_all(engine)
+
+    # Clear only recommender-related tables
+    with engine.begin() as conn:
+        conn.execute(text('TRUNCATE TABLE interactions RESTART IDENTITY CASCADE'))
+        conn.execute(text('TRUNCATE TABLE tracks RESTART IDENTITY CASCADE'))
 
     dialect = getattr(engine.dialect, "name", "unknown")
     num_cols = len(df.columns)

@@ -50,7 +50,7 @@ function withDistinct(headers?: HeadersInit): HeadersInit {
 
 async function apiFetch(path: string, init: RequestInit = {}) {
   const url = API_BASE ? `${API_BASE}${path}` : path;
-  return fetch(url, { ...init, headers: withDistinct(init.headers) });
+  return fetch(url, { credentials: init.credentials ?? "include", ...init, headers: withDistinct(init.headers) });
 }
 
 async function readError(r: Response): Promise<string> {

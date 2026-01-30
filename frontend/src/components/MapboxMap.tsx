@@ -1,7 +1,7 @@
 import Map from "react-map-gl";
 
 export default function MapboxMap() {
-  const token = import.meta.env.VITE_MAPBOX_TOKEN;
+  const token = (import.meta.env.VITE_MAPBOX_TOKEN as string | undefined)?.trim();
 
   if (!token) {
     return <div>Mapbox token missing</div>;

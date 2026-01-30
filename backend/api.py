@@ -10,14 +10,14 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, text
 
 from db import get_db, SessionLocal, engine, wait_for_db
-from models import Track, Interaction, Base
+from models import Track, Interaction, User, Base
 from recommender import get_recommender
 from analytics import get_analytics
 
@@ -39,10 +39,169 @@ ALLOW_ORIGINS = [o.strip() for o in ALLOW_ORIGINS if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOW_ORIGINS,
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# -----------------------------
+# Auth (email/password + JWT)
+# -----------------------------
+from datetime import datetime, timedelta, timezone
+
+from jose import jwt, JWTError
+from passlib.context import CryptContext
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+JWT_SECRET = os.getenv("JWT_SECRET", "dev_change_me").strip()
+JWT_ALG = os.getenv("JWT_ALG", "HS256").strip() or "HS256"
+ACCESS_TTL_MIN = int(os.getenv("ACCESS_TTL_MIN", "30"))
+REFRESH_TTL_DAYS = int(os.getenv("REFRESH_TTL_DAYS", "30"))
+
+REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "offtrack_refresh").strip() or "offtrack_refresh"
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").lower()  # lax|strict|none
+
+def _hash_password(pw: str) -> str:
+    return pwd_context.hash(pw)
+
+def _verify_password(pw: str, pw_hash: str) -> bool:
+    try:
+        return pwd_context.verify(pw, pw_hash)
+    except Exception:
+        return False
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+def _encode(payload: dict) -> str:
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+
+def _decode(token: str) -> dict:
+    return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+
+def _create_access_token(user_id: int) -> str:
+    now = _now_utc()
+    exp = now + timedelta(minutes=ACCESS_TTL_MIN)
+    return _encode({"sub": str(user_id), "type": "access", "iat": int(now.timestamp()), "exp": int(exp.timestamp())})
+
+def _create_refresh_token(user_id: int) -> str:
+    now = _now_utc()
+    exp = now + timedelta(days=REFRESH_TTL_DAYS)
+    return _encode({"sub": str(user_id), "type": "refresh", "iat": int(now.timestamp()), "exp": int(exp.timestamp())})
+
+def _set_refresh_cookie(resp: Response, token: str) -> None:
+    # If COOKIE_SAMESITE is "none", Secure must be true in modern browsers.
+    secure = COOKIE_SECURE or (COOKIE_SAMESITE == "none")
+    resp.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=secure,
+        samesite=COOKIE_SAMESITE,
+        path="/",
+        max_age=REFRESH_TTL_DAYS * 24 * 60 * 60,
+    )
+
+def _clear_refresh_cookie(resp: Response) -> None:
+    resp.delete_cookie(key=REFRESH_COOKIE_NAME, path="/")
+
+class SignupIn(BaseModel):
+    name: str | None = Field(default=None, max_length=255)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
+
+class AuthOut(BaseModel):
+    access_token: str
+
+class MeOut(BaseModel):
+    id: int
+    email: EmailStr
+    name: str | None = None
+
+def _get_bearer_token(req: Request) -> str:
+    auth = req.headers.get("authorization") or ""
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    return auth.split(" ", 1)[1].strip()
+
+def get_current_user_id(req: Request) -> int:
+    token = _get_bearer_token(req)
+    try:
+        data = _decode(token)
+        if data.get("type") != "access":
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return int(data["sub"])
+    except (JWTError, KeyError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+@app.post("/api/auth/signup", response_model=AuthOut)
+def auth_signup(payload: SignupIn, resp: Response, db: Session = Depends(get_db)):
+    email = payload.email.lower().strip()
+    exists = db.query(User).filter(User.email == email).first()
+    if exists:
+        raise HTTPException(status_code=409, detail="Email already exists")
+
+    user = User(email=email, name=(payload.name.strip() if payload.name else None), password_hash=_hash_password(payload.password))
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    access = _create_access_token(user.id)
+    refresh = _create_refresh_token(user.id)
+    _set_refresh_cookie(resp, refresh)
+    return {"access_token": access}
+
+@app.post("/api/auth/login", response_model=AuthOut)
+def auth_login(payload: LoginIn, resp: Response, db: Session = Depends(get_db)):
+    email = payload.email.lower().strip()
+    user = db.query(User).filter(User.email == email).first()
+    if not user or not _verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    access = _create_access_token(user.id)
+    refresh = _create_refresh_token(user.id)
+    _set_refresh_cookie(resp, refresh)
+    return {"access_token": access}
+
+@app.post("/api/auth/refresh", response_model=AuthOut)
+def auth_refresh(req: Request, resp: Response):
+    token = req.cookies.get(REFRESH_COOKIE_NAME)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing refresh token")
+    try:
+        data = _decode(token)
+        if data.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user_id = int(data["sub"])
+    except (JWTError, KeyError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    access = _create_access_token(user_id)
+    # rotate refresh
+    new_refresh = _create_refresh_token(user_id)
+    _set_refresh_cookie(resp, new_refresh)
+    return {"access_token": access}
+
+@app.post("/api/auth/logout")
+def auth_logout(resp: Response):
+    _clear_refresh_cookie(resp)
+    return {"ok": True}
+
+@app.get("/api/auth/me", response_model=MeOut)
+def auth_me(req: Request, db: Session = Depends(get_db)):
+    user_id = get_current_user_id(req)
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return {"id": user.id, "email": user.email, "name": user.name}
+
 
 # -----------------------------
 # Spotify helpers (optional)

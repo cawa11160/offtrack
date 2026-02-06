@@ -8,6 +8,7 @@ import { Layout } from "@/components/layout/Layout";
 import Index from "./pages/Index";
 import Concerts from "./pages/Concerts";
 import Merchandise from "./pages/Merchandise";
+import InteractiveWeb from "./pages/InteractiveWeb";
 import Liked from "./pages/Liked";
 import NotFound from "./pages/NotFound";
 import ReleasePage from "./pages/Release";
@@ -39,6 +40,9 @@ const App = () => (
 
             {/* CONCERTS */}
             <Route path="/concerts" element={<Concerts />} />
+
+            {/* INTERACTIVE WEB */}
+            <Route path="/web" element={<InteractiveWeb />} />
 
             {/* ✅ NEW: Filters page */}
             <Route path="/concerts/filters" element={<ConcertFilters />} />

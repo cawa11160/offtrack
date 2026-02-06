@@ -409,16 +409,21 @@ export default function Recommendations() {
 
 
                   {/* Preview + Spotify buttons */}
-                  <div className="mt-3 flex items-center gap-2">
+                  <div className="mt-3 flex w-full flex-wrap gap-2">
                     <button
                       type="button"
                       onClick={() => {
-                          phCapture("click_recommendation", { track_id: r.id, title: r.title, artist: r.artist, action: "play" });
-                          apiFeedback(r.id, "click_recommendation");
-                          playPreview(r);
-                        }}
+                        phCapture("click_recommendation", {
+                          track_id: r.id,
+                          title: r.title,
+                          artist: r.artist,
+                          action: "play",
+                        });
+                        apiFeedback(r.id, "click_recommendation");
+                        playPreview(r);
+                      }}
                       disabled={!r.previewUrl && !r.spotifyUrl}
-                      className="inline-flex items-center gap-2 rounded-xl bg-black px-3 py-2 text-xs font-medium text-white disabled:opacity-50"
+                      className="inline-flex h-10 min-w-[140px] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-black px-3 text-xs font-medium text-white disabled:opacity-50"
                       title={
                         r.previewUrl
                           ? "Play 30s preview"
@@ -444,7 +449,7 @@ export default function Recommendations() {
                         phCapture("like_track", { track_id: r.id, title: r.title, artist: r.artist });
                         apiFeedback(r.id, "like");
                       }}
-                      className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium"
+                      className="inline-flex h-10 min-w-[96px] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl border border-border bg-background px-3 text-xs font-medium"
                       title="Like"
                     >
                       <span aria-hidden="true">👍</span> Like
@@ -453,10 +458,22 @@ export default function Recommendations() {
                     <button
                       type="button"
                       onClick={() => {
+                        phCapture("superlike_track", { track_id: r.id, title: r.title, artist: r.artist });
+                        apiFeedback(r.id, "superlike");
+                      }}
+                      className="inline-flex h-10 min-w-[96px] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-black px-3 text-xs font-medium text-white"
+                      title="Super like"
+                    >
+                      <span aria-hidden="true">⭐</span> Super
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
                         phCapture("dislike_track", { track_id: r.id, title: r.title, artist: r.artist });
                         apiFeedback(r.id, "dislike");
                       }}
-                      className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium"
+                      className="inline-flex h-10 min-w-[96px] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl border border-border bg-background px-3 text-xs font-medium"
                       title="Dislike"
                     >
                       <span aria-hidden="true">👎</span> Dislike
@@ -466,13 +483,19 @@ export default function Recommendations() {
                       <button
                         type="button"
                         onClick={() => {
-                          phCapture("click_recommendation", { track_id: r.id, title: r.title, artist: r.artist, action: "spotify" });
+                          phCapture("click_recommendation", {
+                            track_id: r.id,
+                            title: r.title,
+                            artist: r.artist,
+                            action: "spotify",
+                          });
                           apiFeedback(r.id, "click_recommendation");
                           phCapture("open_spotify", { track_id: r.id, title: r.title, artist: r.artist });
                           apiFeedback(r.id, "open_spotify");
                           window.open(r.spotifyUrl!, "_blank");
                         }}
-                        className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium"
+                        className="inline-flex h-10 min-w-[96px] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl border border-border bg-background px-3 text-xs font-medium"
+                        title="Open in Spotify"
                       >
                         <ExternalLink className="h-4 w-4" /> Spotify
                       </button>

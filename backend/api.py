@@ -581,6 +581,7 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
 
         # Personalization signals from feedback (best-effort)
         liked_ids: List[str] = []
+        superliked_ids: List[str] = []
         disliked_ids: List[str] = []
         if did:
             try:
@@ -594,6 +595,8 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
                 for r0 in rows:
                     if r0.event == "like":
                         liked_ids.append(r0.track_id)
+                    elif r0.event == "superlike":
+                        superliked_ids.append(r0.track_id)
                     elif r0.event == "dislike":
                         disliked_ids.append(r0.track_id)
             except Exception:
@@ -605,6 +608,7 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
             n=req.n,
             mode=req.mode,
             liked_ids=liked_ids,
+            superliked_ids=superliked_ids,
             disliked_ids=disliked_ids,
             exclude_ids=exclude_ids,
         )
@@ -713,7 +717,7 @@ def feedback_endpoint(
       - product analytics (PostHog)
     """
     event = (req.event or "").strip().lower()
-    if event not in {"like", "dislike", "play", "open_spotify", "click_recommendation"}:
+    if event not in {"like", "superlike", "dislike", "play", "open_spotify", "click_recommendation"}:
         raise HTTPException(status_code=400, detail="Invalid event")
 
     track_id = (req.track_id or "").strip()

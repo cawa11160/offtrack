@@ -4,7 +4,7 @@ import { Header } from "./Header";
 import { PlayerBar } from "./PlayerBar";
 import { MobileNav } from "./MobileNav";
 import { NotificationsDrawer } from "./NotificationsDrawer";
-import { Sparkles, Home, Library, Map, ShoppingBag, Search } from "lucide-react";
+import { Sparkles, Home, Library, Map, ShoppingBag, Search, Share2 } from "lucide-react";
 
 interface LayoutProps {
   children: ReactNode;
@@ -31,6 +31,7 @@ export const Layout = ({ children }: LayoutProps) => {
         icon: <Search className="h-5 w-5 text-black" />,
       },
       { label: "Concerts", to: "/concerts", icon: <Map className="h-5 w-5 text-black" /> },
+      { label: "Interactive Web", to: "/web", icon: <Share2 className="h-5 w-5 text-black" /> },
       { label: "Library", to: "/liked", icon: <Library className="h-5 w-5 text-black" /> },
       { label: "Merch", to: "/merch", icon: <ShoppingBag className="h-5 w-5 text-black" /> },
       { label: "Recommendations", to: "/recommendations", icon: <Sparkles className="h-5 w-5 text-black" /> },

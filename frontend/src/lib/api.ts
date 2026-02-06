@@ -99,7 +99,7 @@ export async function apiRecommend(
 
 export async function apiFeedback(
   trackId: string,
-  event: "like" | "dislike" | "play" | "open_spotify" | "click_recommendation"
+  event: "like" | "superlike" | "dislike" | "play" | "open_spotify" | "click_recommendation"
 ): Promise<void> {
   const r = await apiFetch(`/api/feedback`, {
     method: "POST",

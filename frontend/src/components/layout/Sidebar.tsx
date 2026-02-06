@@ -11,6 +11,7 @@ import {
   Music2,
   ListMusic,
   Search,
+  Share2,
 } from "lucide-react";
 
 type SidebarItem = { to: string; label: string; icon: React.ReactNode };
@@ -34,8 +35,10 @@ function inferRoute(label: string): string {
   if (key === "search") return "/search";
   if (key === "library") return "/library";
   if (key === "playlists") return "/playlists";
-  if (key === "concert map" || key === "concertmap") return "/concert-map";
+  // The actual route is /concerts (not /concert-map)
+  if (key === "concert map" || key === "concertmap" || key === "concerts") return "/concerts";
   if (key === "merchandise" || key === "merch") return "/merch";
+  if (key === "interactive web" || key === "interactive") return "/web";
   return `/${key.replace(/\s+/g, "-")}`;
 }
 
@@ -86,9 +89,14 @@ export function Sidebar({
       icon: <ListMusic className="text-black" size={22} strokeWidth={1.8} />,
     },
     {
-      to: "/concert-map",
+      to: "/concerts",
       label: "Concert Map",
       icon: <Map className="text-black" size={22} strokeWidth={1.8} />,
+    },
+    {
+      to: "/web",
+      label: "Interactive Web",
+      icon: <Share2 className="text-black" size={22} strokeWidth={1.8} />,
     },
     {
       to: "/merch",

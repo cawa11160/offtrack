@@ -46,7 +46,15 @@ export const ConcertCard = ({ concert }: ConcertCardProps) => {
       </div>
       
       <div className="mt-4">
-        <Button className="w-full" variant="default">
+        <Button
+          className="w-full"
+          variant="default"
+          onClick={() => {
+            if (concert.ticketUrl && concert.ticketUrl !== "#") {
+              window.open(concert.ticketUrl, "_blank");
+            }
+          }}
+        >
           <ExternalLink className="w-4 h-4 mr-2" />
           Get Tickets
         </Button>

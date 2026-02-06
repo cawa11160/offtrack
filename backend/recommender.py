@@ -363,6 +363,7 @@ class Recommender:
         n: int = 9,
         mode: str = "all",
         liked_ids: Optional[List[str]] = None,
+        superliked_ids: Optional[List[str]] = None,
         disliked_ids: Optional[List[str]] = None,
         exclude_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
@@ -442,6 +443,20 @@ class Recommender:
 
                 liked_pos = [id_to_pos.get(str(tid).strip()) for tid in (liked_ids or [])]
                 liked_pos = [p for p in liked_pos if p is not None]
+                super_pos = [id_to_pos.get(str(tid).strip()) for tid in (superliked_ids or [])]
+                super_pos = [p for p in super_pos if p is not None]
+
+                # Treat super-likes as "likes" but with stronger signal.
+                # We keep both so a user can have some normal likes and a few strong anchors.
+                if super_pos:
+                    v_super = np.mean(X[np.array(super_pos, dtype=int)], axis=0, keepdims=True)
+                    v_super = _normalize(v_super)[0]
+                    sim_super = (X[cand_pos] @ v_super).astype(float)
+                    score = score + 0.35 * sim_super
+                    if self.clusters is not None:
+                        super_clusters = {int(self.clusters[int(p)]) for p in super_pos}
+                        c_cand = self.clusters[cand_pos].astype(int)
+                        score = score + 0.10 * np.isin(c_cand, list(super_clusters)).astype(float)
                 if liked_pos:
                     v_like = np.mean(X[np.array(liked_pos, dtype=int)], axis=0, keepdims=True)
                     v_like = _normalize(v_like)[0]

@@ -1,6 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Sparkles, Search, Music2, Play, Pause, ExternalLink } from "lucide-react";
-import { apiFeedback, apiRecommend, apiSearch, type RecItem, type SearchResult, type SeedSong } from "@/lib/api";
+import { ArrowLeft, ExternalLink, Music2, Pause, Play } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+
+import {
+  apiFeedback,
+  apiRecommend,
+  apiSearch,
+  apiUrl,
+  type RecItem,
+  type SearchResult,
+  type SeedSong,
+} from "@/lib/api";
 import { addAlreadyShownIds, getAlreadyShownIds } from "@/lib/analytics";
 import { phCapture } from "@/lib/posthog";
 
@@ -34,22 +44,21 @@ function SeedInput({
 }) {
   return (
     <div className="relative">
-      <label className="text-sm font-medium">{label}</label>
+      <label className="font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black">{label}</label>
 
-      <div className="mt-2 flex items-center gap-2 rounded-xl border border-border bg-background px-4 focus-within:ring-2 focus-within:ring-black/10">
-        <Search className="h-4 w-4 text-muted-foreground" />
+      <div className="mt-2 rounded-[10px] bg-[#ababab] px-[11px] py-2">
         <input
           value={value}
           onChange={(e) => onValueChange(e.target.value)}
           placeholder={placeholder}
-          className="h-11 w-full bg-transparent outline-none"
+          className="h-6 w-full bg-transparent font-['Arimo',sans-serif] text-[20px] font-bold text-black outline-none placeholder:text-black"
         />
       </div>
 
       {(loading || results.length > 0) && value.trim().length >= 2 ? (
-        <div className="absolute z-20 mt-2 w-full overflow-hidden rounded-xl border border-border bg-background shadow-lg">
+        <div className="absolute z-20 mt-2 w-full overflow-hidden rounded-[10px] border border-black/10 bg-white shadow-md">
           {loading ? (
-            <div className="p-3 text-sm text-muted-foreground">Searching…</div>
+            <div className="p-3 font-['Arimo',sans-serif] text-[16px] font-bold text-black/70">Searching...</div>
           ) : (
             <ul className="max-h-56 overflow-auto">
               {results.slice(0, 8).map((r, idx) => (
@@ -57,14 +66,9 @@ function SeedInput({
                   <button
                     type="button"
                     onClick={() => onPick(r)}
-                    className="w-full px-3 py-2 text-left text-sm hover:bg-muted"
+                    className="w-full px-3 py-2 text-left font-['Arimo',sans-serif] text-[16px] font-bold text-black hover:bg-[#f1f1f1]"
                   >
                     {formatResult(r)}
-                    {r.source ? (
-                      <span className="ml-2 rounded-md bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                        {r.source}
-                      </span>
-                    ) : null}
                   </button>
                 </li>
               ))}
@@ -77,6 +81,8 @@ function SeedInput({
 }
 
 export default function Recommendations() {
+  const navigate = useNavigate();
+
   const [seed1, setSeed1] = useState("");
   const [seed2, setSeed2] = useState("");
   const [seed3, setSeed3] = useState("");
@@ -98,10 +104,8 @@ export default function Recommendations() {
   const [error, setError] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
 
-  // one shared audio player for the whole page (hidden)
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playingId, setPlayingId] = useState<string>("");
-  const [nowPlaying, setNowPlaying] = useState<string>("");
 
   function stopAudio() {
     const a = audioRef.current;
@@ -114,15 +118,16 @@ export default function Recommendations() {
     const a = audioRef.current;
     if (!a) return;
 
-    // toggle pause if clicking the same track
     if (playingId && playingId === rec.id && !a.paused) {
       a.pause();
       setPlayingId("");
       return;
     }
 
-    // if no previewUrl, quickest demo fallback: open spotify page if present
-    if (!rec.previewUrl) {
+    const fullAudioUrl = rec.audioUrl ? apiUrl(rec.audioUrl) : "";
+    const src = fullAudioUrl || rec.previewUrl || "";
+
+    if (!src) {
       if (rec.spotifyUrl) {
         phCapture("open_spotify", { track_id: rec.id, title: rec.title, artist: rec.artist });
         apiFeedback(rec.id, "open_spotify");
@@ -132,16 +137,16 @@ export default function Recommendations() {
     }
 
     try {
-      a.src = rec.previewUrl;
+      a.src = src;
       await a.play();
       setPlayingId(rec.id);
-      setNowPlaying(`${rec.title} — ${rec.artist}`);
-      phCapture("play_preview", { track_id: rec.id, title: rec.title, artist: rec.artist });
-      apiFeedback(rec.id, "play");
-      phCapture("play_preview", { track_id: rec.id, title: rec.title, artist: rec.artist });
+      phCapture(fullAudioUrl ? "play_full" : "play_preview", {
+        track_id: rec.id,
+        title: rec.title,
+        artist: rec.artist,
+      });
       apiFeedback(rec.id, "play");
     } catch {
-      // autoplay blocked or invalid previewUrl; fallback to Spotify
       if (rec.spotifyUrl) {
         phCapture("open_spotify", { track_id: rec.id, title: rec.title, artist: rec.artist });
         apiFeedback(rec.id, "open_spotify");
@@ -150,15 +155,12 @@ export default function Recommendations() {
     }
   }
 
-  // stop playing when recommendations list changes
   useEffect(() => {
     stopAudio();
     setPlayingId("");
-    setNowPlaying("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recs.length]);
 
-  // Debounced search (simple)
   useEffect(() => {
     const q = seed1.trim();
     if (q.length < 2) {
@@ -225,301 +227,280 @@ export default function Recommendations() {
       setRecs(next);
       addAlreadyShownIds(next.map((x) => x.id));
       phCapture("recommend_results", { n: next.length, mode, seeds_count: songs.length });
-    } catch (e: any) {
-      setError(e?.message || "Something went wrong.");
+    } catch (e: unknown) {
+      if (e instanceof Error) setError(e.message || "Something went wrong.");
+      else setError("Something went wrong.");
     } finally {
       setSubmitting(false);
     }
   }
 
+  const featuredRec = recs[0] ?? null;
+
   return (
-    <div className="mx-auto w-full max-w-6xl px-4 py-8">
-      <div className="flex items-center gap-3">
-        <div className="grid h-11 w-11 place-items-center rounded-2xl bg-black text-white">
-          <Sparkles className="h-5 w-5" />
-        </div>
-
-        <div>
-          <h1 className="text-2xl font-semibold">Recommendations</h1>
-          <p className="text-sm text-muted-foreground">
-            Pick up to 3 songs, then we’ll generate 9 recommendations.
-          </p>
-        </div>
-      </div>
-
-      <div className="mt-8 grid gap-4 rounded-2xl border border-border bg-card p-5 shadow-sm md:grid-cols-2">
-        <div className="grid gap-4">
-          <SeedInput
-            label="Song 1"
-            placeholder="Search by title or artist…"
-            value={seed1}
-            onValueChange={(v) => {
-              setSeed1(v);
-              setPicked1(null);
-            }}
-            results={r1}
-            loading={loading1}
-            onPick={(r) => {
-              setSeed1(formatResult(r));
-              setPicked1({
-                title: r.title,
-                artist: r.artist,
-                year: r.year ?? null,
-                id: r.id ?? null,
-              });
-              setR1([]);
-            }}
-          />
-
-          <SeedInput
-            label="Song 2"
-            placeholder="Search by title or artist…"
-            value={seed2}
-            onValueChange={(v) => {
-              setSeed2(v);
-              setPicked2(null);
-            }}
-            results={r2}
-            loading={loading2}
-            onPick={(r) => {
-              setSeed2(formatResult(r));
-              setPicked2({
-                title: r.title,
-                artist: r.artist,
-                year: r.year ?? null,
-                id: r.id ?? null,
-              });
-              setR2([]);
-            }}
-          />
-
-          <SeedInput
-            label="Song 3"
-            placeholder="Search by title or artist…"
-            value={seed3}
-            onValueChange={(v) => {
-              setSeed3(v);
-              setPicked3(null);
-            }}
-            results={r3}
-            loading={loading3}
-            onPick={(r) => {
-              setSeed3(formatResult(r));
-              setPicked3({
-                title: r.title,
-                artist: r.artist,
-                year: r.year ?? null,
-                id: r.id ?? null,
-              });
-              setR3([]);
-            }}
-          />
-        </div>
-
-        <div className="flex flex-col justify-between gap-4">
-          <div className="rounded-2xl border border-border bg-background p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <Music2 className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm font-medium">Popularity mode</span>
-              </div>
-
-              <select
-                value={mode}
-                onChange={(e) => setMode(e.target.value as any)}
-                className="h-10 rounded-xl border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-black/10"
-              >
-                <option value="all">All</option>
-                <option value="indie">Indie</option>
-                <option value="mainstream">Mainstream</option>
-              </select>
-            </div>
-
-            <p className="mt-2 text-sm text-muted-foreground">
-              Indie filters for lower popularity; Mainstream filters for higher popularity.
-            </p>
-          </div>
-
+    <div className="min-h-screen w-full bg-[#FFFFFF] pb-28">
+      <section className="mx-auto w-full max-w-[1420px] px-4 pt-8 sm:px-8">
+        <div className="flex items-center gap-3">
           <button
             type="button"
-            disabled={!canSubmit || submitting}
-            onClick={onSubmit}
-            className="h-11 rounded-2xl bg-black px-5 text-sm font-medium text-white disabled:opacity-50"
+            onClick={() => navigate(-1)}
+            className="grid h-10 w-10 place-items-center rounded-[10px] text-black transition-colors hover:bg-black/5"
+            aria-label="Go back"
           >
-            {submitting ? "Generating…" : "Get recommendations"}
+            <ArrowLeft className="h-7 w-7" />
           </button>
-
-          {error ? (
-            <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-              {error}
-            </div>
-          ) : null}
-        </div>
-      </div>
-
-      {/* Hidden audio element used for preview playback */}
-      <audio
-        ref={audioRef}
-        className="hidden"
-        onEnded={() => {
-          setPlayingId("");
-          setNowPlaying("");
-        }}
-      />
-
-      <div className="mt-10">
-        <h2 className="text-lg font-semibold">Results</h2>
-
-        {recs.length === 0 ? (
-          <p className="mt-2 text-sm text-muted-foreground">
-            No recommendations yet — add songs and click “Get recommendations”.
-          </p>
-        ) : (
-          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {recs.map((r) => (
-              <div
-                key={r.id}
-                className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm"
-              >
-                <div className="aspect-[16/10] w-full bg-muted">
-                  {r.imageUrl ? (
-                    <img
-                      src={r.imageUrl}
-                      alt={r.title}
-                      className="h-full w-full object-cover"
-                    />
-                  ) : (
-                    <div className="flex h-full w-full items-center justify-center bg-muted text-3xl font-semibold text-white">
-                      ♪
-                    </div>
-                  )}
-                </div>
-
-                <div className="p-4">
-                  <div className="text-sm font-semibold">{r.title}</div>
-                  <div className="text-sm text-muted-foreground">
-                    {r.artist}
-                    {r.year ? ` • ${r.year}` : ""}
-                  </div>
-                  {r.reasons?.length ? (
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      {r.reasons.slice(0, 2).join(" • ")}
-                    </div>
-                  ) : null}
-
-
-                  {/* Preview + Spotify buttons */}
-                  <div className="mt-3 flex w-full flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        phCapture("click_recommendation", {
-                          track_id: r.id,
-                          title: r.title,
-                          artist: r.artist,
-                          action: "play",
-                        });
-                        apiFeedback(r.id, "click_recommendation");
-                        playPreview(r);
-                      }}
-                      disabled={!r.previewUrl && !r.spotifyUrl}
-                      className="inline-flex h-10 min-w-[140px] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-black px-3 text-xs font-medium text-white disabled:opacity-50"
-                      title={
-                        r.previewUrl
-                          ? "Play 30s preview"
-                          : r.spotifyUrl
-                          ? "Open in Spotify"
-                          : "No preview available"
-                      }
-                    >
-                      {playingId === r.id ? (
-                        <>
-                          <Pause className="h-4 w-4" /> Pause
-                        </>
-                      ) : (
-                        <>
-                          <Play className="h-4 w-4" /> Play preview
-                        </>
-                      )}
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        phCapture("like_track", { track_id: r.id, title: r.title, artist: r.artist });
-                        apiFeedback(r.id, "like");
-                      }}
-                      className="inline-flex h-10 min-w-[96px] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl border border-border bg-background px-3 text-xs font-medium"
-                      title="Like"
-                    >
-                      <span aria-hidden="true">👍</span> Like
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        phCapture("superlike_track", { track_id: r.id, title: r.title, artist: r.artist });
-                        apiFeedback(r.id, "superlike");
-                      }}
-                      className="inline-flex h-10 min-w-[96px] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-black px-3 text-xs font-medium text-white"
-                      title="Super like"
-                    >
-                      <span aria-hidden="true">⭐</span> Super
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        phCapture("dislike_track", { track_id: r.id, title: r.title, artist: r.artist });
-                        apiFeedback(r.id, "dislike");
-                      }}
-                      className="inline-flex h-10 min-w-[96px] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl border border-border bg-background px-3 text-xs font-medium"
-                      title="Dislike"
-                    >
-                      <span aria-hidden="true">👎</span> Dislike
-                    </button>
-
-                    {r.spotifyUrl ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          phCapture("click_recommendation", {
-                            track_id: r.id,
-                            title: r.title,
-                            artist: r.artist,
-                            action: "spotify",
-                          });
-                          apiFeedback(r.id, "click_recommendation");
-                          phCapture("open_spotify", { track_id: r.id, title: r.title, artist: r.artist });
-                          apiFeedback(r.id, "open_spotify");
-                          window.open(r.spotifyUrl!, "_blank");
-                        }}
-                        className="inline-flex h-10 min-w-[96px] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl border border-border bg-background px-3 text-xs font-medium"
-                        title="Open in Spotify"
-                      >
-                        <ExternalLink className="h-4 w-4" /> Spotify
-                      </button>
-                    ) : null}
-                  </div>
-
-                  {!r.previewUrl && r.spotifyUrl ? (
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      No preview available for this track — Spotify link will open instead.
-                    </div>
-                  ) : null}
-
-                  {/* Optional debug text (remove if you don't want it) */}
-                  {/* {nowPlaying ? (
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      Now playing: {nowPlaying}
-                    </div>
-                  ) : null} */}
-                </div>
-              </div>
-            ))}
+          <div className="grid h-12 w-12 place-items-center rounded-[10px] border border-black bg-white">
+            <Music2 className="h-7 w-7 text-black" />
           </div>
-        )}
-      </div>
+        </div>
+
+        <div className="mt-6">
+          <h1 className="font-['Arimo',sans-serif] text-[48px] font-bold leading-none text-black sm:text-[60px]">
+            Recommendation
+          </h1>
+          <p className="font-['Arimo',sans-serif] text-[24px] font-bold leading-tight text-black sm:text-[42px]">
+            Pick up to 3 songs, then we&apos;ll generate 9 recommendations.
+          </p>
+        </div>
+
+        <div className="mt-4 rounded-[10px] bg-[#d9d9d9] px-4 py-4 sm:px-[17px] sm:py-[14px]">
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_378px] lg:gap-7">
+            <div className="space-y-3">
+              <SeedInput
+                label="Song 1"
+                placeholder="Enter song name..."
+                value={seed1}
+                onValueChange={(v) => {
+                  setSeed1(v);
+                  setPicked1(null);
+                }}
+                results={r1}
+                loading={loading1}
+                onPick={(r) => {
+                  setSeed1(formatResult(r));
+                  setPicked1({ title: r.title, artist: r.artist, year: r.year ?? null, id: r.id ?? null });
+                  setR1([]);
+                }}
+              />
+
+              <SeedInput
+                label="Song 2"
+                placeholder="Enter song name..."
+                value={seed2}
+                onValueChange={(v) => {
+                  setSeed2(v);
+                  setPicked2(null);
+                }}
+                results={r2}
+                loading={loading2}
+                onPick={(r) => {
+                  setSeed2(formatResult(r));
+                  setPicked2({ title: r.title, artist: r.artist, year: r.year ?? null, id: r.id ?? null });
+                  setR2([]);
+                }}
+              />
+
+              <SeedInput
+                label="Song 3"
+                placeholder="Enter song name..."
+                value={seed3}
+                onValueChange={(v) => {
+                  setSeed3(v);
+                  setPicked3(null);
+                }}
+                results={r3}
+                loading={loading3}
+                onPick={(r) => {
+                  setSeed3(formatResult(r));
+                  setPicked3({ title: r.title, artist: r.artist, year: r.year ?? null, id: r.id ?? null });
+                  setR3([]);
+                }}
+              />
+            </div>
+
+            <div>
+              <div className="font-['Arimo',sans-serif] text-black">
+                <p className="text-[30px] font-bold leading-none">Popularity mode</p>
+                <p className="mt-1 text-[15px] font-bold leading-tight">
+                  Toggle between underground and mainstream songs
+                </p>
+              </div>
+
+              <div className="mt-[10px] flex flex-wrap gap-[10px]">
+                <button
+                  type="button"
+                  onClick={() => setMode("all")}
+                  className={
+                    mode === "all"
+                      ? "h-10 rounded-[10px] bg-black px-5 font-['Arimo',sans-serif] text-[20px] font-bold text-white"
+                      : "h-10 rounded-[10px] bg-[#ababab] px-5 font-['Arimo',sans-serif] text-[20px] font-bold text-black"
+                  }
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode("mainstream")}
+                  className={
+                    mode === "mainstream"
+                      ? "h-10 rounded-[10px] bg-black px-4 font-['Arimo',sans-serif] text-[20px] font-bold text-white"
+                      : "h-10 rounded-[10px] bg-[#ababab] px-4 font-['Arimo',sans-serif] text-[20px] font-bold text-black"
+                  }
+                >
+                  Mainstream
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode("indie")}
+                  className={
+                    mode === "indie"
+                      ? "h-10 rounded-[10px] bg-black px-4 font-['Arimo',sans-serif] text-[20px] font-bold text-white"
+                      : "h-10 rounded-[10px] bg-[#ababab] px-4 font-['Arimo',sans-serif] text-[20px] font-bold text-black"
+                  }
+                >
+                  Independent
+                </button>
+              </div>
+
+              <button
+                type="button"
+                disabled={!canSubmit || submitting}
+                onClick={onSubmit}
+                className="mt-[10px] h-[47px] w-full rounded-[10px] bg-[#ff9494] font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {submitting ? "Generating..." : "Get recommendations"}
+              </button>
+
+              {error ? (
+                <div className="mt-3 rounded-[10px] border border-red-200 bg-red-50 px-3 py-2 font-['Arimo',sans-serif] text-[16px] font-bold text-red-700">
+                  {error}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+
+        <audio
+          ref={audioRef}
+          className="hidden"
+          onEnded={() => {
+            setPlayingId("");
+          }}
+        />
+
+        <div className="mt-9 w-full max-w-[540px] rounded-[10px] bg-[#d9d9d9] p-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+            <div className="h-[200px] w-[200px] shrink-0 overflow-hidden bg-[#c9c9c9] sm:h-[273px] sm:w-[273px]">
+              {featuredRec?.imageUrl ? (
+                <img src={featuredRec.imageUrl} alt={featuredRec.title} className="h-full w-full object-cover" />
+              ) : (
+                <img
+                  src="https://images.unsplash.com/photo-1619983081563-430f63602796?w=700&h=700&fit=crop"
+                  alt="Recommendation"
+                  className="h-full w-full object-cover"
+                />
+              )}
+            </div>
+
+            <div className="w-full">
+              <p className="font-['Arimo',sans-serif] text-[42px] font-bold leading-[0.95] text-black">
+                {featuredRec?.title ?? "CPR"}
+              </p>
+              <p className="mt-1 font-['Arimo',sans-serif] text-[42px] font-bold leading-[0.95] text-black">
+                {featuredRec?.artist ?? "Wetleg"}
+              </p>
+
+              <div className="mt-4 space-y-3">
+                <button
+                  type="button"
+                  onClick={() => (featuredRec ? playPreview(featuredRec) : undefined)}
+                  disabled={!featuredRec}
+                  className="flex h-[42px] w-full items-center justify-center gap-2 rounded-[10px] bg-[#ababab] font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {featuredRec && playingId === featuredRec.id ? (
+                    <>
+                      <Pause className="h-5 w-5" /> Pause
+                    </>
+                  ) : (
+                    <>
+                      <Play className="h-5 w-5" /> Preview song
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!featuredRec) return;
+                    phCapture("superlike_track", {
+                      track_id: featuredRec.id,
+                      title: featuredRec.title,
+                      artist: featuredRec.artist,
+                    });
+                    apiFeedback(featuredRec.id, "superlike");
+                  }}
+                  disabled={!featuredRec}
+                  className="h-[42px] w-full rounded-[10px] bg-[#ababab] font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Superlike
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!featuredRec) return;
+                    phCapture("like_track", {
+                      track_id: featuredRec.id,
+                      title: featuredRec.title,
+                      artist: featuredRec.artist,
+                    });
+                    apiFeedback(featuredRec.id, "like");
+                  }}
+                  disabled={!featuredRec}
+                  className="h-[42px] w-full rounded-[10px] bg-[#ababab] font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Like
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!featuredRec) return;
+                    phCapture("dislike_track", {
+                      track_id: featuredRec.id,
+                      title: featuredRec.title,
+                      artist: featuredRec.artist,
+                    });
+                    apiFeedback(featuredRec.id, "dislike");
+                  }}
+                  disabled={!featuredRec}
+                  className="h-[42px] w-full rounded-[10px] bg-[#ababab] font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Dislike
+                </button>
+
+                {featuredRec?.spotifyUrl ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      phCapture("open_spotify", {
+                        track_id: featuredRec.id,
+                        title: featuredRec.title,
+                        artist: featuredRec.artist,
+                      });
+                      apiFeedback(featuredRec.id, "open_spotify");
+                      window.open(featuredRec.spotifyUrl!, "_blank");
+                    }}
+                    className="inline-flex h-[42px] w-full items-center justify-center gap-2 rounded-[10px] bg-black font-['Arimo',sans-serif] text-[24px] font-bold leading-none text-white"
+                  >
+                    <ExternalLink className="h-4 w-4" /> Spotify
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

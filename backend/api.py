@@ -3,6 +3,9 @@ from __future__ import annotations
 import base64
 import os
 import time
+import uuid
+import mimetypes
+import re
 from typing import List, Optional, Dict, Any
 from urllib.parse import quote
 from functools import lru_cache
@@ -10,22 +13,146 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, text
 
 from db import get_db, SessionLocal, engine, wait_for_db
-from models import Track, Interaction, User, Base
+from models import Track, Interaction, User, TrackAudio, UploadedTrack, Base
 from recommender import get_recommender
 from analytics import get_analytics
 
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 
 load_dotenv()
 
 app = FastAPI(title="Offtrack API")
+
+# -----------------------------
+# Media storage (full-song uploads)
+# -----------------------------
+# For local Docker: mounted as a named volume.
+# For Render: set MEDIA_DIR to a persistent disk mount (recommended) or use S3/R2 later.
+MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "/app/media")).resolve()
+MEDIA_TRACKS_DIR = MEDIA_DIR / "tracks"       # full audio for existing catalog tracks
+MEDIA_UPLOADS_DIR = MEDIA_DIR / "uploads"     # uploaded track catalog
+MEDIA_TRACKS_DIR.mkdir(parents=True, exist_ok=True)
+MEDIA_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+UPLOAD_SECRET = os.getenv("UPLOAD_SECRET", "").strip()  # optional
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "200"))  # keep reasonable for MVP
+
+
+def _check_upload_secret(request: Request) -> bool:
+    """If UPLOAD_SECRET is set, require it in a header or query param.
+
+    This keeps your demo instance from becoming an open file drop.
+    """
+    if not UPLOAD_SECRET:
+        return True
+    got = (request.headers.get("X-Upload-Secret") or "").strip()
+    if not got:
+        got = (request.query_params.get("secret") or "").strip()
+    return bool(got) and got == UPLOAD_SECRET
+
+
+def _guess_mime_and_ext(filename: str | None, content_type: str | None) -> tuple[str, str]:
+    ct = (content_type or "").split(";")[0].strip() or "audio/mpeg"
+    name = (filename or "").strip()
+    ext = ""
+    if name and "." in name:
+        ext = "." + name.rsplit(".", 1)[-1].lower()
+
+    # Basic allow-list so we don't write weird extensions.
+    if ext not in {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}:
+        # fall back to mime inference
+        ext = mimetypes.guess_extension(ct) or ".mp3"
+        if ext == ".mpga":  # some systems map audio/mpeg -> .mpga
+            ext = ".mp3"
+
+    # normalize some mimes
+    if ct in {"audio/mp3", "audio/mpeg"}:
+        ct = "audio/mpeg"
+    return ct, ext
+
+
+def _parse_range_header(range_header: str | None, file_size: int) -> tuple[int, int] | None:
+    """Parse `Range: bytes=start-end`.
+
+    Returns (start, end) inclusive. If header invalid, returns None.
+    """
+    if not range_header:
+        return None
+    m = re.match(r"bytes=(\d*)-(\d*)", range_header.strip())
+    if not m:
+        return None
+    start_s, end_s = m.group(1), m.group(2)
+    if start_s == "" and end_s == "":
+        return None
+    if start_s == "":
+        # suffix bytes: bytes=-500
+        suffix = int(end_s)
+        if suffix <= 0:
+            return None
+        start = max(0, file_size - suffix)
+        end = file_size - 1
+        return start, end
+    start = int(start_s)
+    if start < 0 or start >= file_size:
+        return None
+    if end_s == "":
+        end = file_size - 1
+    else:
+        end = int(end_s)
+        end = min(end, file_size - 1)
+        if end < start:
+            return None
+    return start, end
+
+
+def _stream_file(path: Path, mime_type: str, request: Request):
+    """Stream a file with HTTP Range support.
+
+    This makes `<audio ...>` seeking work in browsers (and stops large files from being
+    downloaded from byte 0 every time).
+    """
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Audio file not found")
+
+    size = path.stat().st_size
+    range_header = request.headers.get("range")
+    rng = _parse_range_header(range_header, size)
+
+    def iter_bytes(start: int, length: int, chunk_size: int = 1024 * 1024):
+        with open(path, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(chunk_size, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    headers = {
+        "Accept-Ranges": "bytes",
+    }
+
+    if rng is None:
+        headers["Content-Length"] = str(size)
+        return StreamingResponse(iter_bytes(0, size), media_type=mime_type, headers=headers)
+
+    start, end = rng
+    length = end - start + 1
+    headers.update(
+        {
+            "Content-Range": f"bytes {start}-{end}/{size}",
+            "Content-Length": str(length),
+        }
+    )
+    return StreamingResponse(iter_bytes(start, length), status_code=206, media_type=mime_type, headers=headers)
 
 # -----------------------------
 # CORS
@@ -637,6 +764,17 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
     out: List[Dict[str, Any]] = []
     updates: List[Dict[str, str]] = []  # for bulk image_url persistence
 
+    # If a track has an uploaded full-audio file, include an `audioUrl` the frontend can play.
+    audio_ids: set[str] = set()
+    try:
+        candidate_ids = [str(r.get("id") or "").strip() for r in recs]
+        candidate_ids = [x for x in candidate_ids if x]
+        if candidate_ids:
+            rows = db.query(TrackAudio.track_id).filter(TrackAudio.track_id.in_(candidate_ids)).all()
+            audio_ids = set([r0[0] for r0 in rows if r0 and r0[0]])
+    except Exception:
+        audio_ids = set()
+
     for r in recs:
         title = (r.get("title") or "").strip()
         artist = (r.get("artist") or "").strip()
@@ -667,6 +805,8 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
         if image_url and tid:
             updates.append({"u": image_url, "i": tid})
 
+        audio_url = f"/api/audio/{tid}" if tid and tid in audio_ids else None
+
         out.append(
             {
                 **r,
@@ -675,6 +815,7 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
                 "spotifyUrl": spotify_url,
                 "spotifyUri": spotify_uri,
                 "durationMs": duration_ms,
+                "audioUrl": audio_url,
             }
         )
 
@@ -851,3 +992,173 @@ def open_spotify(title: str, artist: str = "", request: Request = None, backgrou
             pass
 
     return RedirectResponse(url=details["spotifyUrl"], status_code=302)
+
+
+# -----------------------------
+# Full-song uploads + streaming
+# -----------------------------
+
+
+@app.post("/api/audio/upload")
+async def upload_catalog_track_audio(
+    request: Request,
+    track_id: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Attach a full-audio file to an existing `tracks` row (seeded catalog).
+
+    Frontend can then play `/api/audio/<track_id>` instead of Spotify previews.
+    """
+    if not _check_upload_secret(request):
+        raise HTTPException(status_code=403, detail="Upload secret required")
+
+    tid = (track_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="track_id is required")
+
+    # Ensure the track exists in the dataset catalog
+    t = db.query(Track).filter(Track.id == tid).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Unknown track_id")
+
+    mime_type, ext = _guess_mime_and_ext(file.filename, file.content_type)
+    dest = MEDIA_TRACKS_DIR / f"{tid}{ext}"
+
+    # write file with a size limit
+    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    size = 0
+    with open(dest, "wb") as out_f:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > max_bytes:
+                try:
+                    dest.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise HTTPException(status_code=413, detail=f"File too large (>{MAX_UPLOAD_MB}MB)")
+            out_f.write(chunk)
+
+    row = db.query(TrackAudio).filter(TrackAudio.track_id == tid).first()
+    if row:
+        row.file_path = str(dest)
+        row.mime_type = mime_type
+        row.size_bytes = int(size)
+    else:
+        db.add(
+            TrackAudio(
+                track_id=tid,
+                file_path=str(dest),
+                mime_type=mime_type,
+                size_bytes=int(size),
+            )
+        )
+    db.commit()
+
+    return {"ok": True, "audioUrl": f"/api/audio/{quote(tid)}"}
+
+
+@app.get("/api/audio/{track_id}")
+def stream_catalog_track_audio(track_id: str, request: Request, db: Session = Depends(get_db)):
+    """Stream a catalog track's full audio (if uploaded)."""
+    tid = (track_id or "").strip()
+    row = db.query(TrackAudio).filter(TrackAudio.track_id == tid).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No full audio uploaded for this track")
+
+    path = Path(row.file_path)
+    return _stream_file(path, row.mime_type or "audio/mpeg", request)
+
+
+@app.post("/api/uploads")
+async def upload_new_track(
+    request: Request,
+    title: str = Form(...),
+    artist: str = Form(""),
+    image_url: str = Form(""),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Upload a brand-new track to Offtrack's streaming library."""
+    if not _check_upload_secret(request):
+        raise HTTPException(status_code=403, detail="Upload secret required")
+
+    title = (title or "").strip()
+    artist = (artist or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+
+    tid = str(uuid.uuid4())
+    mime_type, ext = _guess_mime_and_ext(file.filename, file.content_type)
+    dest = MEDIA_UPLOADS_DIR / f"{tid}{ext}"
+
+    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    size = 0
+    with open(dest, "wb") as out_f:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > max_bytes:
+                try:
+                    dest.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise HTTPException(status_code=413, detail=f"File too large (>{MAX_UPLOAD_MB}MB)")
+            out_f.write(chunk)
+
+    row = UploadedTrack(
+        id=tid,
+        title=title,
+        artist=artist,
+        image_url=(image_url or "").strip() or None,
+        file_path=str(dest),
+        mime_type=mime_type,
+        size_bytes=int(size),
+    )
+    db.add(row)
+    db.commit()
+
+    return {
+        "id": tid,
+        "title": title,
+        "artist": artist,
+        "imageUrl": row.image_url,
+        "audioUrl": f"/api/uploads/{tid}/stream",
+        "mimeType": mime_type,
+        "sizeBytes": int(size),
+    }
+
+
+@app.get("/api/uploads")
+def list_uploads(limit: int = 50, db: Session = Depends(get_db)):
+    limit = max(1, min(int(limit or 50), 200))
+    rows = db.query(UploadedTrack).order_by(UploadedTrack.created_at.desc()).limit(limit).all()
+    return {
+        "tracks": [
+            {
+                "id": r.id,
+                "title": r.title,
+                "artist": r.artist,
+                "imageUrl": r.image_url,
+                "audioUrl": f"/api/uploads/{r.id}/stream",
+                "mimeType": r.mime_type,
+                "sizeBytes": r.size_bytes,
+                "createdAt": getattr(r, "created_at", None),
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/api/uploads/{upload_id}/stream")
+def stream_uploaded_track(upload_id: str, request: Request, db: Session = Depends(get_db)):
+    uid = (upload_id or "").strip()
+    row = db.query(UploadedTrack).filter(UploadedTrack.id == uid).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Unknown upload id")
+    return _stream_file(Path(row.file_path), row.mime_type or "audio/mpeg", request)

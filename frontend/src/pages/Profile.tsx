@@ -1,94 +1,141 @@
-import { useState } from "react";
-import { Camera, Music, User2 } from "lucide-react";
+import { ArrowLeft, ArrowLeftCircle, ArrowRightCircle, Music2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+
+type CoverItem = {
+  id: string;
+  title: string;
+  subtitle: string;
+  imageUrl: string;
+};
+
+const topTracks: CoverItem[] = [
+  {
+    id: "track-1",
+    title: "The Ramones",
+    subtitle: "Ramones",
+    imageUrl: "https://images.unsplash.com/photo-1605721911519-3dfeb3be25e7?w=400&h=400&fit=crop",
+  },
+  {
+    id: "track-2",
+    title: "Moisturiser",
+    subtitle: "Wetleg",
+    imageUrl: "https://images.unsplash.com/photo-1619983081563-430f63602796?w=400&h=400&fit=crop",
+  },
+  {
+    id: "track-3",
+    title: "Models",
+    subtitle: "The Wallows",
+    imageUrl: "https://images.unsplash.com/photo-1511379938547-c1f69419868d?w=400&h=400&fit=crop",
+  },
+];
+
+const playlists: CoverItem[] = [
+  {
+    id: "playlist-1",
+    title: "The Ramones",
+    subtitle: "Ramones",
+    imageUrl: "https://images.unsplash.com/photo-1605721911519-3dfeb3be25e7?w=400&h=400&fit=crop",
+  },
+];
+
+function CoverCard({ item }: { item: CoverItem }) {
+  return (
+    <article className="w-[156px] shrink-0">
+      <div className="h-[156px] w-[156px] overflow-hidden bg-[#bfbfbf]">
+        <img src={item.imageUrl} alt={item.title} className="h-full w-full object-cover" />
+      </div>
+      <div className="mt-2 text-center font-['Arimo',sans-serif] text-[21px] font-bold leading-[0.95] text-black">
+        <p>{item.title}</p>
+        <p>{item.subtitle}</p>
+      </div>
+    </article>
+  );
+}
 
 export default function Profile() {
-  const [displayName, setDisplayName] = useState("Cathy Wang");
-  const [bio, setBio] = useState("Discovering what’s next. Indie, niche, new.");
+  const navigate = useNavigate();
 
   return (
-    <div className="mx-auto max-w-4xl px-6 py-10">
-      <h1 className="text-3xl font-semibold tracking-tight">Profile</h1>
-      <p className="mt-2 text-sm text-muted-foreground">
-        Basic profile info (demo only).
-      </p>
-
-      <div className="mt-8 grid gap-4 md:grid-cols-[280px_1fr]">
-        <div className="rounded-2xl border border-border bg-card p-5">
-          <div className="flex items-center gap-4">
-            <div className="grid h-16 w-16 place-items-center rounded-2xl border border-border bg-background">
-              <User2 className="h-7 w-7 text-muted-foreground" />
-            </div>
-            <div className="min-w-0">
-              <div className="truncate text-lg font-semibold">{displayName}</div>
-              <div className="truncate text-sm text-muted-foreground">
-                @demo_user
-              </div>
-            </div>
-          </div>
-
+    <div className="min-h-screen w-full bg-[#FFFFFF] pb-36">
+      <section className="mx-auto w-full max-w-[1420px] px-4 pt-6 sm:px-8">
+        <div className="flex items-center gap-3">
           <button
             type="button"
-            className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-sm hover:bg-accent"
+            onClick={() => navigate(-1)}
+            className="grid h-10 w-10 place-items-center rounded-[10px] text-black transition-colors hover:bg-black/5"
+            aria-label="Go back"
           >
-            <Camera className="h-4 w-4" />
-            Change photo
+            <ArrowLeft className="h-7 w-7" />
           </button>
-
-          <div className="mt-6 space-y-3 text-sm">
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Music className="h-4 w-4" />
-              Taste: “Underground / New Releases”
-            </div>
-            <div className="text-muted-foreground">Location: Sydney (demo)</div>
+          <div className="grid h-12 w-12 place-items-center rounded-[10px] border border-black bg-white">
+            <Music2 className="h-7 w-7 text-black" />
           </div>
         </div>
 
-        <div className="rounded-2xl border border-border bg-card p-5">
-          <div className="space-y-4">
-            <div>
-              <label className="text-sm font-medium">Display name</label>
-              <input
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                className="mt-2 h-11 w-full rounded-xl border border-border bg-background px-4 outline-none focus:ring-2 focus:ring-black/10"
-              />
+        <div className="mt-4 rounded-[10px] bg-[#d9d9d9] px-5 py-5 sm:px-6 sm:py-6">
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <div className="flex min-w-[320px] items-center gap-6">
+              <div className="h-[185px] w-[185px] overflow-hidden rounded-full bg-[#a7b2bf]">
+                <img
+                  src="https://images.unsplash.com/photo-1487412720507-e7ab37603c6f?w=500&h=500&fit=crop"
+                  alt="Melissa Wong"
+                  className="h-full w-full object-cover"
+                />
+              </div>
+
+              <div className="font-['Arimo',sans-serif] font-bold text-black">
+                <h1 className="text-[42px] leading-none">Profile</h1>
+                <p className="mt-3 text-[29px] leading-none">Melissa Wong</p>
+                <p className="text-[29px] leading-none">@Mlissa</p>
+                <p className="mt-2 text-[29px] leading-none">5 followers and 10 following</p>
+              </div>
             </div>
 
-            <div>
-              <label className="text-sm font-medium">Bio</label>
-              <textarea
-                value={bio}
-                onChange={(e) => setBio(e.target.value)}
-                className="mt-2 min-h-[110px] w-full rounded-xl border border-border bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-black/10"
-              />
-            </div>
+            <button
+              type="button"
+              className="h-[64px] rounded-[10px] border-[5px] border-black px-8 font-['Arimo',sans-serif] text-[29px] font-bold leading-none text-black"
+            >
+              Edit
+            </button>
+          </div>
+        </div>
 
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="rounded-xl bg-black px-4 py-2 text-sm text-white hover:opacity-90"
-                onClick={() => console.log("Saved profile", { displayName, bio })}
-              >
-                Save changes
-              </button>
-              <button
-                type="button"
-                className="rounded-xl border border-border bg-card px-4 py-2 text-sm hover:bg-accent"
-                onClick={() => {
-                  setDisplayName("Cathy Wang");
-                  setBio("Discovering what’s next. Indie, niche, new.");
-                }}
-              >
-                Reset
-              </button>
+        <div className="mt-5">
+          <div className="flex items-center justify-between">
+            <h2 className="font-['Arimo',sans-serif] text-[29px] font-bold leading-none text-black">Top tracks from you</h2>
+            <div className="flex items-center gap-2 text-black">
+              <ArrowLeftCircle className="h-6 w-6" />
+              <ArrowRightCircle className="h-6 w-6" />
             </div>
+          </div>
 
-            <div className="text-xs text-muted-foreground">
-              Demo only — changes are not persisted.
+          <div className="mt-2 rounded-[10px] bg-[#d9d9d9] px-4 py-4">
+            <div className="flex gap-8 overflow-x-auto pb-1">
+              {topTracks.map((item) => (
+                <CoverCard key={item.id} item={item} />
+              ))}
             </div>
           </div>
         </div>
-      </div>
+
+        <div className="mt-5">
+          <div className="flex items-center justify-between">
+            <h2 className="font-['Arimo',sans-serif] text-[29px] font-bold leading-none text-black">Your playlists</h2>
+            <div className="flex items-center gap-2 text-black">
+              <ArrowLeftCircle className="h-6 w-6" />
+              <ArrowRightCircle className="h-6 w-6" />
+            </div>
+          </div>
+
+          <div className="mt-2 rounded-[10px] bg-[#d9d9d9] px-4 py-4">
+            <div className="flex gap-8 overflow-x-auto pb-1">
+              {playlists.map((item) => (
+                <CoverCard key={item.id} item={item} />
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import Text, String, Integer, Float, Boolean, Index, DateTime, func
+from sqlalchemy import Text, String, Integer, Float, Boolean, Index, DateTime, func, ForeignKey
 
 
 class Base(DeclarativeBase):
@@ -61,5 +61,47 @@ class Interaction(Base):
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
+class TrackAudio(Base):
+    """Optional full-audio attachment for an existing Track (dataset track).
+
+    This is how you get *full song* playback without relying on Spotify previews.
+    Users can upload audio files which we store on disk (or later: S3/R2).
+    """
+
+    __tablename__ = "track_audio"
+
+    track_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("tracks.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    file_path: Mapped[str] = mapped_column(Text)
+    mime_type: Mapped[str] = mapped_column(String(128), default="audio/mpeg")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class UploadedTrack(Base):
+    """User-uploaded full-song tracks (independent of the dataset features).
+
+    This enables Offtrack to behave like a real streaming product: users/artists upload
+    audio, and Offtrack can stream it back.
+    """
+
+    __tablename__ = "uploaded_tracks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, index=True)
+    artist: Mapped[str] = mapped_column(Text, index=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    file_path: Mapped[str] = mapped_column(Text)
+    mime_type: Mapped[str] = mapped_column(String(128), default="audio/mpeg")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 Index("ix_tracks_name_artists", Track.name, Track.artists)
 Index("ix_interactions_distinct_track", Interaction.distinct_id, Interaction.track_id)
+Index("ix_track_audio_track_id", TrackAudio.track_id)
+Index("ix_uploaded_tracks_title_artist", UploadedTrack.title, UploadedTrack.artist)

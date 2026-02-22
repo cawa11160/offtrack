@@ -25,6 +25,7 @@ export type RecItem = {
   imageUrl?: string;
 
   previewUrl?: string | null;
+  audioUrl?: string | null;
   spotifyUrl?: string | null;
   spotifyUri?: string | null;
   durationMs?: number | null;
@@ -41,6 +42,11 @@ export type RecommendResponse = {
 // great with a Vercel rewrite.
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").trim().replace(/\/$/, "");
 
+export function apiUrl(path: string) {
+  // Use backend base if configured; otherwise same-origin.
+  return API_BASE ? `${API_BASE}${path}` : path;
+}
+
 function withDistinct(headers?: HeadersInit): HeadersInit {
   const h = new Headers(headers);
   // keep both: header for server logs + body field for explicit tracking
@@ -49,7 +55,7 @@ function withDistinct(headers?: HeadersInit): HeadersInit {
 }
 
 async function apiFetch(path: string, init: RequestInit = {}) {
-  const url = API_BASE ? `${API_BASE}${path}` : path;
+  const url = apiUrl(path);
   return fetch(url, { credentials: init.credentials ?? "include", ...init, headers: withDistinct(init.headers) });
 }
 
@@ -108,4 +114,39 @@ export async function apiFeedback(
   });
   // feedback is best-effort
   if (!r.ok) return;
+}
+
+export type UploadedTrackItem = {
+  id: string;
+  title: string;
+  artist?: string;
+  imageUrl?: string | null;
+  audioUrl: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  createdAt?: string;
+};
+
+export async function apiListUploads(limit = 50): Promise<UploadedTrackItem[]> {
+  const r = await apiFetch(`/api/uploads?limit=${limit}`);
+  if (!r.ok) return [];
+  const data = await r.json().catch(() => ({}));
+  return (data?.tracks ?? []) as UploadedTrackItem[];
+}
+
+export async function apiUploadNewTrack(args: {
+  title: string;
+  artist?: string;
+  imageUrl?: string;
+  file: File;
+}): Promise<UploadedTrackItem> {
+  const fd = new FormData();
+  fd.append("title", args.title);
+  fd.append("artist", args.artist ?? "");
+  fd.append("image_url", args.imageUrl ?? "");
+  fd.append("file", args.file);
+
+  const r = await apiFetch(`/api/uploads`, { method: "POST", body: fd });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as UploadedTrackItem;
 }

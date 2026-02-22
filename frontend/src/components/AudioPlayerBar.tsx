@@ -5,6 +5,7 @@ export type TrackPlayable = {
   artist: string;
   imageUrl?: string | null;
   previewUrl?: string | null;
+  audioUrl?: string | null;
   spotifyUrl?: string | null;
   durationMs?: number | null;
 };
@@ -29,12 +30,13 @@ export default function AudioPlayerBar({
     setIsPlaying(false);
 
     // auto-play when a new playable track is selected
-    if (track?.previewUrl) {
-      audioRef.current.src = track.previewUrl;
+    const src = track?.audioUrl || track?.previewUrl || "";
+    if (src) {
+      audioRef.current.src = src;
       audioRef.current.load();
       audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
     }
-  }, [track?.previewUrl]);
+  }, [track?.audioUrl, track?.previewUrl]);
 
   useEffect(() => {
     const a = audioRef.current;
@@ -57,7 +59,7 @@ export default function AudioPlayerBar({
   const toggle = async () => {
     const a = audioRef.current;
     if (!a) return;
-    if (!track?.previewUrl) return;
+    if (!(track?.audioUrl || track?.previewUrl)) return;
 
     if (a.paused) {
       try {

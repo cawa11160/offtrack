@@ -9,6 +9,7 @@ import Index from "./pages/Index";
 import Concerts from "./pages/Concerts";
 import Merchandise from "./pages/Merchandise";
 import InteractiveWeb from "./pages/InteractiveWeb";
+import Uploads from "./pages/Uploads";
 import Liked from "./pages/Liked";
 import NotFound from "./pages/NotFound";
 import ReleasePage from "./pages/Release";
@@ -43,6 +44,9 @@ const App = () => (
 
             {/* INTERACTIVE WEB */}
             <Route path="/web" element={<InteractiveWeb />} />
+
+            {/* UPLOADS (full-song streaming MVP) */}
+            <Route path="/uploads" element={<Uploads />} />
 
             {/* ✅ NEW: Filters page */}
             <Route path="/concerts/filters" element={<ConcertFilters />} />

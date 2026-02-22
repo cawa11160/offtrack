@@ -29,10 +29,17 @@ services:
       REFRESH_TTL_DAYS: ${REFRESH_TTL_DAYS-30}
       COOKIE_SECURE: ${COOKIE_SECURE-false}
       COOKIE_SAMESITE: ${COOKIE_SAMESITE-lax}
+      # Full-song uploads (stored on a mounted volume)
+      MEDIA_DIR: /app/media
+      # Optional protection for upload endpoints
+      UPLOAD_SECRET: ${UPLOAD_SECRET-}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB-200}
     ports:
       - "8000:8000"
     depends_on:
       - db
+    volumes:
+      - offtrack_media:/app/media
 
   frontend:
     build: ./frontend/
@@ -46,3 +53,4 @@ services:
 
 volumes:
   offtrack_pg:
+  offtrack_media:

@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Pause, Play, Repeat, Shuffle, SkipBack, SkipForward, Volume2, VolumeX } from "lucide-react";
+import { apiListUploads, apiRecommend, apiUrl, type RecItem } from "@/lib/api";
 
 type Song = {
   title: string;
@@ -9,7 +10,8 @@ type Song = {
 };
 
 type PlayableSong = Song & {
-  audioUrl: string;
+  sourceUrl: string;
+  sourceKind: "upload" | "preview";
 };
 
 type PinkPlayerBarProps = {
@@ -44,43 +46,7 @@ function CustomSlider({
 
 export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayerBarProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioLibrary = useMemo<PlayableSong[]>(
-    () => [
-      {
-        ...currentSong,
-        audioUrl: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
-      },
-      {
-        title: "Electric Dreams",
-        artist: "Voltage",
-        coverUrl: "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400&h=400&fit=crop",
-        duration: 0,
-        audioUrl: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
-      },
-      {
-        title: "Urban Poetry",
-        artist: "Street Echo",
-        coverUrl: "https://images.unsplash.com/photo-1571330735066-03aaa9429d89?w=400&h=400&fit=crop",
-        duration: 0,
-        audioUrl: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3",
-      },
-      {
-        title: "Neon Nights",
-        artist: "Synthwave Collective",
-        coverUrl: "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=400&h=400&fit=crop",
-        duration: 0,
-        audioUrl: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3",
-      },
-      {
-        title: "Silent Storm",
-        artist: "Aurora Borealis",
-        coverUrl: "https://images.unsplash.com/photo-1459749411175-04bf5292ceea?w=400&h=400&fit=crop",
-        duration: 0,
-        audioUrl: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3",
-      },
-    ],
-    [currentSong]
-  );
+  const [audioLibrary, setAudioLibrary] = useState<PlayableSong[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -88,13 +54,60 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
   const [isShuffle, setIsShuffle] = useState(false);
   const [isRepeat, setIsRepeat] = useState(false);
   const [duration, setDuration] = useState(currentSong.duration || 0);
-  const activeSong = audioLibrary[activeIndex] ?? audioLibrary[0] ?? { ...currentSong, audioUrl: "" };
+  const activeSong = audioLibrary[activeIndex] ?? audioLibrary[0];
+  const displaySong: Song = activeSong ?? currentSong;
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const next: PlayableSong[] = [];
+
+      const uploads = await apiListUploads(20).catch(() => []);
+      for (const u of uploads) {
+        if (!u.audioUrl) continue;
+        next.push({
+          title: (u.title || "Uploaded Track").trim(),
+          artist: (u.artist || "Unknown Artist").trim(),
+          coverUrl: (u.imageUrl || currentSong.coverUrl || "").trim(),
+          duration: 0,
+          sourceUrl: apiUrl(u.audioUrl),
+          sourceKind: "upload",
+        });
+      }
+
+      const recData = await apiRecommend([], 24, "all", []).catch(() => ({ recommendations: [] as RecItem[] }));
+      for (const r of recData.recommendations || []) {
+        const src = (r.audioUrl ? apiUrl(r.audioUrl) : "") || (r.previewUrl || "");
+        if (!src) continue;
+        next.push({
+          title: (r.title || "Unknown Track").trim(),
+          artist: (r.artist || "Unknown Artist").trim(),
+          coverUrl: (r.imageUrl || currentSong.coverUrl || "").trim(),
+          duration: (r.durationMs && Number.isFinite(r.durationMs) ? Math.max(0, Math.floor(r.durationMs / 1000)) : 0),
+          sourceUrl: src,
+          sourceKind: r.audioUrl ? "upload" : "preview",
+        });
+      }
+
+      const deduped = Array.from(
+        new Map(next.map((t) => [`${t.title.toLowerCase()}|${t.artist.toLowerCase()}|${t.sourceUrl}`, t])).values()
+      );
+      if (!alive) return;
+      setAudioLibrary(deduped);
+      setActiveIndex(0);
+      setDuration(deduped[0]?.duration || currentSong.duration || 0);
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [currentSong]);
 
   const getNextIndex = (fromIndex: number) => {
     if (audioLibrary.length <= 1) return fromIndex;
@@ -116,11 +129,11 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
   const playTrack = async (index: number) => {
     const audio = audioRef.current;
     const song = audioLibrary[index];
-    if (!audio || !song?.audioUrl) return;
+    if (!audio || !song?.sourceUrl) return;
     setActiveIndex(index);
     setCurrentTime(0);
     setDuration(song.duration || 0);
-    audio.src = song.audioUrl;
+    audio.src = song.sourceUrl;
     audio.currentTime = 0;
     audio.load();
     try {
@@ -138,7 +151,7 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
     const onTime = () => setCurrentTime(audio.currentTime || 0);
     const onMeta = () => {
       const nextDuration = Number.isFinite(audio.duration) ? audio.duration : 0;
-      setDuration(nextDuration || activeSong.duration || 0);
+      setDuration(nextDuration || activeSong?.duration || 0);
     };
     const onEnded = () => {
       if (isRepeat) {
@@ -146,7 +159,11 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
         audio.play().catch(() => setIsPlaying(false));
         return;
       }
-      void playTrack(getNextIndex(activeIndex));
+      if (audioLibrary.length > 0) {
+        void playTrack(getNextIndex(activeIndex));
+      } else {
+        setIsPlaying(false);
+      }
     };
     const onError = () => {
       setIsPlaying(false);
@@ -162,7 +179,7 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("error", onError);
     };
-  }, [activeIndex, activeSong.duration, isRepeat]);
+  }, [activeIndex, activeSong?.duration, audioLibrary.length, isRepeat]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -178,6 +195,7 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
       setIsPlaying(false);
       return;
     }
+    if (audioLibrary.length === 0) return;
 
     // User asked for a different song every time Play is pressed.
     const next = getNextIndex(activeIndex);
@@ -204,10 +222,17 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
       <div className="h-24 overflow-hidden rounded-l-full rounded-r-[10px] border-2 border-[#ff8a8a] bg-[#ff8a8a] px-5 shadow-xl">
         <div className="flex h-full items-center justify-between">
           <div className="hidden w-1/4 min-w-[180px] items-center gap-3 lg:flex">
-            <img src={activeSong.coverUrl} alt="Album Art" className="h-16 w-16 rounded-lg object-cover shadow-md" />
+            <img src={displaySong.coverUrl} alt="Album Art" className="h-16 w-16 rounded-lg object-cover shadow-md" />
             <div className="flex flex-col">
-              <h3 className="text-xl font-black uppercase leading-tight tracking-tight text-black">{activeSong.title}</h3>
-              <p className="text-base font-semibold leading-tight text-black/90">{activeSong.artist}</p>
+              <h3 className="text-xl font-black uppercase leading-tight tracking-tight text-black">{displaySong.title}</h3>
+              <p className="text-base font-semibold leading-tight text-black/90">
+                {displaySong.artist}
+                {activeSong ? (
+                  <span className="ml-2 text-xs uppercase tracking-wide text-black/60">
+                    {activeSong.sourceKind === "upload" ? "full" : "preview"}
+                  </span>
+                ) : null}
+              </p>
             </div>
           </div>
 
@@ -216,13 +241,13 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
               <button onClick={() => setIsShuffle((v) => !v)} className={isShuffle ? "text-black" : "text-black/60"}>
                 <Shuffle size={24} strokeWidth={2.5} />
               </button>
-              <button className="text-black" onClick={() => void playTrack(getPrevIndex(activeIndex))}>
+              <button className="text-black" onClick={() => void playTrack(getPrevIndex(activeIndex))} disabled={audioLibrary.length === 0}>
                 <SkipBack size={28} fill="black" strokeWidth={0} />
               </button>
-              <button onClick={() => void togglePlay()} className="text-black">
+              <button onClick={() => void togglePlay()} className="text-black" disabled={audioLibrary.length === 0}>
                 {isPlaying ? <Pause size={32} fill="black" strokeWidth={0} /> : <Play size={32} fill="black" strokeWidth={0} />}
               </button>
-              <button className="text-black" onClick={() => void playTrack(getNextIndex(activeIndex))}>
+              <button className="text-black" onClick={() => void playTrack(getNextIndex(activeIndex))} disabled={audioLibrary.length === 0}>
                 <SkipForward size={28} fill="black" strokeWidth={0} />
               </button>
               <button onClick={() => setIsRepeat((v) => !v)} className={isRepeat ? "text-black" : "text-black/60"}>
@@ -235,6 +260,11 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
               <CustomSlider value={currentTime} max={Math.max(duration, 1)} onChange={onSeek} />
               <span className="min-w-[35px] text-base font-bold text-black">{formatTime(duration || 0)}</span>
             </div>
+            {!activeSong ? (
+              <p className="mt-1 text-xs font-bold text-black/60">
+                No playable track found yet. Add uploaded songs or enable Spotify previews in backend.
+              </p>
+            ) : null}
           </div>
 
           <div className="hidden w-1/4 min-w-[130px] items-center justify-end gap-3 md:flex">

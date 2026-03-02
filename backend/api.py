@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_, text
 
 from db import get_db, SessionLocal, engine, wait_for_db
-from models import Track, Interaction, User, TrackAudio, UploadedTrack, Base
+from models import Track, Interaction, User, TrackAudio, UploadedTrack, LyricReel, Base
 from recommender import get_recommender
 from analytics import get_analytics
 
@@ -30,6 +30,13 @@ load_dotenv()
 
 app = FastAPI(title="Offtrack API")
 
+try:
+    from spotify_auth import router as spotify_router
+    app.include_router(spotify_router)
+except Exception:
+    # Spotify auth endpoints are optional in local/dev environments.
+    pass
+
 # -----------------------------
 # Media storage (full-song uploads)
 # -----------------------------
@@ -38,8 +45,12 @@ app = FastAPI(title="Offtrack API")
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "/app/media")).resolve()
 MEDIA_TRACKS_DIR = MEDIA_DIR / "tracks"       # full audio for existing catalog tracks
 MEDIA_UPLOADS_DIR = MEDIA_DIR / "uploads"     # uploaded track catalog
+MEDIA_REELS_DIR = MEDIA_DIR / "reels"         # generated lyric reels (mp4)
+MEDIA_REEL_ASSETS_DIR = MEDIA_DIR / "reel_assets"  # temporary generated images
 MEDIA_TRACKS_DIR.mkdir(parents=True, exist_ok=True)
 MEDIA_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+MEDIA_REELS_DIR.mkdir(parents=True, exist_ok=True)
+MEDIA_REEL_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 UPLOAD_SECRET = os.getenv("UPLOAD_SECRET", "").strip()  # optional
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "200"))  # keep reasonable for MVP
@@ -180,7 +191,11 @@ from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# NOTE: We intentionally use PBKDF2 for password hashing.
+# bcrypt can fail in slim Docker images due to native dependency issues,
+# which shows up as a 500 "Internal Server Error" during signup.
+# PBKDF2 is slower than bcrypt but is pure-Python and reliable for an MVP.
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev_change_me").strip()
 JWT_ALG = os.getenv("JWT_ALG", "HS256").strip() or "HS256"
@@ -383,11 +398,15 @@ def _safe_year(y: Optional[int]) -> Optional[int]:
 
 
 def _track_to_playback_fields(track_obj: Dict[str, Any]) -> Dict[str, Any]:
+    artists = track_obj.get("artists") or []
+    first_artist = (artists[0] if artists else {}) or {}
     return {
         "previewUrl": track_obj.get("preview_url"),
         "spotifyUrl": (track_obj.get("external_urls") or {}).get("spotify"),
         "spotifyUri": track_obj.get("uri"),
         "durationMs": track_obj.get("duration_ms"),
+        "spotifyArtistUrl": (first_artist.get("external_urls") or {}).get("spotify"),
+        "spotifyArtistName": first_artist.get("name"),
     }
 
 
@@ -719,13 +738,24 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
                     .limit(200)
                     .all()
                 )
+                # Use latest signal per track to avoid conflicting history (e.g., liked then disliked).
+                latest_by_track: Dict[str, str] = {}
                 for r0 in rows:
-                    if r0.event == "like":
-                        liked_ids.append(r0.track_id)
-                    elif r0.event == "superlike":
-                        superliked_ids.append(r0.track_id)
-                    elif r0.event == "dislike":
-                        disliked_ids.append(r0.track_id)
+                    tid = (r0.track_id or "").strip()
+                    ev = (r0.event or "").strip().lower()
+                    if not tid or ev not in {"like", "superlike", "dislike"}:
+                        continue
+                    if tid in latest_by_track:
+                        continue
+                    latest_by_track[tid] = ev
+
+                for tid, ev in latest_by_track.items():
+                    if ev == "like":
+                        liked_ids.append(tid)
+                    elif ev == "superlike":
+                        superliked_ids.append(tid)
+                    elif ev == "dislike":
+                        disliked_ids.append(tid)
             except Exception:
                 pass
 
@@ -762,6 +792,7 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
         pass
 
     out: List[Dict[str, Any]] = []
+    musicians: Dict[str, Dict[str, Any]] = {}
     updates: List[Dict[str, str]] = []  # for bulk image_url persistence
 
     # If a track has an uploaded full-audio file, include an `audioUrl` the frontend can play.
@@ -816,8 +847,28 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
                 "spotifyUri": spotify_uri,
                 "durationMs": duration_ms,
                 "audioUrl": audio_url,
+                "spotifyArtistUrl": (details.get("spotifyArtistUrl") if spotify_enabled() and details else None),
             }
         )
+
+        artist_name = artist or "Unknown Artist"
+        key = artist_name.lower().strip()
+        if key not in musicians:
+            musicians[key] = {
+                "id": str(uuid.uuid4()),
+                "name": artist_name,
+                "imageUrl": image_url,
+                "spotifyUrl": (details.get("spotifyArtistUrl") if spotify_enabled() and details else None),
+                "topTracks": [],
+                "reasons": [],
+                "concertsUrl": f"https://www.songkick.com/search?query={quote(artist_name)}",
+            }
+        m = musicians[key]
+        if title and title not in m["topTracks"] and len(m["topTracks"]) < 3:
+            m["topTracks"].append(title)
+        for reason in (r.get("reasons") or []):
+            if isinstance(reason, str) and reason and reason not in m["reasons"] and len(m["reasons"]) < 2:
+                m["reasons"].append(reason)
 
     # Best-effort bulk persistence (single session)
     if updates:
@@ -839,7 +890,8 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
             except Exception:
                 pass
 
-    return {"recommendations": out}
+    musician_list = list(musicians.values())[:6]
+    return {"recommendations": out, "musicians": musician_list}
 
 
 
@@ -864,6 +916,8 @@ def feedback_endpoint(
     track_id = (req.track_id or "").strip()
     if not track_id:
         raise HTTPException(status_code=400, detail="Missing track_id")
+    if len(track_id) > 256:
+        raise HTTPException(status_code=400, detail="Invalid track_id")
 
     distinct_id = None
     try:
@@ -874,8 +928,29 @@ def feedback_endpoint(
 
     # persist interaction
     try:
-        db.add(Interaction(distinct_id=distinct_id, track_id=track_id, event=event))
-        db.commit()
+        # Suppress immediate duplicate signals for same user/track/event.
+        last = (
+            db.query(Interaction)
+            .filter(
+                Interaction.distinct_id == distinct_id,
+                Interaction.track_id == track_id,
+                Interaction.event == event,
+            )
+            .order_by(Interaction.created_at.desc())
+            .first()
+        )
+        should_insert = True
+        if last and getattr(last, "created_at", None):
+            try:
+                delta = (_now_utc() - last.created_at).total_seconds()
+                if delta < 5:
+                    should_insert = False
+            except Exception:
+                pass
+
+        if should_insert:
+            db.add(Interaction(distinct_id=distinct_id, track_id=track_id, event=event))
+            db.commit()
     except Exception:
         db.rollback()
 
@@ -936,6 +1011,64 @@ def preview_endpoint(req: PreviewRequest, request: Request = None, background_ta
         "spotifyUri": details.get("spotifyUri"),
         "durationMs": details.get("durationMs"),
         "imageUrl": details.get("imageUrl"),
+    }
+
+
+@app.get("/api/track")
+def track_detail(
+    track_id: str = "",
+    title: str = "",
+    artist: str = "",
+    db: Session = Depends(get_db),
+):
+    tid = (track_id or "").strip()
+    t = (title or "").strip()
+    a = (artist or "").strip()
+
+    row = None
+    if tid:
+        try:
+            row = db.query(Track).filter(Track.id == tid).first()
+        except Exception:
+            row = None
+
+    if row:
+        t = (row.name or "").strip() or t
+        a = (row.artists or "").strip() or a
+    if not t:
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    details = spotify_track_lookup(t, a) if spotify_enabled() else None
+    image_url = ""
+    if row and isinstance(getattr(row, "image_url", None), str):
+        image_url = (row.image_url or "").strip()
+    if not image_url and details:
+        dimg = details.get("imageUrl")
+        if isinstance(dimg, str):
+            image_url = dimg.strip()
+    if not image_url:
+        image_url = cover_for(t, a).strip()
+
+    audio_url = None
+    if tid:
+        try:
+            has_audio = db.query(TrackAudio.track_id).filter(TrackAudio.track_id == tid).first()
+            if has_audio:
+                audio_url = f"/api/audio/{quote(tid)}"
+        except Exception:
+            audio_url = None
+
+    return {
+        "id": tid or (details.get("spotifyId") if details else None),
+        "title": t,
+        "artist": a,
+        "imageUrl": image_url,
+        "audioUrl": audio_url,
+        "previewUrl": (details.get("previewUrl") if details else None),
+        "spotifyUrl": (details.get("spotifyUrl") if details else None),
+        "spotifyUri": (details.get("spotifyUri") if details else None),
+        "durationMs": (details.get("durationMs") if details else None),
+        "source": "db" if row else ("spotify" if details else "unknown"),
     }
 
 
@@ -1162,3 +1295,347 @@ def stream_uploaded_track(upload_id: str, request: Request, db: Session = Depend
     if not row:
         raise HTTPException(status_code=404, detail="Unknown upload id")
     return _stream_file(Path(row.file_path), row.mime_type or "audio/mpeg", request)
+
+
+# -----------------------------
+# Lyric AI reels
+# -----------------------------
+from PIL import Image, ImageDraw, ImageFont
+import imageio.v2 as imageio
+from io import BytesIO
+
+LYRIC_AI_PROVIDER = (os.getenv("LYRIC_AI_PROVIDER", "openai").strip().lower() or "openai")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_IMAGE_MODEL = (os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1").strip() or "gpt-image-1")
+OPENAI_IMAGE_SIZE = (os.getenv("OPENAI_IMAGE_SIZE", "1024x1536").strip() or "1024x1536")
+OPENAI_IMAGE_QUALITY = (os.getenv("OPENAI_IMAGE_QUALITY", "medium").strip() or "medium")
+LYRIC_AI_ALLOW_LOCAL_FALLBACK = os.getenv("LYRIC_AI_ALLOW_LOCAL_FALLBACK", "false").strip().lower() in ("1", "true", "yes")
+
+
+def _wrap_lines(text: str, max_chars: int) -> List[str]:
+    words = [w for w in (text or "").split() if w]
+    lines: List[str] = []
+    cur: List[str] = []
+    cur_len = 0
+    for w in words:
+        add = len(w) + (1 if cur else 0)
+        if cur_len + add > max_chars and cur:
+            lines.append(" ".join(cur))
+            cur = [w]
+            cur_len = len(w)
+        else:
+            cur.append(w)
+            cur_len += add
+    if cur:
+        lines.append(" ".join(cur))
+    return lines or [""]
+
+
+def _render_caption_frame(w: int, h: int, title: str, subtitle: str) -> Image.Image:
+    img = Image.new("RGB", (w, h), (15, 15, 15))
+    draw = ImageDraw.Draw(img)
+
+    # Use default fonts (portable). If you later bundle fonts, load TTF here.
+    font_title = ImageFont.load_default()
+    font_sub = ImageFont.load_default()
+
+    # simple centered layout
+    pad = 60
+    y = int(h * 0.25)
+
+    def draw_centered(text: str, y_pos: int, fill=(255, 255, 255)):
+        bbox = draw.textbbox((0, 0), text, font=font_title)
+        tw = bbox[2] - bbox[0]
+        draw.text(((w - tw) // 2, y_pos), text, font=font_title, fill=fill)
+
+    # Title lines
+    for line in _wrap_lines(title, max_chars=26)[:6]:
+        draw_centered(line, y)
+        y += 26
+
+    y += 18
+    for line in _wrap_lines(subtitle, max_chars=34)[:6]:
+        bbox = draw.textbbox((0, 0), line, font=font_sub)
+        tw = bbox[2] - bbox[0]
+        draw.text(((w - tw) // 2, y), line, font=font_sub, fill=(220, 220, 220))
+        y += 22
+
+    # bottom watermark
+    wm = "Offtrack · Lyric AI"
+    bbox = draw.textbbox((0, 0), wm, font=font_sub)
+    tw = bbox[2] - bbox[0]
+    draw.text(((w - tw) // 2, h - pad), wm, font=font_sub, fill=(160, 160, 160))
+    return img
+
+
+def _lyrics_chunks(lyrics: str) -> List[str]:
+    chunks: List[str] = []
+    for para in [p.strip() for p in lyrics.split("\n") if p.strip()]:
+        if len(para) <= 140:
+            chunks.append(para)
+            continue
+        words = para.split()
+        buf: List[str] = []
+        for w in words:
+            buf.append(w)
+            if len(" ".join(buf)) >= 120:
+                chunks.append(" ".join(buf))
+                buf = []
+        if buf:
+            chunks.append(" ".join(buf))
+    return chunks
+
+
+def _safe_slug(v: str, fallback: str = "lyric") -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (v or "").lower()).strip("-")
+    return s[:48] or fallback
+
+
+def _build_visual_prompts(lyrics: str, title: str, artist: str, image_count: int) -> List[str]:
+    head = f"Song: {title or 'Untitled'}"
+    if artist:
+        head += f" by {artist}"
+    base_style = (
+        "Cinematic vertical frame for a short social reel, high detail, dramatic lighting, "
+        "rich color grading, no text, no logos, no watermarks."
+    )
+    chunks = _lyrics_chunks(lyrics)[: max(1, min(image_count, 8))]
+    if not chunks:
+        chunks = [lyrics[:140]]
+    out: List[str] = []
+    for chunk in chunks:
+        out.append(
+            f"{base_style} {head}. Visualize this lyric moment: {chunk}"
+        )
+    return out
+
+
+def _openai_generate_images(prompts: List[str]) -> List[Image.Image]:
+    if not OPENAI_API_KEY:
+        return []
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    images: List[Image.Image] = []
+    for prompt in prompts:
+        payload: Dict[str, Any] = {
+            "model": OPENAI_IMAGE_MODEL,
+            "prompt": prompt,
+            "size": OPENAI_IMAGE_SIZE,
+            "quality": OPENAI_IMAGE_QUALITY,
+        }
+        resp = requests.post(
+            "https://api.openai.com/v1/images/generations",
+            headers=headers,
+            json=payload,
+            timeout=120,
+        )
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"image generation failed: {resp.text[:200]}")
+        body = resp.json()
+        data = body.get("data") or []
+        b64 = ((data[0] if data else {}) or {}).get("b64_json")
+        if not b64:
+            continue
+        raw = base64.b64decode(b64)
+        img = Image.open(BytesIO(raw)).convert("RGB")
+        images.append(img)
+    return images
+
+
+def _image_to_data_url(img: Image.Image) -> str:
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{b64}"
+
+
+def _ensure_lyric_reels_table() -> None:
+    try:
+        LyricReel.__table__.create(bind=engine, checkfirst=True)
+    except Exception:
+        pass
+
+
+def _render_reel_from_images(
+    images: List[Image.Image],
+    title: str,
+    chunks: List[str],
+    out_path: Path,
+    w: int = 720,
+    h: int = 1280,
+    fps: int = 24,
+) -> None:
+    writer = imageio.get_writer(str(out_path), fps=fps)
+    try:
+        for idx, img in enumerate(images):
+            canvas = img.resize((w, h))
+            caption = chunks[idx % len(chunks)] if chunks else ""
+            frame = _render_caption_frame(w, h, title, caption)
+            blended = Image.blend(canvas, frame, alpha=0.32)
+            import numpy as _np
+            arr = _np.array(blended)
+            for _ in range(int(fps * 1.35)):
+                writer.append_data(arr)
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+
+def _is_invalid_video(path: Path) -> bool:
+    try:
+        if not path.exists():
+            return True
+        # Empty or nearly-empty files are typically unplayable and show as 0:00
+        return path.stat().st_size < 2048
+    except Exception:
+        return True
+
+
+class ReelCreateIn(BaseModel):
+    lyrics: str = Field(min_length=1, max_length=8000)
+    title: str | None = None
+    artist: str | None = None
+    output: str = Field(default="video", pattern="^(video|images)$")
+    image_count: int = Field(default=4, ge=1, le=8)
+
+
+@app.post("/api/reels")
+def create_reel(req: ReelCreateIn, db: Session = Depends(get_db)):
+    """Generate images or a short vertical reel from lyrics."""
+    _ensure_lyric_reels_table()
+    lyrics = (req.lyrics or "").strip()
+    if not lyrics:
+        raise HTTPException(status_code=400, detail="lyrics required")
+
+    header = (req.title or "Lyric Reel").strip()
+    artist = (req.artist or "").strip()
+    chunks = _lyrics_chunks(lyrics)
+    if not chunks:
+        chunks = [lyrics[:140]]
+
+    prompts = _build_visual_prompts(lyrics, header, artist, req.image_count)
+    generated_images: List[Image.Image] = []
+    provider = "local"
+    generation_error = ""
+
+    if LYRIC_AI_PROVIDER in {"openai", "openai_images"}:
+        if not OPENAI_API_KEY:
+            generation_error = "OPENAI_API_KEY is not configured on backend."
+        else:
+            try:
+                generated_images = _openai_generate_images(prompts)
+                provider = "openai"
+            except Exception as e:
+                generation_error = str(e)
+    else:
+        generation_error = f"Unsupported LYRIC_AI_PROVIDER='{LYRIC_AI_PROVIDER}'"
+
+    if not generated_images:
+        if not LYRIC_AI_ALLOW_LOCAL_FALLBACK:
+            msg = generation_error or "No images generated from provider."
+            raise HTTPException(
+                status_code=502,
+                detail=f"Lyric AI provider failed: {msg}. Set OPENAI_API_KEY on backend or enable LYRIC_AI_ALLOW_LOCAL_FALLBACK=true.",
+            )
+        for chunk in chunks[: req.image_count]:
+            generated_images.append(_render_caption_frame(1024, 1536, header, chunk))
+        provider = "local"
+
+    if req.output == "images":
+        data_urls = [_image_to_data_url(img) for img in generated_images[: req.image_count]]
+        return {
+            "id": str(uuid.uuid4()),
+            "mode": "images",
+            "provider": provider,
+            "imageDataUrls": data_urls,
+        }
+
+    rid = str(uuid.uuid4())
+    out_path = MEDIA_REELS_DIR / f"{rid}.mp4"
+    try:
+        _render_reel_from_images(generated_images[: req.image_count], header, chunks, out_path)
+    except Exception:
+        if not LYRIC_AI_ALLOW_LOCAL_FALLBACK:
+            raise HTTPException(status_code=502, detail="Video encoding failed. Check ffmpeg/imageio backend setup.")
+        data_urls = [_image_to_data_url(img) for img in generated_images[: req.image_count]]
+        return {
+            "id": str(uuid.uuid4()),
+            "mode": "images",
+            "provider": provider,
+            "imageDataUrls": data_urls,
+            "detail": "Video encoder unavailable; returned images instead.",
+        }
+
+    if _is_invalid_video(out_path):
+        if not LYRIC_AI_ALLOW_LOCAL_FALLBACK:
+            raise HTTPException(status_code=502, detail="Generated video is invalid/empty (0s). Check ffmpeg/imageio backend setup.")
+        data_urls = [_image_to_data_url(img) for img in generated_images[: req.image_count]]
+        return {
+            "id": str(uuid.uuid4()),
+            "mode": "images",
+            "provider": provider,
+            "imageDataUrls": data_urls,
+            "detail": "Generated video was invalid (0s); returned images instead.",
+        }
+    size = out_path.stat().st_size if out_path.exists() else 0
+
+    row = LyricReel(
+        id=rid,
+        prompt=lyrics,
+        file_path=str(out_path),
+        mime_type="video/mp4",
+        size_bytes=int(size),
+    )
+    db.add(row)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    return {
+        "id": rid,
+        "mode": "video",
+        "provider": provider,
+        "downloadUrl": f"/api/reels/{rid}/download",
+        "sizeBytes": int(size),
+    }
+
+
+@app.get("/api/reels")
+def list_reels(limit: int = 20, db: Session = Depends(get_db)):
+    _ensure_lyric_reels_table()
+    limit = max(1, min(int(limit or 20), 100))
+    try:
+        rows = db.query(LyricReel).order_by(LyricReel.created_at.desc()).limit(limit).all()
+    except Exception:
+        return {"reels": []}
+    return {
+        "reels": [
+            {
+                "id": r.id,
+                "downloadUrl": f"/api/reels/{r.id}/download",
+                "sizeBytes": r.size_bytes,
+                "createdAt": getattr(r, "created_at", None),
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/api/reels/{reel_id}/download")
+def download_reel(reel_id: str, request: Request, db: Session = Depends(get_db)):
+    _ensure_lyric_reels_table()
+    rid = (reel_id or "").strip()
+    try:
+        row = db.query(LyricReel).filter(LyricReel.id == rid).first()
+    except Exception:
+        row = None
+    if not row:
+        raise HTTPException(status_code=404, detail="Unknown reel id")
+    path = Path(row.file_path)
+    # Stream with range so browser video player can seek
+    return _stream_file(path, row.mime_type or "video/mp4", request)

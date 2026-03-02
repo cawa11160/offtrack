@@ -1,19 +1,8 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Music2 } from "lucide-react";
-import {
-  ArcSidebar,
-  ARC_SIDEBAR_COLLAPSED_WIDTH,
-  ARC_SIDEBAR_EXPANDED_WIDTH,
-} from "@/components/ArcSidebar";
-
-const userIcon = "https://www.figma.com/api/mcp/asset/2ef6cbe1-1aa2-4142-85c0-7036b9b3bd77";
-const settingsIcon = "https://www.figma.com/api/mcp/asset/c1ec182c-cc4f-4440-85ef-6123e38e2bc7";
-const arrowLeftIcon = "https://www.figma.com/api/mcp/asset/b68f48ee-9b13-488c-889c-d4ac2fcce873";
-const arrowRightIcon = "https://www.figma.com/api/mcp/asset/41d22576-d9d1-40fe-830f-9daa91b753d5";
-const ramonesCover = "https://www.figma.com/api/mcp/asset/8aab3b85-d16d-44c1-9e5e-55a69abbf652";
-const wetlegCover = "https://www.figma.com/api/mcp/asset/3e15ef94-f257-4cc9-9e58-51ed682f1809";
-const wallowsCover = "https://www.figma.com/api/mcp/asset/ec3e999f-b6f4-4d2c-b05b-20589c5c6c7e";
+import { ChevronLeft, ChevronRight, Clock3, Cog, Music2, Search, User } from "lucide-react";
+import { apiRecommend, type RecItem, type SeedSong } from "@/lib/api";
+import { albums } from "@/data/mockData";
 
 type Recommendation = {
   id: string;
@@ -22,53 +11,145 @@ type Recommendation = {
   cover: string;
 };
 
-const recommendations: Recommendation[] = [
-  { id: "ramones", title: "The Ramones", artist: "Ramones", cover: ramonesCover },
-  { id: "wetleg", title: "Moisturiser", artist: "Wetleg", cover: wetlegCover },
-  { id: "wallows", title: "Models", artist: "The Wallows", cover: wallowsCover },
-];
+function cleanArtist(v: string) {
+  const s = (v || "").trim();
+  if (!s) return "Unknown Artist";
+  // Handle dataset-style strings like "['Artist Name']"
+  if (s.startsWith("[") && s.endsWith("]")) {
+    try {
+      const json = s.replace(/'/g, "\"");
+      const arr = JSON.parse(json);
+      if (Array.isArray(arr) && arr.length > 0) return String(arr[0] || "Unknown Artist");
+    } catch {
+      // no-op
+    }
+    return s.replace(/^\[+|]+$/g, "").replace(/['"]/g, "").trim() || "Unknown Artist";
+  }
+  return s;
+}
 
-const Frame12Section = ({ sectionId }: { sectionId: string }) => (
-  <div>
-    <div className="mb-2 flex items-center justify-between">
-      <h3 className="font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black">Recommended for you</h3>
-      <div className="flex items-center gap-[10px]">
-        <img src={arrowLeftIcon} alt="Left" className="h-6 w-6" />
-        <img src={arrowRightIcon} alt="Right" className="h-6 w-6" />
+function fallbackCover(title: string, artist: string) {
+  const text = encodeURIComponent(`${title} ${artist}`.trim() || "music");
+  return `https://picsum.photos/seed/${text}/400/400`;
+}
+
+function mapRecToCard(r: RecItem): Recommendation {
+  const title = (r.title || "Unknown Track").trim();
+  const artist = cleanArtist(r.artist || "Unknown Artist");
+  return {
+    id: r.id,
+    title,
+    artist,
+    cover: (r.imageUrl || "").trim() || fallbackCover(title, artist),
+  };
+}
+
+function Frame12Section({
+  sectionId,
+  title,
+  recommendations,
+  onCardClick,
+}: {
+  sectionId: string;
+  title: string;
+  recommendations: Recommendation[];
+  onCardClick: (item: Recommendation) => void;
+}) {
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black">{title}</h3>
+        <div className="flex h-10 items-center gap-[10px]">
+          <ChevronLeft className="h-6 w-6 text-black/70" />
+          <ChevronRight className="h-6 w-6 text-black/70" />
+        </div>
+      </div>
+
+      <div className="rounded-[10px] bg-[#d0d0d0] px-[17px] pb-[12px] pt-[13px]">
+        <div className="grid grid-cols-1 gap-x-6 gap-y-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {recommendations.map((item) => (
+            <button
+              key={`${item.id}-${sectionId}`}
+              type="button"
+              onClick={() => onCardClick(item)}
+              className="flex w-full max-w-[190px] flex-col items-center justify-self-center text-center transition-transform hover:scale-[1.02]"
+            >
+              <img
+                src={item.cover}
+                alt={`${item.title} cover`}
+                className="h-[170px] w-[170px] rounded-[6px] object-cover"
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                crossOrigin="anonymous"
+                onError={(e) => {
+                  const el = e.currentTarget;
+                  if (!el.src.includes("picsum.photos")) {
+                    el.src = fallbackCover(item.title, item.artist);
+                  }
+                }}
+              />
+              <h4 className="mt-[12px] h-[52px] overflow-hidden font-['Arimo',sans-serif] text-[18px] font-bold leading-tight text-black">
+                {item.title}
+              </h4>
+              <p className="h-[28px] overflow-hidden font-['Arimo',sans-serif] text-[18px] font-bold leading-tight text-black/90">
+                {item.artist}
+              </p>
+            </button>
+          ))}
+        </div>
       </div>
     </div>
+  );
+}
 
-    <div className="rounded-[10px] bg-[#d0d0d0] px-[17px] pb-[6px] pt-[13px]">
-      <div className="flex flex-wrap gap-8">
-        {recommendations.map((item) => (
-          <article key={`${item.id}-${sectionId}`} className="w-[157px]">
-            <img src={item.cover} alt={`${item.title} cover`} className="h-[157px] w-[157px] object-cover" />
-            <h4 className="mt-[14px] text-center font-['Arimo',sans-serif] text-[18px] font-bold leading-tight text-black">
-              {item.title}
-            </h4>
-            <p className="text-center font-['Arimo',sans-serif] text-[18px] font-bold leading-tight text-black">
-              {item.artist}
-            </p>
-          </article>
-        ))}
-      </div>
-    </div>
-  </div>
-);
-
-const Index = () => {
+export default function Index() {
   const navigate = useNavigate();
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const sidebarWidth = sidebarCollapsed ? ARC_SIDEBAR_COLLAPSED_WIDTH : ARC_SIDEBAR_EXPANDED_WIDTH;
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [homeRecs, setHomeRecs] = useState<Recommendation[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const seeds: SeedSong[] = [];
+      const data = await apiRecommend(seeds, 16, "all", []).catch(() => ({ recommendations: [] as RecItem[] }));
+      if (!alive) return;
+
+      const mapped = (data.recommendations || []).map(mapRecToCard).filter((x) => x.title && x.artist);
+      if (mapped.length > 0) {
+        setHomeRecs(mapped);
+        return;
+      }
+
+      setHomeRecs(
+        albums.slice(0, 12).map((a) => ({
+          id: a.id,
+          title: a.title,
+          artist: a.artist,
+          cover: a.coverUrl || fallbackCover(a.title, a.artist),
+        }))
+      );
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const madeForYou = useMemo(() => homeRecs.slice(0, 3), [homeRecs]);
+  const newReleases = useMemo(() => homeRecs.slice(3, 6), [homeRecs]);
+  const recentlyPlayed = useMemo(() => homeRecs.slice(6, 9), [homeRecs]);
+  const moreIndie = useMemo(() => homeRecs.slice(9, 12), [homeRecs]);
+
+  function openTrack(item: Recommendation) {
+    navigate(
+      `/track/${encodeURIComponent(item.id)}?title=${encodeURIComponent(item.title)}&artist=${encodeURIComponent(item.artist)}`
+    );
+  }
 
   return (
     <div className="relative min-h-screen w-full bg-white">
-      <ArcSidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((prev) => !prev)} />
-      <section
-        className="w-full bg-white px-3 py-5 pb-44 sm:px-7 sm:py-7 sm:pb-44"
-        style={{ paddingLeft: `calc(${sidebarWidth}px + 4px)` }}
-      >
+      <section className="w-full bg-white px-3 py-5 pb-44 sm:px-7 sm:py-7 sm:pb-44">
         <div className="mx-auto flex w-full max-w-[1303px] flex-col gap-6 lg:flex-row lg:gap-8">
           <div className="flex h-fit items-center gap-2">
             <div className="grid h-[55px] w-[60px] place-items-center rounded-[10px] border border-black bg-white">
@@ -79,21 +160,77 @@ const Index = () => {
 
           <div className="w-full max-w-[1088px] flex-1">
             <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <div className="h-[54px] flex-1 rounded-[10px] bg-[#d0d0d0] px-4 py-[13px]">
-                <input
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Enter your search..."
-                  className="h-full w-full bg-transparent font-['Arimo',sans-serif] text-[22px] font-bold leading-none text-black outline-none placeholder:text-black"
-                />
+              <div className="relative flex-1">
+                <div className="h-[54px] rounded-[10px] bg-[#d0d0d0] px-4 py-[10px]">
+                  <div className="flex h-full items-center gap-3">
+                    <Search className="h-6 w-6 text-black/75" />
+                    <input
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      onFocus={() => setSearchOpen(true)}
+                      onBlur={() => setTimeout(() => setSearchOpen(false), 120)}
+                      placeholder="Search"
+                      className="h-full flex-1 bg-transparent font-['Arimo',sans-serif] text-[22px] font-bold leading-none text-black outline-none placeholder:text-black/60"
+                    />
+                    <div className="rounded-[8px] bg-white px-3 py-1 font-['Arimo',sans-serif] text-[16px] font-bold text-black/55">
+                      Ctrl + K
+                    </div>
+                  </div>
+                </div>
+
+                {searchOpen && (
+                  <div className="absolute left-0 right-0 top-[86px] z-30 overflow-hidden rounded-[10px] border border-black/10 bg-[#d0d0d0]">
+                    <div className="grid grid-cols-1 gap-0 lg:grid-cols-[1.05fr_0.95fr]">
+                      <div className="border-b border-black/10 px-4 py-4 lg:border-b-0 lg:border-r">
+                        <p className="font-['Arimo',sans-serif] text-[22px] font-bold text-black/70">Recent</p>
+                        <div className="mt-3 space-y-3">
+                          {["Neoma", "Perspective", "Neumorphism"].map((item) => (
+                            <button
+                              key={item}
+                              type="button"
+                              className="flex items-center gap-3 font-['Arimo',sans-serif] text-[28px] font-bold text-black"
+                            >
+                              <Clock3 className="h-6 w-6 text-black/50" />
+                              {item}
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="mt-5 border-t border-black/10 pt-4 font-['Arimo',sans-serif] text-[26px] font-bold leading-tight text-black">
+                          <button type="button" onClick={() => navigate("/profile")} className="block">
+                            Profile
+                          </button>
+                          <button type="button" onClick={() => navigate("/settings")} className="block">
+                            Settings
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="px-4 py-4 font-['Arimo',sans-serif] font-bold text-black">
+                        <div className="rounded-[10px] bg-white p-4">
+                          <p className="text-[30px] leading-none">Songs</p>
+                          <p className="mt-2 text-[24px] text-black/75">Find more</p>
+                        </div>
+                        <div className="mt-3 rounded-[10px] bg-white p-4">
+                          <p className="text-[30px] leading-none">Albums</p>
+                          <p className="mt-2 text-[24px] text-black/75">Find more...</p>
+                        </div>
+                        <div className="mt-3 rounded-[10px] bg-white p-4">
+                          <p className="text-[30px] leading-none">Playlists</p>
+                          <p className="mt-2 text-[24px] text-black/75">Find more...</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="flex h-[54px] w-[110px] items-center justify-center gap-2 rounded-[10px] bg-[#d0d0d0] px-4 py-[7px]">
                 <button type="button" onClick={() => navigate("/profile")} aria-label="Go to profile">
-                  <img src={userIcon} alt="User" className="h-8 w-8 object-contain" />
+                  <User className="h-8 w-8 text-black/80" />
                 </button>
                 <button type="button" onClick={() => navigate("/settings")} aria-label="Go to settings">
-                  <img src={settingsIcon} alt="Settings" className="h-8 w-8 object-contain" />
+                  <Cog className="h-8 w-8 text-black/80" />
                 </button>
               </div>
             </div>
@@ -105,6 +242,13 @@ const Index = () => {
                   A streaming experience built for discovering new voices, new scenes, and new sounds. Explore new
                   artists, scenes, and sounds before they break through.
                 </p>
+                <button
+                  type="button"
+                  onClick={() => navigate("/artist")}
+                  className="mt-5 rounded-[10px] bg-black px-5 py-3 text-[18px] text-white transition-opacity hover:opacity-90"
+                >
+                  Open Artist Hub
+                </button>
               </div>
             </div>
 
@@ -121,25 +265,25 @@ const Index = () => {
                 <p className="text-[20px] leading-tight">Most streamed genres for you are currently...</p>
                 <p className="text-[18px] leading-tight">Indie rock, Pop, Punk rock</p>
                 <p className="mt-3 text-[20px] leading-tight">Most streamed musicians for you are currently...</p>
-                <p className="text-[18px] leading-tight">Wet Leg, Ramones, The Wallows</p>
+                <p className="text-[18px] leading-tight">
+                  {madeForYou.map((x) => x.artist).filter(Boolean).slice(0, 3).join(", ") || "Loading..."}
+                </p>
               </div>
             </div>
 
-            <Frame12Section sectionId="frame12-1" />
+            <Frame12Section sectionId="frame12-1" title="Made for you" recommendations={madeForYou} onCardClick={openTrack} />
             <div className="mt-8">
-              <Frame12Section sectionId="frame12-2" />
+              <Frame12Section sectionId="frame12-2" title="New releases for you" recommendations={newReleases} onCardClick={openTrack} />
             </div>
             <div className="mt-8">
-              <Frame12Section sectionId="frame12-3" />
+              <Frame12Section sectionId="frame12-3" title="Recently played" recommendations={recentlyPlayed} onCardClick={openTrack} />
             </div>
             <div className="mt-8">
-              <Frame12Section sectionId="frame12-4" />
+              <Frame12Section sectionId="frame12-4" title="More indie rock..." recommendations={moreIndie} onCardClick={openTrack} />
             </div>
           </div>
         </div>
       </section>
     </div>
   );
-};
-
-export default Index;
+}

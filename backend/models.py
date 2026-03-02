@@ -101,6 +101,23 @@ class UploadedTrack(Base):
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
+class LyricReel(Base):
+    """Generated short reel (MP4) from provided lyrics.
+
+    MVP implementation stores generated files on disk (MEDIA_DIR/reels). In production,
+    you likely want S3/R2 + signed URLs.
+    """
+
+    __tablename__ = "lyric_reels"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    prompt: Mapped[str] = mapped_column(Text)  # original lyrics or prompt
+    file_path: Mapped[str] = mapped_column(Text)
+    mime_type: Mapped[str] = mapped_column(String(64), default="video/mp4")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 Index("ix_tracks_name_artists", Track.name, Track.artists)
 Index("ix_interactions_distinct_track", Interaction.distinct_id, Interaction.track_id)
 Index("ix_track_audio_track_id", TrackAudio.track_id)

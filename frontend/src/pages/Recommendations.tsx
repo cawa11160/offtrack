@@ -1,20 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ExternalLink, Music2, Pause, Play } from "lucide-react";
+import { ArrowLeft, Music2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
-import {
-  apiFeedback,
-  apiRecommend,
-  apiSearch,
-  apiUrl,
-  type RecItem,
-  type SearchResult,
-  type SeedSong,
-} from "@/lib/api";
+import { apiFeedback, apiRecommend, apiSearch, apiUrl, type MusicianRec, type RecItem, type SearchResult, type SeedSong } from "@/lib/api";
 import { addAlreadyShownIds, getAlreadyShownIds } from "@/lib/analytics";
 import { phCapture } from "@/lib/posthog";
+import { extractSpotifyTrackId, fetchSpotifyStatus, initSpotifyPlayer, playSpotifyTrack } from "@/lib/spotify";
 
 type Rec = RecItem;
+type FeedbackAction = "superlike" | "like" | "dislike";
 
 function formatResult(r: SearchResult) {
   const bits = [
@@ -101,65 +95,16 @@ export default function Recommendations() {
   const [loading3, setLoading3] = useState(false);
 
   const [recs, setRecs] = useState<Rec[]>([]);
+  const [musicians, setMusicians] = useState<MusicianRec[]>([]);
   const [error, setError] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
-
+  const [activeFeedbackByTrack, setActiveFeedbackByTrack] = useState<
+    Record<string, { superlike: boolean; like: boolean; dislike: boolean }>
+  >({});
+  const [feedbackBusyByTrack, setFeedbackBusyByTrack] = useState<Record<string, boolean>>({});
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const spotifySessionRef = useRef<{ player: any; deviceId: string } | null>(null);
   const [playingId, setPlayingId] = useState<string>("");
-
-  function stopAudio() {
-    const a = audioRef.current;
-    if (!a) return;
-    a.pause();
-    a.currentTime = 0;
-  }
-
-  async function playPreview(rec: Rec) {
-    const a = audioRef.current;
-    if (!a) return;
-
-    if (playingId && playingId === rec.id && !a.paused) {
-      a.pause();
-      setPlayingId("");
-      return;
-    }
-
-    const fullAudioUrl = rec.audioUrl ? apiUrl(rec.audioUrl) : "";
-    const src = fullAudioUrl || rec.previewUrl || "";
-
-    if (!src) {
-      if (rec.spotifyUrl) {
-        phCapture("open_spotify", { track_id: rec.id, title: rec.title, artist: rec.artist });
-        apiFeedback(rec.id, "open_spotify");
-        window.open(rec.spotifyUrl, "_blank");
-      }
-      return;
-    }
-
-    try {
-      a.src = src;
-      await a.play();
-      setPlayingId(rec.id);
-      phCapture(fullAudioUrl ? "play_full" : "play_preview", {
-        track_id: rec.id,
-        title: rec.title,
-        artist: rec.artist,
-      });
-      apiFeedback(rec.id, "play");
-    } catch {
-      if (rec.spotifyUrl) {
-        phCapture("open_spotify", { track_id: rec.id, title: rec.title, artist: rec.artist });
-        apiFeedback(rec.id, "open_spotify");
-        window.open(rec.spotifyUrl, "_blank");
-      }
-    }
-  }
-
-  useEffect(() => {
-    stopAudio();
-    setPlayingId("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recs.length]);
 
   useEffect(() => {
     const q = seed1.trim();
@@ -210,23 +155,35 @@ export default function Recommendations() {
     return seed1.trim() || seed2.trim() || seed3.trim();
   }, [seed1, seed2, seed3]);
 
+  function buildCurrentSeeds(): SeedSong[] {
+    return [
+      picked1 ?? (seed1.trim() ? { title: seed1.trim() } : null),
+      picked2 ?? (seed2.trim() ? { title: seed2.trim() } : null),
+      picked3 ?? (seed3.trim() ? { title: seed3.trim() } : null),
+    ].filter(Boolean) as SeedSong[];
+  }
+
+  async function loadRecommendations(args?: { fromFeedback?: boolean }) {
+    const songs = buildCurrentSeeds();
+    if (!songs.length) return;
+    const alreadyShown = args?.fromFeedback ? [] : getAlreadyShownIds();
+    const data = await apiRecommend(songs, 9, mode, alreadyShown);
+    const next = data.recommendations as Rec[];
+    setRecs(next);
+    setMusicians((data.musicians ?? []) as MusicianRec[]);
+    addAlreadyShownIds(next.map((x) => x.id));
+    if (!args?.fromFeedback) {
+      setActiveFeedbackByTrack({});
+    }
+    phCapture("recommend_results", { n: next.length, mode, seeds_count: songs.length, from_feedback: !!args?.fromFeedback });
+  }
+
   async function onSubmit() {
     setError("");
     setSubmitting(true);
 
     try {
-      const songs: SeedSong[] = [
-        picked1 ?? (seed1.trim() ? { title: seed1.trim() } : null),
-        picked2 ?? (seed2.trim() ? { title: seed2.trim() } : null),
-        picked3 ?? (seed3.trim() ? { title: seed3.trim() } : null),
-      ].filter(Boolean) as SeedSong[];
-
-      const alreadyShown = getAlreadyShownIds();
-      const data = await apiRecommend(songs, 9, mode, alreadyShown);
-      const next = data.recommendations as Rec[];
-      setRecs(next);
-      addAlreadyShownIds(next.map((x) => x.id));
-      phCapture("recommend_results", { n: next.length, mode, seeds_count: songs.length });
+      await loadRecommendations();
     } catch (e: unknown) {
       if (e instanceof Error) setError(e.message || "Something went wrong.");
       else setError("Something went wrong.");
@@ -235,7 +192,137 @@ export default function Recommendations() {
     }
   }
 
-  const featuredRec = recs[0] ?? null;
+  function stopAudio() {
+    const a = audioRef.current;
+    if (!a) return;
+    a.pause();
+    a.currentTime = 0;
+    setPlayingId("");
+  }
+
+  async function playViaSpotify(rec: Rec): Promise<boolean> {
+    const trackId = extractSpotifyTrackId(rec.spotifyUri || rec.spotifyUrl || "");
+    const apiBase = apiUrl("");
+
+    if (!trackId) return false;
+
+    try {
+      const status = await fetchSpotifyStatus(apiBase).catch(() => ({ ok: false, configured: false, hasRefreshCookie: false }));
+      if (!status.configured) {
+        setError("Spotify is not configured on backend.");
+        return false;
+      }
+      if (!status.hasRefreshCookie) {
+        window.location.href = apiUrl("/api/spotify/login");
+        return true;
+      }
+
+      if (!spotifySessionRef.current) {
+        spotifySessionRef.current = await initSpotifyPlayer(apiBase);
+      }
+      await playSpotifyTrack(apiBase, spotifySessionRef.current.deviceId, trackId);
+      phCapture("play_full_spotify_sdk", { track_id: rec.id, title: rec.title, artist: rec.artist });
+      apiFeedback(rec.id, "open_spotify");
+      return true;
+    } catch (e: any) {
+      const status = Number(e?.status || 0);
+      if (status === 401) {
+        window.location.href = apiUrl("/api/spotify/login");
+        return true;
+      }
+      setError("Spotify SDK playback unavailable for this track/account.");
+      return false;
+    }
+  }
+
+  async function onPlay(rec: Rec) {
+    const a = audioRef.current;
+    if (!a) return;
+
+    const fullAudioUrl = rec.audioUrl ? apiUrl(rec.audioUrl) : "";
+    const src = fullAudioUrl || rec.previewUrl || "";
+
+    if (playingId && playingId === rec.id && !a.paused) {
+      stopAudio();
+      return;
+    }
+
+    // First choice: in-app audio (uploaded full track, then preview).
+    if (src) {
+      try {
+        a.src = src;
+        await a.play();
+        setPlayingId(rec.id);
+        phCapture(fullAudioUrl ? "play_full" : "play_preview", {
+          track_id: rec.id,
+          title: rec.title,
+          artist: rec.artist,
+        });
+        apiFeedback(rec.id, "play");
+        return;
+      } catch {
+        // Continue to Spotify fallback below.
+      }
+    }
+
+    // Fallback: Spotify full track.
+    if (rec.spotifyUri || rec.spotifyUrl) {
+      stopAudio();
+      const played = await playViaSpotify(rec);
+      if (played) return;
+    }
+
+    setError("No playable source found for this recommendation.");
+  }
+
+  function isFeedbackActive(trackId: string, action: FeedbackAction) {
+    return Boolean(activeFeedbackByTrack[trackId]?.[action]);
+  }
+
+  async function toggleFeedback(rec: Rec, action: FeedbackAction) {
+    if (feedbackBusyByTrack[rec.id]) return;
+    const wasActive = isFeedbackActive(rec.id, action);
+    if (wasActive) return;
+
+    setFeedbackBusyByTrack((prev) => ({ ...prev, [rec.id]: true }));
+    setActiveFeedbackByTrack((prev) => ({
+      ...prev,
+      [rec.id]: {
+        superlike: !wasActive && action === "superlike",
+        like: !wasActive && action === "like",
+        dislike: !wasActive && action === "dislike",
+      },
+    }));
+
+    try {
+      phCapture(`${action}_track`, { track_id: rec.id, title: rec.title, artist: rec.artist });
+      const ok = await apiFeedback(rec.id, action);
+      if (!ok) {
+        throw new Error("Feedback not accepted by backend.");
+      }
+      await loadRecommendations({ fromFeedback: true });
+    } catch (e: any) {
+      setError(e?.message || "Failed to save feedback.");
+    } finally {
+      setFeedbackBusyByTrack((prev) => ({ ...prev, [rec.id]: false }));
+    }
+  }
+
+  useEffect(() => {
+    return () => stopAudio();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    stopAudio();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recs.length]);
+
+  const outputSlots = useMemo(() => {
+    const capped = recs.slice(0, 9);
+    if (capped.length >= 9) return capped;
+    return [...capped, ...Array.from({ length: 9 - capped.length }, () => null)];
+  }, [recs]);
 
   return (
     <div className="min-h-screen w-full bg-[#FFFFFF] pb-28">
@@ -388,118 +475,138 @@ export default function Recommendations() {
           }}
         />
 
-        <div className="mt-9 w-full max-w-[540px] rounded-[10px] bg-[#d9d9d9] p-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
-            <div className="h-[200px] w-[200px] shrink-0 overflow-hidden bg-[#c9c9c9] sm:h-[273px] sm:w-[273px]">
-              {featuredRec?.imageUrl ? (
-                <img src={featuredRec.imageUrl} alt={featuredRec.title} className="h-full w-full object-cover" />
-              ) : (
-                <img
-                  src="https://images.unsplash.com/photo-1619983081563-430f63602796?w=700&h=700&fit=crop"
-                  alt="Recommendation"
-                  className="h-full w-full object-cover"
-                />
-              )}
-            </div>
+        {recs.length > 0 ? (
+          <div className="mt-9">
+            <div className="grid grid-cols-3 gap-4">
+              {outputSlots.map((rec, idx) => (
+                <div key={rec ? rec.id : `empty-${idx}`} className="rounded-[10px] bg-[#d9d9d9] p-3">
+                  <div className="flex gap-3">
+                    <div className="h-[140px] w-[140px] shrink-0 overflow-hidden rounded-[8px] bg-[#c9c9c9]">
+                      {rec?.imageUrl ? (
+                        <img src={rec.imageUrl} alt={rec.title} className="h-full w-full object-cover" />
+                      ) : null}
+                    </div>
 
-            <div className="w-full">
-              <p className="font-['Arimo',sans-serif] text-[42px] font-bold leading-[0.95] text-black">
-                {featuredRec?.title ?? "CPR"}
-              </p>
-              <p className="mt-1 font-['Arimo',sans-serif] text-[42px] font-bold leading-[0.95] text-black">
-                {featuredRec?.artist ?? "Wetleg"}
-              </p>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-['Arimo',sans-serif] text-[24px] font-bold leading-none text-black">
+                        {rec?.title ?? "Waiting for recommendation"}
+                      </p>
+                      <p className="mt-1 truncate font-['Arimo',sans-serif] text-[24px] font-bold leading-none text-black">
+                        {rec?.artist ?? " "}
+                      </p>
 
-              <div className="mt-4 space-y-3">
-                <button
-                  type="button"
-                  onClick={() => (featuredRec ? playPreview(featuredRec) : undefined)}
-                  disabled={!featuredRec}
-                  className="flex h-[42px] w-full items-center justify-center gap-2 rounded-[10px] bg-[#ababab] font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {featuredRec && playingId === featuredRec.id ? (
-                    <>
-                      <Pause className="h-5 w-5" /> Pause
-                    </>
-                  ) : (
-                    <>
-                      <Play className="h-5 w-5" /> Preview song
-                    </>
-                  )}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (!featuredRec) return;
-                    phCapture("superlike_track", {
-                      track_id: featuredRec.id,
-                      title: featuredRec.title,
-                      artist: featuredRec.artist,
-                    });
-                    apiFeedback(featuredRec.id, "superlike");
-                  }}
-                  disabled={!featuredRec}
-                  className="h-[42px] w-full rounded-[10px] bg-[#ababab] font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Superlike
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (!featuredRec) return;
-                    phCapture("like_track", {
-                      track_id: featuredRec.id,
-                      title: featuredRec.title,
-                      artist: featuredRec.artist,
-                    });
-                    apiFeedback(featuredRec.id, "like");
-                  }}
-                  disabled={!featuredRec}
-                  className="h-[42px] w-full rounded-[10px] bg-[#ababab] font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Like
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (!featuredRec) return;
-                    phCapture("dislike_track", {
-                      track_id: featuredRec.id,
-                      title: featuredRec.title,
-                      artist: featuredRec.artist,
-                    });
-                    apiFeedback(featuredRec.id, "dislike");
-                  }}
-                  disabled={!featuredRec}
-                  className="h-[42px] w-full rounded-[10px] bg-[#ababab] font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Dislike
-                </button>
-
-                {featuredRec?.spotifyUrl ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      phCapture("open_spotify", {
-                        track_id: featuredRec.id,
-                        title: featuredRec.title,
-                        artist: featuredRec.artist,
-                      });
-                      apiFeedback(featuredRec.id, "open_spotify");
-                      window.open(featuredRec.spotifyUrl!, "_blank");
-                    }}
-                    className="inline-flex h-[42px] w-full items-center justify-center gap-2 rounded-[10px] bg-black font-['Arimo',sans-serif] text-[24px] font-bold leading-none text-white"
-                  >
-                    <ExternalLink className="h-4 w-4" /> Spotify
-                  </button>
-                ) : null}
-              </div>
+                      <div className="mt-3 space-y-[10px]">
+                        <button
+                          type="button"
+                          disabled={!rec || (!rec.audioUrl && !rec.previewUrl && !rec.spotifyUrl && !rec.spotifyUri)}
+                          onClick={() => (rec ? onPlay(rec) : undefined)}
+                          className={`h-[38px] w-full rounded-[10px] font-['Arimo',sans-serif] text-[20px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-60 ${
+                            rec && playingId === rec.id ? "bg-[#969696]" : "bg-[#ababab]"
+                          }`}
+                        >
+                          Play
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!rec || !!feedbackBusyByTrack[rec.id]}
+                          onClick={() => {
+                            if (!rec) return;
+                            void toggleFeedback(rec, "superlike");
+                          }}
+                          className={`h-[38px] w-full rounded-[10px] font-['Arimo',sans-serif] text-[20px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-60 ${
+                            rec && isFeedbackActive(rec.id, "superlike") ? "bg-[#969696]" : "bg-[#ababab]"
+                          }`}
+                        >
+                          Superlike
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!rec || !!feedbackBusyByTrack[rec.id]}
+                          onClick={() => {
+                            if (!rec) return;
+                            void toggleFeedback(rec, "like");
+                          }}
+                          className={`h-[38px] w-full rounded-[10px] font-['Arimo',sans-serif] text-[20px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-60 ${
+                            rec && isFeedbackActive(rec.id, "like") ? "bg-[#969696]" : "bg-[#ababab]"
+                          }`}
+                        >
+                          Like
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!rec || !!feedbackBusyByTrack[rec.id]}
+                          onClick={() => {
+                            if (!rec) return;
+                            void toggleFeedback(rec, "dislike");
+                          }}
+                          className={`h-[38px] w-full rounded-[10px] font-['Arimo',sans-serif] text-[20px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-60 ${
+                            rec && isFeedbackActive(rec.id, "dislike") ? "bg-[#969696]" : "bg-[#ababab]"
+                          }`}
+                        >
+                          Dislike
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
-        </div>
+        ) : null}
+
+        {musicians.length > 0 ? (
+          <div className="mt-8">
+            <h2 className="font-['Arimo',sans-serif] text-[36px] font-bold leading-none text-black">
+              Recommended Musicians
+            </h2>
+            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {musicians.slice(0, 6).map((m) => (
+                <div key={m.id} className="rounded-[10px] bg-[#d9d9d9] p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="h-[72px] w-[72px] overflow-hidden rounded-[8px] bg-[#c9c9c9]">
+                      {m.imageUrl ? <img src={m.imageUrl} alt={m.name} className="h-full w-full object-cover" /> : null}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-['Arimo',sans-serif] text-[24px] font-bold leading-none text-black">{m.name}</p>
+                      <p className="mt-2 max-h-10 overflow-hidden text-sm text-black/70">
+                        {(m.reasons ?? []).join(" • ") || "Based on your selected songs and listening profile."}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 text-sm font-bold text-black/80">
+                    {(m.topTracks ?? []).slice(0, 3).join(" • ")}
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/artist/${encodeURIComponent(m.name)}`)}
+                      className="h-9 rounded-[8px] bg-[#ababab] text-sm font-bold text-black"
+                    >
+                      Profile
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => window.open(m.concertsUrl || `https://www.songkick.com/search?query=${encodeURIComponent(m.name)}`, "_blank", "noopener,noreferrer")}
+                      className="h-9 rounded-[8px] bg-[#ababab] text-sm font-bold text-black"
+                    >
+                      Concerts
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!m.spotifyUrl}
+                      onClick={() => m.spotifyUrl && window.open(m.spotifyUrl, "_blank", "noopener,noreferrer")}
+                      className="h-9 rounded-[8px] bg-[#ababab] text-sm font-bold text-black disabled:opacity-60"
+                    >
+                      Spotify
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </section>
     </div>
   );

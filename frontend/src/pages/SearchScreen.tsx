@@ -58,6 +58,7 @@ export function SearchScreen() {
                 <button
                   key={tile.title}
                   type="button"
+                  onClick={() => navigate(`/search/${encodeURIComponent(tile.title)}`)}
                   className="h-[163px] rounded-[10px] bg-[#d9d9d9] px-6 font-['Arimo',sans-serif] text-[24px] font-bold leading-none text-black"
                 >
                   {tile.title}

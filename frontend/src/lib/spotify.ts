@@ -51,6 +51,21 @@ export async function fetchSpotifyAccessToken(apiBase: string): Promise<string> 
   return t;
 }
 
+export async function fetchSpotifyStatus(apiBase: string): Promise<{
+  ok: boolean;
+  configured: boolean;
+  hasRefreshCookie: boolean;
+}> {
+  const r = await fetch(`${apiBase}/api/spotify/status`, { credentials: "include" });
+  if (!r.ok) return { ok: false, configured: false, hasRefreshCookie: false };
+  const j = (await r.json().catch(() => ({}))) as any;
+  return {
+    ok: Boolean(j?.ok),
+    configured: Boolean(j?.configured),
+    hasRefreshCookie: Boolean(j?.hasRefreshCookie),
+  };
+}
+
 export type SpotifySession = {
   player: any;
   deviceId: string;

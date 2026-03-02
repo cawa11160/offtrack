@@ -22,6 +22,12 @@ import Recommendations from "./pages/Recommendations";
 import PlaylistsPage from "./pages/PlaylistsPage";
 import { SearchScreen } from "./pages/SearchScreen";
 import Artist from "./pages/Artist";
+import BrowseCategory from "./pages/BrowseCategory";
+import ArtistLanding from "./pages/ArtistLanding";
+import MusicianProfile from "./pages/MusicianProfile";
+import ListenerAnalytics from "./pages/ListenerAnalytics";
+import LyricAI from "./pages/LyricAI";
+import TrackDetailPage from "./pages/TrackDetail";
 
 /* ✅ NEW FILTER PAGE IMPORT */
 import ConcertFilters from "./pages/ConcertFilters";
@@ -56,6 +62,7 @@ const App = () => (
             <Route path="/recent" element={<Index />} />
 
             <Route path="/release/:id" element={<ReleasePage />} />
+            <Route path="/track/:id" element={<TrackDetailPage />} />
 
             <Route path="/login" element={<Login />} />
             <Route path="/signup" element={<SignUp />} />
@@ -66,6 +73,11 @@ const App = () => (
             <Route path="/recommendations" element={<Recommendations />} />
             <Route path="/playlists" element={<PlaylistsPage />} />
             <Route path="/search" element={<SearchScreen />} />
+            <Route path="/search/:topic" element={<BrowseCategory />} />
+            <Route path="/lyric-ai" element={<LyricAI />} />
+            <Route path="/artist" element={<ArtistLanding />} />
+            <Route path="/artist/profile" element={<MusicianProfile />} />
+            <Route path="/artist/analytics" element={<ListenerAnalytics />} />
             <Route path="/artist/:name" element={<Artist />} />
 
             {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}

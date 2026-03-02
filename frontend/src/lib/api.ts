@@ -28,13 +28,38 @@ export type RecItem = {
   audioUrl?: string | null;
   spotifyUrl?: string | null;
   spotifyUri?: string | null;
+  spotifyArtistUrl?: string | null;
   durationMs?: number | null;
 
   reasons?: string[];
 };
 
+export type MusicianRec = {
+  id: string;
+  name: string;
+  imageUrl?: string | null;
+  spotifyUrl?: string | null;
+  topTracks?: string[];
+  reasons?: string[];
+  concertsUrl?: string;
+};
+
 export type RecommendResponse = {
   recommendations: RecItem[];
+  musicians?: MusicianRec[];
+};
+
+export type TrackDetail = {
+  id?: string | null;
+  title: string;
+  artist?: string;
+  imageUrl?: string | null;
+  audioUrl?: string | null;
+  previewUrl?: string | null;
+  spotifyUrl?: string | null;
+  spotifyUri?: string | null;
+  durationMs?: number | null;
+  source?: string;
 };
 
 // If you set VITE_API_BASE_URL on Vercel (e.g. https://your-backend.com),
@@ -106,14 +131,28 @@ export async function apiRecommend(
 export async function apiFeedback(
   trackId: string,
   event: "like" | "superlike" | "dislike" | "play" | "open_spotify" | "click_recommendation"
-): Promise<void> {
+): Promise<boolean> {
   const r = await apiFetch(`/api/feedback`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ track_id: trackId, event, distinct_id: getDistinctId() }),
   });
-  // feedback is best-effort
-  if (!r.ok) return;
+  if (!r.ok) return false;
+  return true;
+}
+
+export async function apiGetTrackDetail(args: {
+  trackId?: string;
+  title?: string;
+  artist?: string;
+}): Promise<TrackDetail> {
+  const q = new URLSearchParams();
+  if (args.trackId) q.set("track_id", args.trackId);
+  if (args.title) q.set("title", args.title);
+  if (args.artist) q.set("artist", args.artist);
+  const r = await apiFetch(`/api/track?${q.toString()}`);
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as TrackDetail;
 }
 
 export type UploadedTrackItem = {
@@ -149,4 +188,47 @@ export async function apiUploadNewTrack(args: {
   const r = await apiFetch(`/api/uploads`, { method: "POST", body: fd });
   if (!r.ok) throw new Error(await readError(r));
   return (await r.json()) as UploadedTrackItem;
+}
+
+// -----------------------------
+// Lyric AI reels / images
+// -----------------------------
+export type ReelItem = {
+  id: string;
+  downloadUrl?: string;
+  sizeBytes?: number;
+  createdAt?: string;
+  mode?: "video" | "images";
+  provider?: string;
+  imageDataUrls?: string[];
+  detail?: string;
+};
+
+export async function apiCreateReel(args: {
+  lyrics: string;
+  title?: string;
+  artist?: string;
+  output?: "video" | "images";
+  imageCount?: number;
+}): Promise<ReelItem> {
+  const r = await apiFetch(`/api/reels`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      lyrics: args.lyrics,
+      title: args.title ?? null,
+      artist: args.artist ?? null,
+      output: args.output ?? "video",
+      image_count: args.imageCount ?? 4,
+    }),
+  });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as ReelItem;
+}
+
+export async function apiListReels(limit = 20): Promise<ReelItem[]> {
+  const r = await apiFetch(`/api/reels?limit=${limit}`);
+  if (!r.ok) return [];
+  const data = await r.json().catch(() => ({}));
+  return (data?.reels ?? []) as ReelItem[];
 }

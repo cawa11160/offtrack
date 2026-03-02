@@ -6,11 +6,13 @@ from fastapi.responses import RedirectResponse, JSONResponse
 
 router = APIRouter(prefix="/api/spotify", tags=["spotify"])
 
-SPOTIFY_CLIENT_ID = os.environ["SPOTIFY_CLIENT_ID"]
-SPOTIFY_CLIENT_SECRET = os.environ["SPOTIFY_CLIENT_SECRET"]
-SPOTIFY_REDIRECT_URI = os.environ["SPOTIFY_REDIRECT_URI"]
-FRONTEND_URL = os.environ["FRONTEND_URL"]
-COOKIE_SECRET = os.environ["COOKIE_SECRET"].encode()
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "").strip()
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "").strip()
+SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "").strip()
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8080").strip()
+COOKIE_SECRET = os.getenv("COOKIE_SECRET", "dev_cookie_secret_change_me").encode()
+SPOTIFY_COOKIE_SECURE = os.getenv("SPOTIFY_COOKIE_SECURE", os.getenv("COOKIE_SECURE", "false")).strip().lower() in ("1", "true", "yes")
+SPOTIFY_COOKIE_SAMESITE = os.getenv("SPOTIFY_COOKIE_SAMESITE", os.getenv("COOKIE_SAMESITE", "lax")).strip().lower() or "lax"
 
 SCOPES = " ".join([
   "streaming",                 # required for Web Playback SDK :contentReference[oaicite:2]{index=2}
@@ -37,24 +39,44 @@ def _unsign(token: str) -> dict | None:
   except Exception:
     return None
 
+def _runtime_redirect_uri(req: Request) -> str:
+  proto = (req.headers.get("x-forwarded-proto") or req.url.scheme or "http").strip()
+  host = (req.headers.get("x-forwarded-host") or req.headers.get("host") or req.url.netloc or "").strip()
+  if not host:
+    host = "localhost:8000"
+  return f"{proto}://{host}/api/spotify/callback"
+
+def _effective_redirect_uri(req: Request) -> str:
+  # Prefer explicit env value, else derive from current request host.
+  return SPOTIFY_REDIRECT_URI or _runtime_redirect_uri(req)
+
 @router.get("/login")
-async def login():
+async def login(req: Request):
+  redirect_uri = _effective_redirect_uri(req)
+  if not (SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET and redirect_uri):
+    return JSONResponse({"ok": False, "error": "spotify_auth_not_configured"}, status_code=500)
   params = {
     "client_id": SPOTIFY_CLIENT_ID,
     "response_type": "code",
-    "redirect_uri": SPOTIFY_REDIRECT_URI,
+    "redirect_uri": redirect_uri,
     "scope": SCOPES,
     "show_dialog": "true",
   }
-  return RedirectResponse("https://accounts.spotify.com/authorize?" + urlencode(params))
+  r = RedirectResponse("https://accounts.spotify.com/authorize?" + urlencode(params))
+  # Keep callback exchange consistent with the exact URI used at /login time.
+  r.set_cookie("sp_ru", redirect_uri, httponly=True, secure=SPOTIFY_COOKIE_SECURE, samesite="lax", max_age=600)
+  return r
 
 @router.get("/callback")
-async def callback(code: str):
+async def callback(code: str, req: Request):
+  redirect_uri = (req.cookies.get("sp_ru") or "").strip() or _effective_redirect_uri(req)
+  if not (SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET and redirect_uri):
+    return JSONResponse({"ok": False, "error": "spotify_auth_not_configured"}, status_code=500)
   # Exchange code for access+refresh (Authorization Code flow) :contentReference[oaicite:5]{index=5}
   data = {
     "grant_type": "authorization_code",
     "code": code,
-    "redirect_uri": SPOTIFY_REDIRECT_URI,
+    "redirect_uri": redirect_uri,
   }
   basic = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
 
@@ -75,18 +97,39 @@ async def callback(code: str):
   signed = _sign(cookie_payload)
 
   r = RedirectResponse(f"{FRONTEND_URL}/recommendations")
+  samesite = SPOTIFY_COOKIE_SAMESITE
+  if not SPOTIFY_COOKIE_SECURE and samesite == "none":
+    # Browsers reject SameSite=None without Secure on HTTP localhost.
+    samesite = "lax"
   r.set_cookie(
     "sp_rf",
     signed,
     httponly=True,
-    secure=True,
-    samesite="none",
+    secure=SPOTIFY_COOKIE_SECURE,
+    samesite=samesite,
     max_age=60 * 60 * 24 * 30,
   )
   return r
 
+@router.get("/status")
+async def status(req: Request):
+  runtime_uri = _runtime_redirect_uri(req)
+  effective_uri = _effective_redirect_uri(req)
+  return {
+    "ok": True,
+    "configured": bool(SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET and effective_uri),
+    "configuredRedirectUri": SPOTIFY_REDIRECT_URI,
+    "runtimeRedirectUri": runtime_uri,
+    "redirectUri": effective_uri,
+    "cookieSecure": SPOTIFY_COOKIE_SECURE,
+    "cookieSameSite": SPOTIFY_COOKIE_SAMESITE,
+    "hasRefreshCookie": bool(req.cookies.get("sp_rf")),
+  }
+
 @router.get("/access-token")
 async def access_token(req: Request):
+  if not (SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET):
+    return JSONResponse({"ok": False, "error": "spotify_auth_not_configured"}, status_code=500)
   # Return a fresh access token to the frontend SDK
   signed = req.cookies.get("sp_rf")
   payload = _unsign(signed) if signed else None

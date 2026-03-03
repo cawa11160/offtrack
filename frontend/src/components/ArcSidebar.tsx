@@ -10,6 +10,7 @@ import {
   Plus,
   Search,
   Settings,
+  ShieldAlert,
   ShoppingBag,
   User,
 } from "lucide-react";
@@ -39,6 +40,16 @@ const pageItems: NavItem[] = [
   { id: "settings", name: "Settings", icon: <Settings className="h-4 w-4" />, type: "page" },
 ];
 
+const ADMIN_KEY_STORAGE = "offtrack_admin_api_key";
+const ADMIN_UI_ENABLED = ["1", "true", "yes", "on"].includes(
+  String((import.meta as any).env?.VITE_ENABLE_ADMIN_SECURITY ?? "false").toLowerCase()
+);
+
+function hasAdminKeyStored(): boolean {
+  if (typeof window === "undefined") return false;
+  return Boolean((window.localStorage.getItem(ADMIN_KEY_STORAGE) || "").trim());
+}
+
 const defaultPlaylists = ["Playlist name 1", "Playlist name 2", "Playlist name 3", "Playlist name 4"];
 
 export const ARC_SIDEBAR_EXPANDED_WIDTH = 240;
@@ -57,10 +68,30 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
   );
   const [activeId, setActiveId] = useState("home");
   const [playlists, setPlaylists] = useState(defaultPlaylists);
+  const [showAdminItem, setShowAdminItem] = useState<boolean>(() => ADMIN_UI_ENABLED || hasAdminKeyStored());
+
+  useEffect(() => {
+    const refresh = () => setShowAdminItem(ADMIN_UI_ENABLED || hasAdminKeyStored());
+    refresh();
+    window.addEventListener("storage", refresh);
+    window.addEventListener("admin-key-change", refresh as EventListener);
+    return () => {
+      window.removeEventListener("storage", refresh);
+      window.removeEventListener("admin-key-change", refresh as EventListener);
+    };
+  }, []);
+
+  const visiblePageItems = useMemo<NavItem[]>(() => {
+    if (!showAdminItem) return pageItems;
+    return [
+      ...pageItems,
+      { id: "admin-security", name: "Admin Security", icon: <ShieldAlert className="h-4 w-4" />, type: "page" },
+    ];
+  }, [showAdminItem]);
 
   const navItems: NavItem[] = useMemo(
     () => [
-      ...pageItems,
+      ...visiblePageItems,
       { id: "__playlists__", name: "Playlists", icon: <span />, type: "label" },
       ...playlists.map((name, idx) => ({
         id: `playlist-${idx + 1}`,
@@ -70,7 +101,7 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
       })),
       { id: "__add__", name: "New playlist", icon: <Plus className="h-4 w-4" />, type: "action" },
     ],
-    [playlists]
+    [playlists, visiblePageItems]
   );
 
   useEffect(() => {
@@ -99,6 +130,7 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
       "/merch": "merch",
       "/profile": "profile",
       "/settings": "settings",
+      "/admin/security": "admin-security",
     };
     setActiveId(routeToId[location.pathname] ?? "");
   }, [location.pathname, location.search]);
@@ -261,6 +293,7 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
                 merch: "/merch",
                 profile: "/profile",
                 settings: "/settings",
+                "admin-security": "/admin/security",
               };
               const targetRoute = routeById[item.id];
               setActiveId(item.id);

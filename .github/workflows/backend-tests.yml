@@ -30,5 +30,8 @@ jobs:
           pip install -r backend/requirements.txt
 
       - name: Run backend integration tests
+        env:
+          MEDIA_DIR: ${{ github.workspace }}/backend/tests/.ci_media
         run: |
+          mkdir -p "${MEDIA_DIR}"
           pytest -q backend/tests/test_integration.py

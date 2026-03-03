@@ -52,9 +52,10 @@ except Exception:
 # -----------------------------
 # Media storage (full-song uploads)
 # -----------------------------
-# For local Docker: mounted as a named volume.
-# For Render: set MEDIA_DIR to a persistent disk mount (recommended) or use S3/R2 later.
-MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "/app/media")).resolve()
+# For local Docker/production: set MEDIA_DIR explicitly (e.g. /app/media).
+# For tests/CI/local without explicit MEDIA_DIR, default to a writable repo-local path.
+DEFAULT_MEDIA_DIR = (Path(__file__).resolve().parent / "media")
+MEDIA_DIR = Path(os.getenv("MEDIA_DIR", str(DEFAULT_MEDIA_DIR))).resolve()
 MEDIA_TRACKS_DIR = MEDIA_DIR / "tracks"       # full audio for existing catalog tracks
 MEDIA_UPLOADS_DIR = MEDIA_DIR / "uploads"     # uploaded track catalog
 MEDIA_REELS_DIR = MEDIA_DIR / "reels"         # generated lyric reels (mp4)

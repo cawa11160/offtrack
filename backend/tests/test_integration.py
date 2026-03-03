@@ -12,6 +12,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 # Test env must be set before importing backend modules that build engine/app.
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_offtrack.sqlite3")
+os.environ.setdefault("MEDIA_DIR", str(BACKEND_DIR / "tests" / ".tmp_media"))
 os.environ.setdefault("REQUIRE_AUTH_UPLOADS", "true")
 os.environ.setdefault("UPLOAD_SECRET", "")
 os.environ.setdefault("SPOTIFY_CLIENT_ID", "test-client")

@@ -30,6 +30,7 @@ export default function AdminSecurity() {
     const next = v.trim();
     setAdminApiKey(next);
     localStorage.setItem(ADMIN_KEY_STORAGE, next);
+    window.dispatchEvent(new Event("admin-key-change"));
   }
 
   async function refreshLogs() {

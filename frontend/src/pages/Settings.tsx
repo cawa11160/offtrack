@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft, Music2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -14,10 +14,32 @@ const soundItems = [
   "Equalizer",
 ];
 
+const ADMIN_KEY_STORAGE = "offtrack_admin_api_key";
+const ADMIN_UI_ENABLED = ["1", "true", "yes", "on"].includes(
+  String((import.meta as any).env?.VITE_ENABLE_ADMIN_SECURITY ?? "false").toLowerCase()
+);
+
+function hasAdminKeyStored(): boolean {
+  if (typeof window === "undefined") return false;
+  return Boolean((window.localStorage.getItem(ADMIN_KEY_STORAGE) || "").trim());
+}
+
 export default function Settings() {
   const navigate = useNavigate();
   const [appearance, setAppearance] = useState<"dark" | "light">("light");
   const [display, setDisplay] = useState<"compact" | "normal" | "wide">("normal");
+  const [showAdminButton, setShowAdminButton] = useState<boolean>(() => ADMIN_UI_ENABLED || hasAdminKeyStored());
+
+  useEffect(() => {
+    const refresh = () => setShowAdminButton(ADMIN_UI_ENABLED || hasAdminKeyStored());
+    refresh();
+    window.addEventListener("storage", refresh);
+    window.addEventListener("admin-key-change", refresh as EventListener);
+    return () => {
+      window.removeEventListener("storage", refresh);
+      window.removeEventListener("admin-key-change", refresh as EventListener);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen w-full bg-[#FFFFFF] pb-28">
@@ -37,15 +59,17 @@ export default function Settings() {
         </div>
 
         <h1 className="mt-8 font-['Arimo',sans-serif] text-[42px] font-bold leading-none text-black">Settings</h1>
-        <div className="mt-4">
-          <button
-            type="button"
-            onClick={() => navigate("/admin/security")}
-            className="rounded-[10px] border border-black/20 bg-white px-4 py-2 font-['Arimo',sans-serif] text-[16px] font-bold text-black hover:bg-black/5"
-          >
-            Open Admin Security
-          </button>
-        </div>
+        {showAdminButton ? (
+          <div className="mt-4">
+            <button
+              type="button"
+              onClick={() => navigate("/admin/security")}
+              className="rounded-[10px] border border-black/20 bg-white px-4 py-2 font-['Arimo',sans-serif] text-[16px] font-bold text-black hover:bg-black/5"
+            >
+              Open Admin Security
+            </button>
+          </div>
+        ) : null}
 
         <div className="mt-4 min-h-[640px] rounded-[10px] bg-[#d9d9d9]">
           <div className="grid min-h-[640px] grid-cols-[270px_1fr]">

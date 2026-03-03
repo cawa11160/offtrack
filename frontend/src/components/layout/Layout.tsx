@@ -17,6 +17,7 @@ interface LayoutProps {
 export const Layout = ({ children }: LayoutProps) => {
   const location = useLocation();
   const isProfilePage = location.pathname === "/profile";
+  const isAuthRoute = ["/login", "/signin", "/signup", "/sign-up", "/register", "/account"].includes(location.pathname);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const sidebarVisualWidth = sidebarCollapsed ? ARC_SIDEBAR_COLLAPSED_WIDTH : ARC_SIDEBAR_EXPANDED_VISUAL_WIDTH;
   const contentLeftInset = ARC_SIDEBAR_LEFT_OFFSET + sidebarVisualWidth + 12;
@@ -31,7 +32,7 @@ export const Layout = ({ children }: LayoutProps) => {
 
   return (
     <div className={isProfilePage ? "min-h-screen bg-[#FFFFFF]" : "min-h-screen bg-background"}>
-      <ArcSidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((prev) => !prev)} />
+      {!isAuthRoute ? <ArcSidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((prev) => !prev)} /> : null}
       <div className={isProfilePage ? "min-h-screen bg-[#FFFFFF]" : "min-h-screen"}>
         <main
           className={
@@ -40,7 +41,7 @@ export const Layout = ({ children }: LayoutProps) => {
               : "pb-[calc(var(--player-height)+60px)]"
           }
           style={{
-            paddingLeft: `${contentLeftInset}px`,
+            paddingLeft: isAuthRoute ? "0px" : `${contentLeftInset}px`,
             transition: "padding-left 220ms ease",
           }}
         >
@@ -49,11 +50,13 @@ export const Layout = ({ children }: LayoutProps) => {
       </div>
 
       {/* Mobile bottom nav only on phones */}
-      <div className="md:hidden">
-        <MobileNav />
-      </div>
+      {!isAuthRoute ? (
+        <div className="md:hidden">
+          <MobileNav />
+        </div>
+      ) : null}
 
-      <PinkPlayerBar currentSong={pinkPlayerSong} leftInset={contentLeftInset} />
+      {!isAuthRoute ? <PinkPlayerBar currentSong={pinkPlayerSong} leftInset={contentLeftInset} /> : null}
     </div>
   );
 };

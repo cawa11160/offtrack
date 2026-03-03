@@ -65,7 +65,10 @@ const App = () => (
             <Route path="/track/:id" element={<TrackDetailPage />} />
 
             <Route path="/login" element={<Login />} />
+            <Route path="/signin" element={<Login />} />
             <Route path="/signup" element={<SignUp />} />
+            <Route path="/sign-up" element={<SignUp />} />
+            <Route path="/register" element={<SignUp />} />
             <Route path="/account" element={<Account />} />
 
             <Route path="/profile" element={<Profile />} />

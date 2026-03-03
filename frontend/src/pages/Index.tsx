@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { ChevronLeft, ChevronRight, Clock3, Cog, Music2, Search, User } from "lucide-react";
 import { apiRecommend, type RecItem, type SeedSong } from "@/lib/api";
 import { albums } from "@/data/mockData";
+import { useAuth } from "@/lib/auth";
 
 type Recommendation = {
   id: string;
@@ -104,6 +105,7 @@ function Frame12Section({
 
 export default function Index() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [homeRecs, setHomeRecs] = useState<Recommendation[]>([]);
@@ -147,10 +149,14 @@ export default function Index() {
     );
   }
 
+  function goAccount() {
+    navigate(user ? "/account" : "/login");
+  }
+
   return (
     <div className="relative min-h-screen w-full bg-white">
       <section className="w-full bg-white px-3 py-5 pb-44 sm:px-7 sm:py-7 sm:pb-44">
-        <div className="mx-auto flex w-full max-w-[1303px] flex-col gap-6 lg:flex-row lg:gap-8">
+        <div className="mx-auto flex w-full max-w-full flex-col gap-6 lg:flex-row lg:gap-8">
           <div className="flex h-fit items-center gap-2">
             <div className="grid h-[55px] w-[60px] place-items-center rounded-[10px] border border-black bg-white">
               <Music2 className="h-7 w-7 text-black" />
@@ -158,7 +164,7 @@ export default function Index() {
             <h1 className="font-['Arimo',sans-serif] text-[32px] font-bold leading-none text-black">Offtrack</h1>
           </div>
 
-          <div className="w-full max-w-[1088px] flex-1">
+          <div className="min-w-0 flex-1">
             <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-center">
               <div className="relative flex-1">
                 <div className="h-[54px] rounded-[10px] bg-[#d0d0d0] px-4 py-[10px]">
@@ -197,7 +203,7 @@ export default function Index() {
                         </div>
 
                         <div className="mt-5 border-t border-black/10 pt-4 font-['Arimo',sans-serif] text-[26px] font-bold leading-tight text-black">
-                          <button type="button" onClick={() => navigate("/profile")} className="block">
+                          <button type="button" onClick={goAccount} className="block">
                             Profile
                           </button>
                           <button type="button" onClick={() => navigate("/settings")} className="block">
@@ -226,7 +232,7 @@ export default function Index() {
               </div>
 
               <div className="flex h-[54px] w-[110px] items-center justify-center gap-2 rounded-[10px] bg-[#d0d0d0] px-4 py-[7px]">
-                <button type="button" onClick={() => navigate("/profile")} aria-label="Go to profile">
+                <button type="button" onClick={goAccount} aria-label="Go to account">
                   <User className="h-8 w-8 text-black/80" />
                 </button>
                 <button type="button" onClick={() => navigate("/settings")} aria-label="Go to settings">
@@ -252,8 +258,8 @@ export default function Index() {
               </div>
             </div>
 
-            <div className="mb-8 grid grid-cols-1 gap-[15px] lg:grid-cols-[564px_484px]">
-              <div className="rounded-[10px] bg-[#d0d0d0] p-[10px]">
+            <div className="mb-8 grid grid-cols-1 gap-[15px] lg:grid-cols-2">
+              <div className="min-w-0 rounded-[10px] bg-[#d0d0d0] p-[10px]">
                 <div className="font-['Arimo',sans-serif] text-black">
                   <p className="pt-2 text-[20px] font-bold leading-tight">Your daily usage pattern</p>
                   <p className="mt-2 text-[18px] font-bold leading-tight">On average, you have spent 1 hr on Offtrack</p>
@@ -261,7 +267,7 @@ export default function Index() {
                 </div>
               </div>
 
-              <div className="rounded-[10px] bg-[#d0d0d0] px-[10px] py-[17px] font-['Arimo',sans-serif] font-bold text-black">
+              <div className="min-w-0 rounded-[10px] bg-[#d0d0d0] px-[10px] py-[17px] font-['Arimo',sans-serif] font-bold text-black">
                 <p className="text-[20px] leading-tight">Most streamed genres for you are currently...</p>
                 <p className="text-[18px] leading-tight">Indie rock, Pop, Punk rock</p>
                 <p className="mt-3 text-[20px] leading-tight">Most streamed musicians for you are currently...</p>

@@ -1,4 +1,5 @@
 import { getAlreadyShownIds, getDistinctId } from "./analytics";
+import { getAccessToken } from "./auth";
 
 export type SearchResult = {
   title: string;
@@ -76,6 +77,10 @@ function withDistinct(headers?: HeadersInit): HeadersInit {
   const h = new Headers(headers);
   // keep both: header for server logs + body field for explicit tracking
   h.set("X-Posthog-Distinct-Id", getDistinctId());
+  const token = getAccessToken();
+  if (token && !h.has("Authorization")) {
+    h.set("Authorization", `Bearer ${token}`);
+  }
   return h;
 }
 

@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { UploadCloud, Music2, RefreshCcw } from "lucide-react";
 import { apiListUploads, apiUploadNewTrack, apiUrl, type UploadedTrackItem } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
+import { useNavigate } from "react-router-dom";
 
 export default function Uploads() {
+  const { user, loading: authLoading } = useAuth();
+  const navigate = useNavigate();
   const [title, setTitle] = useState("");
   const [artist, setArtist] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -31,7 +35,17 @@ export default function Uploads() {
 
   const canUpload = useMemo(() => title.trim().length > 0 && !!file && !loading, [title, file, loading]);
 
+  useEffect(() => {
+    if (!authLoading && !user) {
+      setError("Please log in as an artist to upload songs.");
+    }
+  }, [authLoading, user]);
+
   async function onUpload() {
+    if (!user) {
+      setError("Please log in as an artist to upload songs.");
+      return;
+    }
     if (!file) return;
     setLoading(true);
     setError("");
@@ -110,7 +124,7 @@ export default function Uploads() {
           <button
             type="button"
             onClick={onUpload}
-            disabled={!canUpload}
+            disabled={!canUpload || !user}
             className="rounded-xl bg-black px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
             {loading ? "Uploading…" : "Upload"}
@@ -118,6 +132,17 @@ export default function Uploads() {
         </div>
 
         {error ? <div className="mt-3 text-sm text-red-600">{error}</div> : null}
+        {!user ? (
+          <div className="mt-3 text-sm text-black/70">
+            <button
+              type="button"
+              onClick={() => navigate("/login")}
+              className="rounded-lg border border-black/10 px-3 py-1 font-medium hover:bg-black/5"
+            >
+              Log in to upload
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div className="mt-6 grid gap-4">

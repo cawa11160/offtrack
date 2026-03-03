@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from db import get_db, SessionLocal, engine, wait_for_db
 from models import Track, Interaction, User, TrackAudio, UploadedTrack, LyricReel, Base
@@ -54,6 +55,7 @@ MEDIA_REEL_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 UPLOAD_SECRET = os.getenv("UPLOAD_SECRET", "").strip()  # optional
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "200"))  # keep reasonable for MVP
+REQUIRE_AUTH_UPLOADS = os.getenv("REQUIRE_AUTH_UPLOADS", "true").strip().lower() in ("1", "true", "yes")
 
 
 def _check_upload_secret(request: Request) -> bool:
@@ -254,6 +256,7 @@ class SignupIn(BaseModel):
     name: str | None = Field(default=None, max_length=255)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+    account_type: str | None = Field(default="listener", pattern="^(listener|artist)$")
 
 class LoginIn(BaseModel):
     email: EmailStr
@@ -286,14 +289,25 @@ def get_current_user_id(req: Request) -> int:
 @app.post("/api/auth/signup", response_model=AuthOut)
 def auth_signup(payload: SignupIn, resp: Response, db: Session = Depends(get_db)):
     email = payload.email.lower().strip()
-    exists = db.query(User).filter(User.email == email).first()
-    if exists:
-        raise HTTPException(status_code=409, detail="Email already exists")
+    name = (payload.name or "").strip() or None
+    try:
+        exists = db.query(User).filter(User.email == email).first()
+        if exists:
+            raise HTTPException(status_code=409, detail="Email already exists")
 
-    user = User(email=email, name=(payload.name.strip() if payload.name else None), password_hash=_hash_password(payload.password))
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+        user = User(email=email, name=name, password_hash=_hash_password(payload.password))
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    except HTTPException:
+        raise
+    except IntegrityError:
+        db.rollback()
+        # Handles race conditions where two signups happen with same email.
+        raise HTTPException(status_code=409, detail="Email already exists")
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.")
 
     access = _create_access_token(user.id)
     refresh = _create_refresh_token(user.id)
@@ -303,7 +317,10 @@ def auth_signup(payload: SignupIn, resp: Response, db: Session = Depends(get_db)
 @app.post("/api/auth/login", response_model=AuthOut)
 def auth_login(payload: LoginIn, resp: Response, db: Session = Depends(get_db)):
     email = payload.email.lower().strip()
-    user = db.query(User).filter(User.email == email).first()
+    try:
+        user = db.query(User).filter(User.email == email).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.")
     if not user or not _verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -339,10 +356,33 @@ def auth_logout(resp: Response):
 @app.get("/api/auth/me", response_model=MeOut)
 def auth_me(req: Request, db: Session = Depends(get_db)):
     user_id = get_current_user_id(req)
-    user = db.query(User).filter(User.id == user_id).first()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.")
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return {"id": user.id, "email": user.email, "name": user.name}
+
+
+@app.on_event("startup")
+def _startup_schema_init() -> None:
+    # Make auth and upload tables available in fresh environments before first request.
+    try:
+        wait_for_db(timeout_s=45)
+        Base.metadata.create_all(engine)
+    except Exception:
+        # Do not crash startup in environments that intentionally boot without DB.
+        pass
+
+
+def _require_uploader_identity(req: Request) -> Optional[int]:
+    if not REQUIRE_AUTH_UPLOADS:
+        return None
+    try:
+        return get_current_user_id(req)
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Login required to upload tracks")
 
 
 # -----------------------------
@@ -1145,13 +1185,17 @@ async def upload_catalog_track_audio(
     """
     if not _check_upload_secret(request):
         raise HTTPException(status_code=403, detail="Upload secret required")
+    _require_uploader_identity(request)
 
     tid = (track_id or "").strip()
     if not tid:
         raise HTTPException(status_code=400, detail="track_id is required")
 
     # Ensure the track exists in the dataset catalog
-    t = db.query(Track).filter(Track.id == tid).first()
+    try:
+        t = db.query(Track).filter(Track.id == tid).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
     if not t:
         raise HTTPException(status_code=404, detail="Unknown track_id")
 
@@ -1175,7 +1219,10 @@ async def upload_catalog_track_audio(
                 raise HTTPException(status_code=413, detail=f"File too large (>{MAX_UPLOAD_MB}MB)")
             out_f.write(chunk)
 
-    row = db.query(TrackAudio).filter(TrackAudio.track_id == tid).first()
+    try:
+        row = db.query(TrackAudio).filter(TrackAudio.track_id == tid).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
     if row:
         row.file_path = str(dest)
         row.mime_type = mime_type
@@ -1189,7 +1236,11 @@ async def upload_catalog_track_audio(
                 size_bytes=int(size),
             )
         )
-    db.commit()
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not save upload metadata. Please try again.")
 
     return {"ok": True, "audioUrl": f"/api/audio/{quote(tid)}"}
 
@@ -1218,6 +1269,7 @@ async def upload_new_track(
     """Upload a brand-new track to Offtrack's streaming library."""
     if not _check_upload_secret(request):
         raise HTTPException(status_code=403, detail="Upload secret required")
+    _require_uploader_identity(request)
 
     title = (title or "").strip()
     artist = (artist or "").strip()
@@ -1254,7 +1306,11 @@ async def upload_new_track(
         size_bytes=int(size),
     )
     db.add(row)
-    db.commit()
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not save upload metadata. Please try again.")
 
     return {
         "id": tid,

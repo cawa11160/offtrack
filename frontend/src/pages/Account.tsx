@@ -1,9 +1,20 @@
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
 import { CreditCard, Mail, ShieldCheck } from "lucide-react";
+import { useEffect } from "react";
 
 export default function Account() {
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!loading && !user) {
+      navigate("/login");
+    }
+  }, [loading, navigate, user]);
+
+  if (!user) return null;
+
   return (
     <div className="mx-auto max-w-4xl px-6 py-10">
       <div className="flex items-end justify-between gap-4">

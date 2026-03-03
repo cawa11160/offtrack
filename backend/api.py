@@ -395,6 +395,25 @@ def _verify_password(pw: str, pw_hash: str) -> bool:
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
+
+def _coerce_utc_datetime(value: Any) -> datetime | None:
+    """Normalize DB datetime values to timezone-aware UTC."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except Exception:
+            return None
+    return None
+
 def _encode(payload: dict) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
@@ -583,16 +602,11 @@ def auth_login(payload: LoginIn, req: Request, resp: Response, db: Session = Dep
         user = db.query(User).filter(User.email == email).first()
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.")
-    if user and getattr(user, "locked_until", None):
-        try:
-            locked_until = user.locked_until
-            if locked_until and locked_until > _now_utc():
-                retry_after = int((locked_until - _now_utc()).total_seconds())
-                raise HTTPException(status_code=423, detail=f"Account locked. Retry in {max(1, retry_after)}s.")
-        except HTTPException:
-            raise
-        except Exception:
-            pass
+    if user:
+        locked_until = _coerce_utc_datetime(getattr(user, "locked_until", None))
+        if locked_until and locked_until > _now_utc():
+            retry_after = int((locked_until - _now_utc()).total_seconds())
+            raise HTTPException(status_code=423, detail=f"Account locked. Retry in {max(1, retry_after)}s.")
     if not user or not _verify_password(payload.password, user.password_hash):
         _record_auth_result(email, ip, ok=False)
         _audit_log(action="auth_login_failed", user_id=(user.id if user else None), email=email, req=req, reason="invalid_credentials")

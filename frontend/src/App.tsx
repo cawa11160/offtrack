@@ -28,6 +28,7 @@ import MusicianProfile from "./pages/MusicianProfile";
 import ListenerAnalytics from "./pages/ListenerAnalytics";
 import LyricAI from "./pages/LyricAI";
 import TrackDetailPage from "./pages/TrackDetail";
+import AdminSecurity from "./pages/AdminSecurity";
 
 /* ✅ NEW FILTER PAGE IMPORT */
 import ConcertFilters from "./pages/ConcertFilters";
@@ -73,6 +74,7 @@ const App = () => (
 
             <Route path="/profile" element={<Profile />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/admin/security" element={<AdminSecurity />} />
             <Route path="/recommendations" element={<Recommendations />} />
             <Route path="/playlists" element={<PlaylistsPage />} />
             <Route path="/search" element={<SearchScreen />} />

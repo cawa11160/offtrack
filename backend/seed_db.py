@@ -5,7 +5,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from db import engine, DATABASE_URL, wait_for_db
-from models import Base
+from models import Track, Interaction
 
 HERE = Path(__file__).resolve().parent
 DATA_CSV = HERE / "data" / "data.csv"
@@ -110,8 +110,10 @@ def main():
     # Keep only required columns (prevents accidental mismatch)
     df = df[[c for c in REQUIRED_COLS if c in df.columns]]
 
-    # Create schema (do NOT drop all tables; preserve users)
-    Base.metadata.create_all(engine)
+    # Create only tables required for recommendation seeding.
+    # Avoid creating unrelated tables/indexes here; app startup handles full schema.
+    Track.__table__.create(bind=engine, checkfirst=True)
+    Interaction.__table__.create(bind=engine, checkfirst=True)
 
     # Clear only recommender-related tables
     with engine.begin() as conn:

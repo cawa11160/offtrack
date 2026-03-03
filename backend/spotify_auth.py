@@ -1,4 +1,4 @@
-import base64, hashlib, hmac, json, os, time
+import base64, hashlib, hmac, json, os, secrets, time
 from urllib.parse import urlencode
 import httpx
 from fastapi import APIRouter, Request
@@ -55,23 +55,34 @@ async def login(req: Request):
   redirect_uri = _effective_redirect_uri(req)
   if not (SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET and redirect_uri):
     return JSONResponse({"ok": False, "error": "spotify_auth_not_configured"}, status_code=500)
+  state = secrets.token_urlsafe(24)
   params = {
     "client_id": SPOTIFY_CLIENT_ID,
     "response_type": "code",
     "redirect_uri": redirect_uri,
     "scope": SCOPES,
+    "state": state,
     "show_dialog": "true",
   }
   r = RedirectResponse("https://accounts.spotify.com/authorize?" + urlencode(params))
   # Keep callback exchange consistent with the exact URI used at /login time.
   r.set_cookie("sp_ru", redirect_uri, httponly=True, secure=SPOTIFY_COOKIE_SECURE, samesite="lax", max_age=600)
+  r.set_cookie("sp_st", state, httponly=True, secure=SPOTIFY_COOKIE_SECURE, samesite="lax", max_age=600)
   return r
 
 @router.get("/callback")
-async def callback(code: str, req: Request):
+async def callback(req: Request, code: str = "", state: str = "", error: str = ""):
+  frontend_target = f"{FRONTEND_URL}/recommendations"
+  if error:
+    return RedirectResponse(f"{frontend_target}?spotify_error={error}")
   redirect_uri = (req.cookies.get("sp_ru") or "").strip() or _effective_redirect_uri(req)
+  expected_state = (req.cookies.get("sp_st") or "").strip()
   if not (SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET and redirect_uri):
     return JSONResponse({"ok": False, "error": "spotify_auth_not_configured"}, status_code=500)
+  if not code:
+    return RedirectResponse(f"{frontend_target}?spotify_error=missing_code")
+  if expected_state and state != expected_state:
+    return RedirectResponse(f"{frontend_target}?spotify_error=invalid_state")
   # Exchange code for access+refresh (Authorization Code flow) :contentReference[oaicite:5]{index=5}
   data = {
     "grant_type": "authorization_code",
@@ -80,14 +91,17 @@ async def callback(code: str, req: Request):
   }
   basic = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
 
-  async with httpx.AsyncClient(timeout=20) as client:
-    resp = await client.post(
-      "https://accounts.spotify.com/api/token",
-      data=data,
-      headers={"Authorization": f"Basic {basic}"},
-    )
-    resp.raise_for_status()
-    tok = resp.json()
+  try:
+    async with httpx.AsyncClient(timeout=20) as client:
+      resp = await client.post(
+        "https://accounts.spotify.com/api/token",
+        data=data,
+        headers={"Authorization": f"Basic {basic}"},
+      )
+      resp.raise_for_status()
+      tok = resp.json()
+  except Exception:
+    return RedirectResponse(f"{frontend_target}?spotify_error=token_exchange_failed")
 
   # Store refresh token in a signed HttpOnly cookie (MVP approach)
   cookie_payload = {
@@ -96,7 +110,7 @@ async def callback(code: str, req: Request):
   }
   signed = _sign(cookie_payload)
 
-  r = RedirectResponse(f"{FRONTEND_URL}/recommendations")
+  r = RedirectResponse(frontend_target)
   samesite = SPOTIFY_COOKIE_SAMESITE
   if not SPOTIFY_COOKIE_SECURE and samesite == "none":
     # Browsers reject SameSite=None without Secure on HTTP localhost.
@@ -109,6 +123,8 @@ async def callback(code: str, req: Request):
     samesite=samesite,
     max_age=60 * 60 * 24 * 30,
   )
+  r.delete_cookie("sp_ru")
+  r.delete_cookie("sp_st")
   return r
 
 @router.get("/status")
@@ -139,13 +155,16 @@ async def access_token(req: Request):
   data = {"grant_type": "refresh_token", "refresh_token": payload["refresh_token"]}
   basic = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
 
-  async with httpx.AsyncClient(timeout=20) as client:
-    resp = await client.post(
-      "https://accounts.spotify.com/api/token",
-      data=data,
-      headers={"Authorization": f"Basic {basic}"},
-    )
-    resp.raise_for_status()
-    tok = resp.json()
+  try:
+    async with httpx.AsyncClient(timeout=20) as client:
+      resp = await client.post(
+        "https://accounts.spotify.com/api/token",
+        data=data,
+        headers={"Authorization": f"Basic {basic}"},
+      )
+      resp.raise_for_status()
+      tok = resp.json()
+  except Exception:
+    return JSONResponse({"ok": False, "error": "token_refresh_failed"}, status_code=502)
 
   return {"ok": True, "access_token": tok["access_token"], "expires_in": tok.get("expires_in", 3600)}

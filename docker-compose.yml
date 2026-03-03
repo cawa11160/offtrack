@@ -1,4 +1,9 @@
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   db:
     image: postgres:16
     environment:
@@ -39,6 +44,9 @@ services:
       # Optional protection for upload endpoints
       UPLOAD_SECRET: ${UPLOAD_SECRET-}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB-200}
+      RATE_LIMIT_BACKEND: ${RATE_LIMIT_BACKEND-memory}
+      REDIS_URL: ${REDIS_URL-redis://redis:6379/0}
+      ADMIN_API_KEY: ${ADMIN_API_KEY-}
       # Lyric AI generation
       LYRIC_AI_PROVIDER: ${LYRIC_AI_PROVIDER-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY-}
@@ -50,6 +58,7 @@ services:
       - "8000:8000"
     depends_on:
       - db
+      - redis
     volumes:
       - offtrack_media:/app/media
 

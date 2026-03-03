@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import time
 import uuid
 import mimetypes
 import re
+import logging
+import threading
 from typing import List, Optional, Dict, Any
 from urllib.parse import quote
 from functools import lru_cache
 from pathlib import Path
 
 import requests
+try:
+    import redis  # type: ignore
+except Exception:  # pragma: no cover - optional dependency in some envs
+    redis = None
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,14 +29,18 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from db import get_db, SessionLocal, engine, wait_for_db
 from models import Track, Interaction, User, TrackAudio, UploadedTrack, LyricReel, Base
+from models import PaymentMethod, BillingReceipt, SecurityAuditLog
 from recommender import get_recommender
 from analytics import get_analytics
 
 from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse
 
 load_dotenv()
 
 app = FastAPI(title="Offtrack API")
+log = logging.getLogger("offtrack.api")
 
 try:
     from spotify_auth import router as spotify_router
@@ -56,6 +67,146 @@ MEDIA_REEL_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_SECRET = os.getenv("UPLOAD_SECRET", "").strip()  # optional
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "200"))  # keep reasonable for MVP
 REQUIRE_AUTH_UPLOADS = os.getenv("REQUIRE_AUTH_UPLOADS", "true").strip().lower() in ("1", "true", "yes")
+
+# Basic in-memory rate limiting and auth brute-force protection.
+RATE_LIMIT_LOGIN_PER_MIN = int(os.getenv("RATE_LIMIT_LOGIN_PER_MIN", "30"))
+RATE_LIMIT_SIGNUP_PER_MIN = int(os.getenv("RATE_LIMIT_SIGNUP_PER_MIN", "20"))
+RATE_LIMIT_UPLOAD_PER_MIN = int(os.getenv("RATE_LIMIT_UPLOAD_PER_MIN", "20"))
+BRUTE_FORCE_MAX_FAILS = int(os.getenv("BRUTE_FORCE_MAX_FAILS", "8"))
+BRUTE_FORCE_WINDOW_SEC = int(os.getenv("BRUTE_FORCE_WINDOW_SEC", "300"))
+BRUTE_FORCE_BLOCK_SEC = int(os.getenv("BRUTE_FORCE_BLOCK_SEC", "600"))
+RATE_LIMIT_BACKEND = (os.getenv("RATE_LIMIT_BACKEND", "memory").strip().lower() or "memory")
+REDIS_URL = (os.getenv("REDIS_URL", "").strip() or "redis://localhost:6379/0")
+ADMIN_API_KEY = (os.getenv("ADMIN_API_KEY", "").strip())
+_rate_lock = threading.Lock()
+_rate_state: Dict[str, List[float]] = {}
+_auth_fail_state: Dict[str, Dict[str, float]] = {}
+_redis_client = None
+
+if RATE_LIMIT_BACKEND == "redis" and redis is not None:
+    try:
+        _redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        _redis_client.ping()
+    except Exception:
+        _redis_client = None
+
+
+def _client_ip(req: Request) -> str:
+    xff = (req.headers.get("x-forwarded-for") or "").strip()
+    if xff:
+        return xff.split(",")[0].strip()
+    if req.client and req.client.host:
+        return req.client.host
+    return "unknown"
+
+
+def _rate_limit_check(key: str, limit: int, window_sec: int = 60) -> tuple[bool, int]:
+    if _redis_client is not None:
+        now = int(time.time())
+        bucket = now // max(1, window_sec)
+        redis_key = f"rl:{key}:{bucket}"
+        try:
+            count = int(_redis_client.incr(redis_key))
+            if count == 1:
+                _redis_client.expire(redis_key, max(1, window_sec + 2))
+            if count > max(1, int(limit)):
+                retry_after = max(1, window_sec - (now % max(1, window_sec)))
+                return False, retry_after
+            return True, 0
+        except Exception:
+            # fall back to in-memory limiter on Redis outage
+            pass
+
+    now = time.time()
+    with _rate_lock:
+        bucket = _rate_state.get(key, [])
+        bucket = [t for t in bucket if now - t < window_sec]
+        if len(bucket) >= max(1, int(limit)):
+            retry_after = int(max(1, window_sec - (now - bucket[0])))
+            _rate_state[key] = bucket
+            return False, retry_after
+        bucket.append(now)
+        _rate_state[key] = bucket
+        return True, 0
+
+
+def _enforce_rate_limit(scope: str, req: Request, limit: int, window_sec: int = 60) -> None:
+    key = f"{scope}:{_client_ip(req)}"
+    ok, retry_after = _rate_limit_check(key, limit=limit, window_sec=window_sec)
+    if not ok:
+        raise HTTPException(status_code=429, detail=f"Too many requests. Retry in {retry_after}s.")
+
+
+def _auth_failure_key(email: str, ip: str) -> str:
+    return f"{email.lower().strip()}|{ip}"
+
+
+def _check_auth_bruteforce(email: str, ip: str) -> None:
+    key = _auth_failure_key(email, ip)
+    now = int(time.time())
+    if _redis_client is not None:
+        rkey = f"bf:{key}"
+        try:
+            blocked_until = int(_redis_client.hget(rkey, "blocked_until") or 0)
+            if now < blocked_until:
+                retry_after = max(1, blocked_until - now)
+                raise HTTPException(status_code=429, detail=f"Too many failed login attempts. Retry in {retry_after}s.")
+            return
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    with _rate_lock:
+        info = _auth_fail_state.get(key)
+        if not info:
+            return
+        blocked_until = float(info.get("blocked_until", 0))
+        if now < blocked_until:
+            retry_after = int(max(1, blocked_until - now))
+            raise HTTPException(status_code=429, detail=f"Too many failed login attempts. Retry in {retry_after}s.")
+
+
+def _record_auth_result(email: str, ip: str, ok: bool) -> None:
+    key = _auth_failure_key(email, ip)
+    now = int(time.time())
+    if _redis_client is not None:
+        rkey = f"bf:{key}"
+        try:
+            if ok:
+                _redis_client.delete(rkey)
+                return
+            first = int(_redis_client.hget(rkey, "first") or 0)
+            count = int(_redis_client.hget(rkey, "count") or 0)
+            if first <= 0 or now - first > BRUTE_FORCE_WINDOW_SEC:
+                first = now
+                count = 0
+            count += 1
+            blocked_until = 0
+            if count >= max(1, BRUTE_FORCE_MAX_FAILS):
+                blocked_until = now + max(1, BRUTE_FORCE_BLOCK_SEC)
+                count = 0
+                first = now
+            _redis_client.hset(rkey, mapping={"first": first, "count": count, "blocked_until": blocked_until})
+            _redis_client.expire(rkey, max(BRUTE_FORCE_WINDOW_SEC, BRUTE_FORCE_BLOCK_SEC) + 60)
+            return
+        except Exception:
+            pass
+
+    with _rate_lock:
+        if ok:
+            _auth_fail_state.pop(key, None)
+            return
+        info = _auth_fail_state.get(key, {"count": 0, "first": now, "blocked_until": 0})
+        first = float(info.get("first", now))
+        if now - first > BRUTE_FORCE_WINDOW_SEC:
+            info = {"count": 0, "first": now, "blocked_until": 0}
+        info["count"] = int(info.get("count", 0)) + 1
+        if int(info["count"]) >= max(1, BRUTE_FORCE_MAX_FAILS):
+            info["blocked_until"] = now + max(1, BRUTE_FORCE_BLOCK_SEC)
+            info["count"] = 0
+            info["first"] = now
+        _auth_fail_state[key] = info
 
 
 def _check_upload_secret(request: Request) -> bool:
@@ -185,6 +336,29 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = (request.headers.get("x-request-id") or "").strip() or uuid.uuid4().hex
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    rid = getattr(request.state, "request_id", uuid.uuid4().hex)
+    detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
+    return JSONResponse(status_code=exc.status_code, content={"error": detail, "error_id": rid})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    rid = getattr(request.state, "request_id", uuid.uuid4().hex)
+    log.exception("Unhandled backend error", extra={"error_id": rid, "path": str(request.url.path)})
+    return JSONResponse(status_code=500, content={"error": "Internal server error", "error_id": rid})
+
+
 # -----------------------------
 # Auth (email/password + JWT)
 # -----------------------------
@@ -270,6 +444,89 @@ class MeOut(BaseModel):
     email: EmailStr
     name: str | None = None
 
+
+class PaymentMethodIn(BaseModel):
+    card_number: str = Field(min_length=12, max_length=25)
+    exp_month: int = Field(ge=1, le=12)
+    exp_year: int = Field(ge=2024, le=2100)
+    holder_name: str | None = Field(default=None, max_length=255)
+    brand: str | None = Field(default="card", max_length=32)
+    set_default: bool = True
+
+
+class AdminLockIn(BaseModel):
+    minutes: int = Field(default=30, ge=1, le=7 * 24 * 60)
+    reason: str | None = Field(default="manual_admin_lock", max_length=500)
+
+
+def _normalize_digits(v: str) -> str:
+    return "".join(ch for ch in (v or "") if ch.isdigit())
+
+
+def _infer_brand(number: str) -> str:
+    if number.startswith("4"):
+        return "visa"
+    if number.startswith(("51", "52", "53", "54", "55")):
+        return "mastercard"
+    if number.startswith(("34", "37")):
+        return "amex"
+    return "card"
+
+
+def _last4(number: str) -> str:
+    return number[-4:] if len(number) >= 4 else number.rjust(4, "0")
+
+
+def _require_admin(req: Request) -> None:
+    if not ADMIN_API_KEY:
+        raise HTTPException(status_code=503, detail="Admin API not configured")
+    supplied = (req.headers.get("X-Admin-Api-Key") or "").strip()
+    if supplied != ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Admin access denied")
+
+
+def _audit_log(
+    action: str,
+    db: Session | None = None,
+    user_id: int | None = None,
+    email: str | None = None,
+    req: Request | None = None,
+    reason: str | None = None,
+    actor: str = "system",
+    meta: Dict[str, Any] | None = None,
+) -> None:
+    own_db = db is None
+    dbs = db or SessionLocal()
+    try:
+        dbs.add(
+            SecurityAuditLog(
+                id=str(uuid.uuid4()),
+                actor=actor,
+                action=action,
+                user_id=user_id,
+                email=(email or "").strip() or None,
+                ip=(_client_ip(req) if req is not None else None),
+                reason=(reason or "").strip() or None,
+                meta_json=json.dumps(meta or {}, separators=(",", ":"), sort_keys=True),
+            )
+        )
+        if own_db:
+            dbs.commit()
+    except Exception:
+        if own_db:
+            try:
+                dbs.rollback()
+            except Exception:
+                pass
+        # Never block request on audit logging failures.
+        pass
+    finally:
+        if own_db:
+            try:
+                dbs.close()
+            except Exception:
+                pass
+
 def _get_bearer_token(req: Request) -> str:
     auth = req.headers.get("authorization") or ""
     if not auth.lower().startswith("bearer "):
@@ -287,7 +544,8 @@ def get_current_user_id(req: Request) -> int:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 @app.post("/api/auth/signup", response_model=AuthOut)
-def auth_signup(payload: SignupIn, resp: Response, db: Session = Depends(get_db)):
+def auth_signup(payload: SignupIn, req: Request, resp: Response, db: Session = Depends(get_db)):
+    _enforce_rate_limit("signup", req, RATE_LIMIT_SIGNUP_PER_MIN, 60)
     email = payload.email.lower().strip()
     name = (payload.name or "").strip() or None
     try:
@@ -315,14 +573,31 @@ def auth_signup(payload: SignupIn, resp: Response, db: Session = Depends(get_db)
     return {"access_token": access}
 
 @app.post("/api/auth/login", response_model=AuthOut)
-def auth_login(payload: LoginIn, resp: Response, db: Session = Depends(get_db)):
+def auth_login(payload: LoginIn, req: Request, resp: Response, db: Session = Depends(get_db)):
+    _enforce_rate_limit("login", req, RATE_LIMIT_LOGIN_PER_MIN, 60)
     email = payload.email.lower().strip()
+    ip = _client_ip(req)
+    _check_auth_bruteforce(email, ip)
     try:
         user = db.query(User).filter(User.email == email).first()
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.")
+    if user and getattr(user, "locked_until", None):
+        try:
+            locked_until = user.locked_until
+            if locked_until and locked_until > _now_utc():
+                retry_after = int((locked_until - _now_utc()).total_seconds())
+                raise HTTPException(status_code=423, detail=f"Account locked. Retry in {max(1, retry_after)}s.")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
     if not user or not _verify_password(payload.password, user.password_hash):
+        _record_auth_result(email, ip, ok=False)
+        _audit_log(action="auth_login_failed", user_id=(user.id if user else None), email=email, req=req, reason="invalid_credentials")
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    _record_auth_result(email, ip, ok=True)
+    _audit_log(action="auth_login_success", user_id=user.id, email=email, req=req)
 
     access = _create_access_token(user.id)
     refresh = _create_refresh_token(user.id)
@@ -363,6 +638,281 @@ def auth_me(req: Request, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return {"id": user.id, "email": user.email, "name": user.name}
+
+
+@app.post("/api/admin/users/{user_id}/lock")
+def admin_lock_user(user_id: int, payload: AdminLockIn, req: Request, db: Session = Depends(get_db)):
+    _require_admin(req)
+    try:
+        user = db.query(User).filter(User.id == int(user_id)).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    locked_until = _now_utc() + timedelta(minutes=int(payload.minutes))
+    user.locked_until = locked_until
+    user.lock_reason = (payload.reason or "").strip() or "manual_admin_lock"
+    _audit_log(
+        action="admin_lock_user",
+        db=db,
+        user_id=user.id,
+        email=user.email,
+        req=req,
+        reason=user.lock_reason,
+        actor="admin",
+        meta={"minutes": int(payload.minutes)},
+    )
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not lock user. Please try again.")
+
+    return {"ok": True, "userId": user.id, "lockedUntil": str(user.locked_until), "reason": user.lock_reason}
+
+
+@app.post("/api/admin/users/{user_id}/unlock")
+def admin_unlock_user(user_id: int, req: Request, db: Session = Depends(get_db)):
+    _require_admin(req)
+    try:
+        user = db.query(User).filter(User.id == int(user_id)).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.locked_until = None
+    user.lock_reason = None
+    _audit_log(action="admin_unlock_user", db=db, user_id=user.id, email=user.email, req=req, actor="admin")
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not unlock user. Please try again.")
+    return {"ok": True, "userId": user.id}
+
+
+@app.get("/api/admin/audit-logs")
+def admin_audit_logs(req: Request, limit: int = 50, db: Session = Depends(get_db)):
+    _require_admin(req)
+    limit = max(1, min(int(limit or 50), 200))
+    try:
+        rows = (
+            db.query(SecurityAuditLog)
+            .order_by(SecurityAuditLog.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+
+    return {
+        "logs": [
+            {
+                "id": r.id,
+                "actor": r.actor,
+                "action": r.action,
+                "userId": r.user_id,
+                "email": r.email,
+                "ip": r.ip,
+                "reason": r.reason,
+                "meta": (json.loads(r.meta_json) if r.meta_json else {}),
+                "createdAt": getattr(r, "created_at", None),
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/api/billing/payment-methods")
+def billing_list_payment_methods(req: Request, db: Session = Depends(get_db)):
+    user_id = get_current_user_id(req)
+    try:
+        rows = (
+            db.query(PaymentMethod)
+            .filter(PaymentMethod.user_id == user_id)
+            .order_by(PaymentMethod.is_default.desc(), PaymentMethod.created_at.desc())
+            .all()
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+
+    return {
+        "methods": [
+            {
+                "id": r.id,
+                "brand": r.brand,
+                "last4": r.last4,
+                "expMonth": r.exp_month,
+                "expYear": r.exp_year,
+                "holderName": r.holder_name,
+                "isDefault": bool(r.is_default),
+                "createdAt": getattr(r, "created_at", None),
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.post("/api/billing/payment-methods")
+def billing_add_payment_method(payload: PaymentMethodIn, req: Request, db: Session = Depends(get_db)):
+    user_id = get_current_user_id(req)
+    digits = _normalize_digits(payload.card_number)
+    if len(digits) < 12:
+        raise HTTPException(status_code=400, detail="Invalid card number")
+
+    now = _now_utc()
+    if payload.exp_year < now.year or (payload.exp_year == now.year and payload.exp_month < now.month):
+        raise HTTPException(status_code=400, detail="Card expiry is in the past")
+
+    brand = (payload.brand or "").strip().lower() or _infer_brand(digits)
+    method_id = str(uuid.uuid4())
+
+    try:
+        if payload.set_default:
+            (
+                db.query(PaymentMethod)
+                .filter(PaymentMethod.user_id == user_id, PaymentMethod.is_default == True)  # noqa: E712
+                .update({"is_default": False}, synchronize_session=False)
+            )
+
+        row = PaymentMethod(
+            id=method_id,
+            user_id=user_id,
+            brand=brand,
+            last4=_last4(digits),
+            exp_month=payload.exp_month,
+            exp_year=payload.exp_year,
+            holder_name=(payload.holder_name or "").strip() or None,
+            is_default=bool(payload.set_default),
+        )
+        db.add(row)
+
+        # Generate a simple billing receipt entry for auditability.
+        db.add(
+            BillingReceipt(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                amount_cents=0,
+                currency="USD",
+                status="setup",
+                description="Payment method added",
+                payment_method_last4=row.last4,
+            )
+        )
+
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not save payment method. Please try again.")
+
+    return {
+        "id": method_id,
+        "brand": brand,
+        "last4": _last4(digits),
+        "expMonth": payload.exp_month,
+        "expYear": payload.exp_year,
+        "holderName": (payload.holder_name or "").strip() or None,
+        "isDefault": bool(payload.set_default),
+    }
+
+
+@app.delete("/api/billing/payment-methods/{method_id}")
+def billing_delete_payment_method(method_id: str, req: Request, db: Session = Depends(get_db)):
+    user_id = get_current_user_id(req)
+    mid = (method_id or "").strip()
+    if not mid:
+        raise HTTPException(status_code=400, detail="Invalid payment method id")
+
+    try:
+        row = db.query(PaymentMethod).filter(PaymentMethod.id == mid, PaymentMethod.user_id == user_id).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Payment method not found")
+
+        was_default = bool(row.is_default)
+        db.delete(row)
+        db.flush()
+
+        if was_default:
+            next_default = (
+                db.query(PaymentMethod)
+                .filter(PaymentMethod.user_id == user_id)
+                .order_by(PaymentMethod.created_at.desc())
+                .first()
+            )
+            if next_default:
+                next_default.is_default = True
+
+        db.commit()
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not delete payment method. Please try again.")
+
+    return {"ok": True}
+
+
+@app.get("/api/billing/receipts")
+def billing_list_receipts(req: Request, limit: int = 20, db: Session = Depends(get_db)):
+    user_id = get_current_user_id(req)
+    limit = max(1, min(int(limit or 20), 100))
+    try:
+        rows = (
+            db.query(BillingReceipt)
+            .filter(BillingReceipt.user_id == user_id)
+            .order_by(BillingReceipt.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+
+    return {
+        "receipts": [
+            {
+                "id": r.id,
+                "amountCents": r.amount_cents,
+                "currency": r.currency,
+                "status": r.status,
+                "description": r.description,
+                "paymentMethodLast4": r.payment_method_last4,
+                "createdAt": getattr(r, "created_at", None),
+                "downloadUrl": f"/api/billing/receipts/{r.id}/download",
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/api/billing/receipts/{receipt_id}/download")
+def billing_download_receipt(receipt_id: str, req: Request, db: Session = Depends(get_db)):
+    user_id = get_current_user_id(req)
+    rid = (receipt_id or "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="Invalid receipt id")
+
+    try:
+        row = db.query(BillingReceipt).filter(BillingReceipt.id == rid, BillingReceipt.user_id == user_id).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+    if not row:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+
+    amount = f"{row.amount_cents / 100:.2f}"
+    ts = str(getattr(row, "created_at", "") or "")
+    content = (
+        f"Offtrack Receipt\n"
+        f"Receipt ID: {row.id}\n"
+        f"Date: {ts}\n"
+        f"Status: {row.status}\n"
+        f"Description: {row.description}\n"
+        f"Amount: {amount} {row.currency}\n"
+        f"Card Last4: {row.payment_method_last4 or 'N/A'}\n"
+    )
+    headers = {"Content-Disposition": f'attachment; filename=\"receipt-{row.id}.txt\"'}
+    return PlainTextResponse(content=content, headers=headers)
 
 
 @app.on_event("startup")
@@ -596,8 +1146,8 @@ class SeedSong(BaseModel):
 
 class RecommendRequest(BaseModel):
     seeds: List[SeedSong]
-    n: int = 9
-    mode: str = "all"  # "all" | "indie" | "mainstream"
+    n: int = Field(default=9, ge=1, le=50)
+    mode: str = Field(default="all", pattern="^(all|indie|mainstream)$")
     # Avoid repeats across sessions / refreshes (frontend keeps a rolling list)
     already_shown_ids: Optional[List[str]] = None
     distinct_id: Optional[str] = None  # for analytics (PostHog)
@@ -653,8 +1203,8 @@ def db_status():
             cnt = int(conn.execute(
                 text("SELECT COUNT(*) FROM tracks")).scalar_one())
             return {"ok": True, "tracks_exists": True, "tracks_count": cnt}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
 
 @app.post("/api/reload")
@@ -701,7 +1251,7 @@ def search_endpoint(
     db: Session = Depends(get_db),
 ):
     q = (q or "").strip()
-    limit = int(limit)
+    limit = max(1, min(int(limit or 8), 50))
 
     source = "db"
     results: List[Dict[str, Any]] = []
@@ -959,12 +1509,13 @@ def feedback_endpoint(
     if len(track_id) > 256:
         raise HTTPException(status_code=400, detail="Invalid track_id")
 
-    distinct_id = None
+    explicit_distinct = (req.distinct_id or "").strip() or None
+    distinct_id = explicit_distinct or "anonymous"
     try:
         if request is not None:
-            distinct_id = get_analytics().distinct_id(request, explicit=req.distinct_id)
+            distinct_id = get_analytics().distinct_id(request, explicit=explicit_distinct) or distinct_id
     except Exception:
-        distinct_id = (req.distinct_id or "").strip() or "anonymous"
+        pass
 
     # persist interaction
     try:
@@ -1022,6 +1573,8 @@ def preview_endpoint(req: PreviewRequest, request: Request = None, background_ta
 
     title = (req.title or "").strip()
     artist = (req.artist or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title required")
 
     details = spotify_track_lookup(title, artist)
     if not details:
@@ -1183,6 +1736,7 @@ async def upload_catalog_track_audio(
 
     Frontend can then play `/api/audio/<track_id>` instead of Spotify previews.
     """
+    _enforce_rate_limit("upload", request, RATE_LIMIT_UPLOAD_PER_MIN, 60)
     if not _check_upload_secret(request):
         raise HTTPException(status_code=403, detail="Upload secret required")
     _require_uploader_identity(request)
@@ -1267,6 +1821,7 @@ async def upload_new_track(
     db: Session = Depends(get_db),
 ):
     """Upload a brand-new track to Offtrack's streaming library."""
+    _enforce_rate_limit("upload", request, RATE_LIMIT_UPLOAD_PER_MIN, 60)
     if not _check_upload_secret(request):
         raise HTTPException(status_code=403, detail="Upload secret required")
     _require_uploader_identity(request)
@@ -1326,7 +1881,10 @@ async def upload_new_track(
 @app.get("/api/uploads")
 def list_uploads(limit: int = 50, db: Session = Depends(get_db)):
     limit = max(1, min(int(limit or 50), 200))
-    rows = db.query(UploadedTrack).order_by(UploadedTrack.created_at.desc()).limit(limit).all()
+    try:
+        rows = db.query(UploadedTrack).order_by(UploadedTrack.created_at.desc()).limit(limit).all()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
     return {
         "tracks": [
             {
@@ -1347,7 +1905,10 @@ def list_uploads(limit: int = 50, db: Session = Depends(get_db)):
 @app.get("/api/uploads/{upload_id}/stream")
 def stream_uploaded_track(upload_id: str, request: Request, db: Session = Depends(get_db)):
     uid = (upload_id or "").strip()
-    row = db.query(UploadedTrack).filter(UploadedTrack.id == uid).first()
+    try:
+        row = db.query(UploadedTrack).filter(UploadedTrack.id == uid).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
     if not row:
         raise HTTPException(status_code=404, detail="Unknown upload id")
     return _stream_file(Path(row.file_path), row.mime_type or "audio/mpeg", request)

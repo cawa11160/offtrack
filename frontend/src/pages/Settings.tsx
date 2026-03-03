@@ -37,6 +37,15 @@ export default function Settings() {
         </div>
 
         <h1 className="mt-8 font-['Arimo',sans-serif] text-[42px] font-bold leading-none text-black">Settings</h1>
+        <div className="mt-4">
+          <button
+            type="button"
+            onClick={() => navigate("/admin/security")}
+            className="rounded-[10px] border border-black/20 bg-white px-4 py-2 font-['Arimo',sans-serif] text-[16px] font-bold text-black hover:bg-black/5"
+          >
+            Open Admin Security
+          </button>
+        </div>
 
         <div className="mt-4 min-h-[640px] rounded-[10px] bg-[#d9d9d9]">
           <div className="grid min-h-[640px] grid-cols-[270px_1fr]">

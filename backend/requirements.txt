@@ -5,6 +5,7 @@ numpy
 scikit-learn
 requests
 httpx>=0.27.0
+redis>=5.0.0
 python-dotenv
 sqlalchemy>=2.0
 psycopg2-binary>=2.9
@@ -17,3 +18,4 @@ python-multipart>=0.0.9
 pillow>=10.0.0
 imageio>=2.34.0
 imageio-ffmpeg>=0.5.1
+pytest>=8.2.0

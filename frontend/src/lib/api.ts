@@ -237,3 +237,136 @@ export async function apiListReels(limit = 20): Promise<ReelItem[]> {
   const data = await r.json().catch(() => ({}));
   return (data?.reels ?? []) as ReelItem[];
 }
+
+// -----------------------------
+// Billing
+// -----------------------------
+export type BillingPaymentMethod = {
+  id: string;
+  brand: string;
+  last4: string;
+  expMonth: number;
+  expYear: number;
+  holderName?: string | null;
+  isDefault: boolean;
+  createdAt?: string;
+};
+
+export type BillingReceipt = {
+  id: string;
+  amountCents: number;
+  currency: string;
+  status: string;
+  description: string;
+  paymentMethodLast4?: string | null;
+  createdAt?: string;
+  downloadUrl: string;
+};
+
+export async function apiListPaymentMethods(): Promise<BillingPaymentMethod[]> {
+  const r = await apiFetch("/api/billing/payment-methods");
+  if (!r.ok) throw new Error(await readError(r));
+  const data = await r.json().catch(() => ({}));
+  return (data?.methods ?? []) as BillingPaymentMethod[];
+}
+
+export async function apiAddPaymentMethod(args: {
+  cardNumber: string;
+  expMonth: number;
+  expYear: number;
+  holderName?: string;
+  brand?: string;
+  setDefault?: boolean;
+}): Promise<BillingPaymentMethod> {
+  const r = await apiFetch("/api/billing/payment-methods", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      card_number: args.cardNumber,
+      exp_month: args.expMonth,
+      exp_year: args.expYear,
+      holder_name: args.holderName ?? "",
+      brand: args.brand ?? "card",
+      set_default: args.setDefault ?? true,
+    }),
+  });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as BillingPaymentMethod;
+}
+
+export async function apiDeletePaymentMethod(methodId: string): Promise<void> {
+  const r = await apiFetch(`/api/billing/payment-methods/${encodeURIComponent(methodId)}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(await readError(r));
+}
+
+export async function apiListReceipts(limit = 20): Promise<BillingReceipt[]> {
+  const r = await apiFetch(`/api/billing/receipts?limit=${limit}`);
+  if (!r.ok) throw new Error(await readError(r));
+  const data = await r.json().catch(() => ({}));
+  return (data?.receipts ?? []) as BillingReceipt[];
+}
+
+export async function apiDownloadReceipt(receiptId: string): Promise<Blob> {
+  const r = await apiFetch(`/api/billing/receipts/${encodeURIComponent(receiptId)}/download`);
+  if (!r.ok) throw new Error(await readError(r));
+  return await r.blob();
+}
+
+// -----------------------------
+// Admin security
+// -----------------------------
+export type AdminAuditLog = {
+  id: string;
+  actor: string;
+  action: string;
+  userId?: number | null;
+  email?: string | null;
+  ip?: string | null;
+  reason?: string | null;
+  meta?: Record<string, unknown>;
+  createdAt?: string;
+};
+
+async function adminFetch(path: string, adminApiKey: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  headers.set("X-Admin-Api-Key", adminApiKey);
+  const r = await apiFetch(path, { ...init, headers });
+  return r;
+}
+
+export async function apiAdminLockUser(args: {
+  adminApiKey: string;
+  userId: number;
+  minutes: number;
+  reason?: string;
+}): Promise<{ ok: boolean; userId: number; lockedUntil?: string; reason?: string }> {
+  const r = await adminFetch(`/api/admin/users/${args.userId}/lock`, args.adminApiKey, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ minutes: args.minutes, reason: args.reason ?? "manual_admin_lock" }),
+  });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as { ok: boolean; userId: number; lockedUntil?: string; reason?: string };
+}
+
+export async function apiAdminUnlockUser(args: {
+  adminApiKey: string;
+  userId: number;
+}): Promise<{ ok: boolean; userId: number }> {
+  const r = await adminFetch(`/api/admin/users/${args.userId}/unlock`, args.adminApiKey, {
+    method: "POST",
+  });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as { ok: boolean; userId: number };
+}
+
+export async function apiAdminAuditLogs(args: {
+  adminApiKey: string;
+  limit?: number;
+}): Promise<AdminAuditLog[]> {
+  const limit = Math.max(1, Math.min(args.limit ?? 100, 200));
+  const r = await adminFetch(`/api/admin/audit-logs?limit=${limit}`, args.adminApiKey);
+  if (!r.ok) throw new Error(await readError(r));
+  const data = await r.json().catch(() => ({}));
+  return (data?.logs ?? []) as AdminAuditLog[];
+}

@@ -1,4 +1,9 @@
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   db:
     image: postgres:16
     environment:
@@ -19,6 +24,11 @@ services:
       # Optional Spotify creds:
       SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID-}
       SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET-}
+      SPOTIFY_REDIRECT_URI: ${SPOTIFY_REDIRECT_URI-http://localhost:8000/api/spotify/callback}
+      FRONTEND_URL: ${FRONTEND_URL-http://localhost:8080}
+      COOKIE_SECRET: ${COOKIE_SECRET-dev_cookie_secret_change_me}
+      SPOTIFY_COOKIE_SECURE: ${SPOTIFY_COOKIE_SECURE-false}
+      SPOTIFY_COOKIE_SAMESITE: ${SPOTIFY_COOKIE_SAMESITE-lax}
       # Optional PostHog analytics (safe to leave unset):
       POSTHOG_ENABLED: ${POSTHOG_ENABLED-true}
       POSTHOG_HOST: ${POSTHOG_HOST-https://app.posthog.com}
@@ -29,10 +39,28 @@ services:
       REFRESH_TTL_DAYS: ${REFRESH_TTL_DAYS-30}
       COOKIE_SECURE: ${COOKIE_SECURE-false}
       COOKIE_SAMESITE: ${COOKIE_SAMESITE-lax}
+      # Full-song uploads (stored on a mounted volume)
+      MEDIA_DIR: /app/media
+      # Optional protection for upload endpoints
+      UPLOAD_SECRET: ${UPLOAD_SECRET-}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB-200}
+      RATE_LIMIT_BACKEND: ${RATE_LIMIT_BACKEND-memory}
+      REDIS_URL: ${REDIS_URL-redis://redis:6379/0}
+      ADMIN_API_KEY: ${ADMIN_API_KEY-}
+      # Lyric AI generation
+      LYRIC_AI_PROVIDER: ${LYRIC_AI_PROVIDER-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY-}
+      OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL-gpt-image-1}
+      OPENAI_IMAGE_SIZE: ${OPENAI_IMAGE_SIZE-1024x1536}
+      OPENAI_IMAGE_QUALITY: ${OPENAI_IMAGE_QUALITY-medium}
+      LYRIC_AI_ALLOW_LOCAL_FALLBACK: ${LYRIC_AI_ALLOW_LOCAL_FALLBACK-false}
     ports:
       - "8000:8000"
     depends_on:
       - db
+      - redis
+    volumes:
+      - offtrack_media:/app/media
 
   frontend:
     build: ./frontend/
@@ -46,3 +74,4 @@ services:
 
 volumes:
   offtrack_pg:
+  offtrack_media:

@@ -12,6 +12,7 @@ import {
   ListMusic,
   Search,
   Share2,
+  UploadCloud,
 } from "lucide-react";
 
 type SidebarItem = { to: string; label: string; icon: React.ReactNode };
@@ -33,12 +34,19 @@ function inferRoute(label: string): string {
   const key = label.trim().toLowerCase();
   if (key === "home") return "/";
   if (key === "search") return "/search";
-  if (key === "library") return "/library";
+  if (key === "library") return "/liked";
   if (key === "playlists") return "/playlists";
   // The actual route is /concerts (not /concert-map)
   if (key === "concert map" || key === "concertmap" || key === "concerts") return "/concerts";
   if (key === "merchandise" || key === "merch") return "/merch";
   if (key === "interactive web" || key === "interactive") return "/web";
+  if (key === "recommendations") return "/recommendations";
+  if (key === "profile") return "/profile";
+  if (key === "account") return "/account";
+  if (key === "settings") return "/settings";
+  if (key === "uploads") return "/uploads";
+  if (key === "log in" || key === "login") return "/login";
+  if (key === "sign up" || key === "signup") return "/signup";
   return `/${key.replace(/\s+/g, "-")}`;
 }
 
@@ -79,7 +87,7 @@ export function Sidebar({
       icon: <Search className="text-black" size={22} strokeWidth={1.8} />,
     },
     {
-      to: "/library",
+      to: "/liked",
       label: "Library",
       icon: <Library className="text-black" size={22} strokeWidth={1.8} />,
     },
@@ -97,6 +105,11 @@ export function Sidebar({
       to: "/web",
       label: "Interactive Web",
       icon: <Share2 className="text-black" size={22} strokeWidth={1.8} />,
+    },
+    {
+      to: "/uploads",
+      label: "Uploads",
+      icon: <UploadCloud className="text-black" size={22} strokeWidth={1.8} />,
     },
     {
       to: "/merch",

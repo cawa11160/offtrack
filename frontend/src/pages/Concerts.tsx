@@ -3,12 +3,9 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import mapboxgl, { Map, Marker, Popup } from "mapbox-gl";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { ArrowLeft, Music2 } from "lucide-react";
 
-import { ConcertCard } from "@/components/ConcertCard";
-import { SectionHeader } from "@/components/SectionHeader";
 import { concerts } from "@/data/mockData";
-import { MapPin, List, Filter, ExternalLink } from "lucide-react";
-import { Button } from "@/components/ui/button";
 
 type ConcertLike = {
   id: string;
@@ -17,34 +14,26 @@ type ConcertLike = {
   venue?: string;
   city?: string;
   date?: string;
-  imageUrl?: string;
-  coverUrl?: string;
+  ticketUrl?: string;
   lat?: number;
   lng?: number;
-  // optional future fields:
   genre?: string;
   price?: string;
 };
 
-// IMPORTANT: trim to avoid subtle issues when env files contain leading/trailing spaces
-// (e.g. `VITE_MAPBOX_TOKEN= pk...` will fail unless trimmed).
 const MAPBOX_TOKEN = (import.meta.env.VITE_MAPBOX_TOKEN as string | undefined)?.trim();
 
 async function initMapboxCspWorker() {
-  // If your deployment uses a strict CSP that blocks 'blob:' workers, Mapbox GL
-  // can silently render a blank map. This Vite worker import fixes that.
   try {
-    // Vite will bundle this as a Worker constructor.
     // @ts-expect-error - Vite worker import
     const mod = await import("mapbox-gl/dist/mapbox-gl-csp-worker?worker");
     // @ts-expect-error - mapboxgl.workerClass is not typed in all versions
     mapboxgl.workerClass = mod.default;
   } catch {
-    // No-op: either not needed, or bundler doesn't support this import.
+    // No-op.
   }
 }
 
-// Default coords so pins show up even without lat/lng
 const cityFallbackCoords: Record<string, { lng: number; lat: number }> = {
   "New York": { lng: -74.006, lat: 40.7128 },
   "Los Angeles": { lng: -118.2437, lat: 34.0522 },
@@ -64,59 +53,57 @@ function getConcertCoords(c: ConcertLike, index: number) {
   const city = c.city ?? "";
   if (cityFallbackCoords[city]) return cityFallbackCoords[city];
 
-  // scatter around NYC so markers don’t overlap perfectly
   const base = { lng: -74.006, lat: 40.7128 };
   const jitter = (n: number) => (n % 2 === 0 ? 1 : -1) * (0.01 + (n % 5) * 0.003);
   return { lng: base.lng + jitter(index), lat: base.lat + jitter(index + 1) };
+}
+
+function prettyDate(value?: string) {
+  if (!value) return "Date TBA";
+  const d = new Date(value);
+  if (!Number.isNaN(d.getTime())) {
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  }
+  return value;
 }
 
 const Concerts = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
-  const [viewMode, setViewMode] = useState<"list" | "map">("list");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [mapError, setMapError] = useState<string | null>(null);
-  const [mapDiag, setMapDiag] = useState<string | null>(null);
-
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const markersRef = useRef<Marker[]>([]);
   const popupRef = useRef<Popup | null>(null);
-  const didRenderRef = useRef(false);
-  const didLoadRef = useRef(false);
-  const loadTimeoutRef = useRef<number | null>(null);
+
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [mapError, setMapError] = useState<string | null>(null);
 
   const typedConcerts = concerts as unknown as ConcertLike[];
 
-  // --- NEW: filter concerts based on query params ---
   const filteredConcerts = useMemo(() => {
     const city = searchParams.get("city") || "any";
-    const date = searchParams.get("date") || "any"; // "weekend" | "month" | "any"
-    const genre = searchParams.get("genre") || "any"; // optional
-    const price = searchParams.get("price") || "any"; // "free" | "under50" | "any"
+    const date = searchParams.get("date") || "any";
+    const genre = searchParams.get("genre") || "any";
+    const price = searchParams.get("price") || "any";
 
     return typedConcerts.filter((c) => {
-      // City filter
       if (city !== "any") {
         const cCity = (c.city || "").toLowerCase();
         if (!cCity.includes(city.toLowerCase())) return false;
       }
 
-      // Date bucket filter (light demo logic)
       if (date !== "any") {
         const d = (c.date || "").toLowerCase();
         if (date === "weekend" && !d.includes("sat") && !d.includes("sun")) return false;
         if (date === "month" && !d) return false;
       }
 
-      // Optional: Genre filter (only works if data has `genre`)
       if (genre !== "any") {
         const g = (c.genre || "").toLowerCase();
         if (!g.includes(genre.toLowerCase())) return false;
       }
 
-      // Optional: Price filter (only works if data has `price`)
       if (price !== "any") {
         const p = (c.price || "").toLowerCase();
         if (price === "free" && !p.includes("free")) return false;
@@ -132,46 +119,29 @@ const Concerts = () => {
   }, [searchParams, typedConcerts]);
 
   const selectedConcert = useMemo(() => {
-    if (!selectedId) return null;
-    return typedConcerts.find((c) => c.id === selectedId) ?? null;
-  }, [selectedId, typedConcerts]);
+    if (!selectedId) return filteredConcerts[0] ?? null;
+    return filteredConcerts.find((c) => c.id === selectedId) ?? filteredConcerts[0] ?? null;
+  }, [filteredConcerts, selectedId]);
 
-  // Init + destroy map when switching modes
   useEffect(() => {
-    if (viewMode !== "map") {
-      // If leaving map view, clean up fully so re-entering works reliably.
-      popupRef.current?.remove();
-      popupRef.current = null;
-
-      markersRef.current.forEach((m) => m.remove());
-      markersRef.current = [];
-
-      mapRef.current?.remove();
-      mapRef.current = null;
-
-      if (loadTimeoutRef.current) {
-        window.clearTimeout(loadTimeoutRef.current);
-        loadTimeoutRef.current = null;
-      }
-      didRenderRef.current = false;
-      didLoadRef.current = false;
-
-      setMapError(null);
-      setMapDiag(null);
+    if (!filteredConcerts.length) {
+      setSelectedId(null);
       return;
     }
 
-    // map mode:
-    // WebGL support check (blank maps happen when WebGL is disabled).
+    if (!selectedId || !filteredConcerts.some((c) => c.id === selectedId)) {
+      setSelectedId(filteredConcerts[0].id);
+    }
+  }, [filteredConcerts, selectedId]);
+
+  useEffect(() => {
     if (!mapboxgl.supported()) {
-      setMapError("WebGL is not available in this browser/device. Enable hardware acceleration and try again.");
+      setMapError("WebGL is not available in this browser/device.");
       return;
     }
 
-    // Optional CSP worker setup (helps on some deployments).
     void initMapboxCspWorker();
 
-    // map mode:
     if (!MAPBOX_TOKEN) {
       setMapError("Missing Mapbox token (VITE_MAPBOX_TOKEN).");
       return;
@@ -180,65 +150,33 @@ const Concerts = () => {
       setMapError("Map container not found.");
       return;
     }
-
-    // Prevent double-init
     if (mapRef.current) return;
 
     try {
       mapboxgl.accessToken = MAPBOX_TOKEN;
       setMapError(null);
 
-      const first = typedConcerts[0];
+      const first = filteredConcerts[0] ?? typedConcerts[0];
       const center = first ? getConcertCoords(first, 0) : { lng: -74.006, lat: 40.7128 };
 
       const map = new mapboxgl.Map({
         container: mapContainerRef.current,
-        // Use a known-stable style first (avoids “blank map” issues)
         style: "mapbox://styles/mapbox/streets-v12",
         center: [center.lng, center.lat],
         zoom: 11,
         attributionControl: false,
       });
 
-      mapRef.current = map;
-      didRenderRef.current = false;
-      didLoadRef.current = false;
-      setMapDiag("initializing");
-
-      // If we never get a load/render event, show a helpful overlay.
-      if (loadTimeoutRef.current) window.clearTimeout(loadTimeoutRef.current);
-      loadTimeoutRef.current = window.setTimeout(() => {
-        if (!didLoadRef.current && !didRenderRef.current) {
-          setMapError(
-            "Map is not rendering. This is usually caused by a blocked Mapbox worker (CSP) or blocked mapbox.com requests (adblock/network). Open DevTools → Console/Network to see the error."
-          );
-        }
-      }, 7000);
-
-      map.on("render", () => {
-        didRenderRef.current = true;
-      });
-      map.on("styledata", () => setMapDiag("styledata"));
-      map.on("sourcedata", () => setMapDiag("sourcedata"));
-      map.on("idle", () => setMapDiag("idle"));
-
       map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
+      mapRef.current = map;
 
-      // If Mapbox fails to load style/tiles, show an error instead of blank white.
       map.on("error", (e) => {
-        if (loadTimeoutRef.current) {
-          window.clearTimeout(loadTimeoutRef.current);
-          loadTimeoutRef.current = null;
-        }
-        setMapDiag("error");
-
         const msg =
-          (e?.error && (e.error as any).message) ||
-          "Map failed to load (token/style/network). Check console for details.";
+          (e?.error && (e.error as { message?: string }).message) ||
+          "Map failed to load (token/style/network).";
         setMapError(msg);
       });
 
-      // Critical: resize after mount / layout settle (fixes blank map after toggles)
       const resizeSoon = () => {
         try {
           map.resize();
@@ -248,246 +186,170 @@ const Concerts = () => {
       };
 
       map.on("load", () => {
-        didLoadRef.current = true;
-        if (loadTimeoutRef.current) {
-          window.clearTimeout(loadTimeoutRef.current);
-          loadTimeoutRef.current = null;
-        }
-        setMapDiag("loaded");
-
         resizeSoon();
         setTimeout(resizeSoon, 0);
         setTimeout(resizeSoon, 250);
-
-        // Add markers
-        markersRef.current = typedConcerts.map((c, i) => {
-          const coords = getConcertCoords(c, i);
-
-          const el = document.createElement("button");
-          el.type = "button";
-          el.className =
-            "w-4 h-4 rounded-full bg-primary shadow-[0_0_0_6px_rgba(0,0,0,0.08)] hover:scale-110 transition-transform";
-          el.setAttribute("aria-label", "Concert location");
-          el.addEventListener("click", () => setSelectedId(c.id));
-
-          return new mapboxgl.Marker({ element: el }).setLngLat([coords.lng, coords.lat]).addTo(map);
-        });
       });
 
-      // Also resize on next paint (helps in some browsers)
       requestAnimationFrame(resizeSoon);
       setTimeout(resizeSoon, 300);
-    } catch (err: any) {
-      setMapError(err?.message ?? "Map initialization failed.");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Map initialization failed.";
+      setMapError(message);
     }
-  }, [viewMode, typedConcerts]);
 
-  // Popup on selection
-  useEffect(() => {
-    if (viewMode !== "map") return;
-    if (!mapRef.current) return;
-    if (!selectedConcert) {
+    return () => {
       popupRef.current?.remove();
       popupRef.current = null;
-      return;
-    }
+      markersRef.current.forEach((m) => m.remove());
+      markersRef.current = [];
+      mapRef.current?.remove();
+      mapRef.current = null;
+    };
+  }, [filteredConcerts, typedConcerts]);
 
-    const i = Math.max(0, typedConcerts.findIndex((c) => c.id === selectedConcert.id));
-    const { lng, lat } = getConcertCoords(selectedConcert, i);
+  useEffect(() => {
+    if (!mapRef.current) return;
+
+    markersRef.current.forEach((m) => m.remove());
+    markersRef.current = [];
+
+    markersRef.current = filteredConcerts.map((c, i) => {
+      const coords = getConcertCoords(c, i);
+      const isSelected = c.id === selectedConcert?.id;
+
+      const el = document.createElement("button");
+      el.type = "button";
+      el.className = isSelected
+        ? "h-4 w-4 rounded-full bg-black shadow-[0_0_0_6px_rgba(0,0,0,0.15)]"
+        : "h-4 w-4 rounded-full bg-[#ff9494] shadow-[0_0_0_6px_rgba(0,0,0,0.08)]";
+      el.setAttribute("aria-label", "Concert location");
+      el.addEventListener("click", () => setSelectedId(c.id));
+
+      return new mapboxgl.Marker({ element: el }).setLngLat([coords.lng, coords.lat]).addTo(mapRef.current!);
+    });
+  }, [filteredConcerts, selectedConcert?.id]);
+
+  useEffect(() => {
+    if (!mapRef.current || !selectedConcert) return;
+
+    const idx = Math.max(0, filteredConcerts.findIndex((c) => c.id === selectedConcert.id));
+    const { lng, lat } = getConcertCoords(selectedConcert, idx);
 
     popupRef.current?.remove();
 
-    const title = selectedConcert.title ?? selectedConcert.artist ?? "Live show";
+    const title = selectedConcert.artist ?? selectedConcert.title ?? "Concert";
     const venue = selectedConcert.venue ?? "Venue TBA";
     const city = selectedConcert.city ?? "";
-    const date = selectedConcert.date ?? "";
-    const labelLine = [venue, city].filter(Boolean).join(" • ");
+    const date = prettyDate(selectedConcert.date);
 
-    const gmapsQuery = encodeURIComponent([venue, city].filter(Boolean).join(" "));
-    const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${gmapsQuery}`;
-
-    const html = `
-      <div class="min-w-[220px] max-w-[280px]">
-        <div class="font-semibold text-sm">${title}</div>
-        <div class="text-xs opacity-80 mt-1">${labelLine}</div>
-        ${date ? `<div class="text-xs opacity-70 mt-1">${date}</div>` : ""}
-        <a class="text-xs mt-3 inline-flex items-center gap-1 underline" href="${gmapsUrl}" target="_blank" rel="noreferrer">
-          Open in Google Maps
-        </a>
-      </div>
-    `;
-
-    const popup = new mapboxgl.Popup({
-      closeButton: true,
-      closeOnClick: false,
-      maxWidth: "320px",
-      offset: 16,
-    })
+    const popup = new mapboxgl.Popup({ closeButton: false, closeOnClick: false, offset: 14 })
       .setLngLat([lng, lat])
-      .setHTML(html)
+      .setHTML(
+        `<div style="font-family:Arimo,sans-serif;font-weight:700;color:#000;line-height:1.25;min-width:180px">` +
+          `<div>${title}</div><div style="margin-top:2px">${venue}</div><div style="margin-top:4px">${date}</div></div>`
+      )
       .addTo(mapRef.current);
 
     popupRef.current = popup;
 
     mapRef.current.easeTo({
       center: [lng, lat],
-      zoom: Math.max(mapRef.current.getZoom(), 12),
-      duration: 600,
+      zoom: Math.max(mapRef.current.getZoom(), 11.5),
+      duration: 500,
     });
-  }, [selectedConcert, typedConcerts, viewMode]);
+  }, [filteredConcerts, selectedConcert]);
 
   return (
-    <div className="p-4 lg:p-8 space-y-8 animate-fade-in">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-3xl md:text-4xl font-bold">Concert Map</h1>
-          <p className="text-muted-foreground mt-2">Discover live events near you</p>
-        </div>
-
+    <div className="min-h-screen w-full bg-[#FFFFFF] pb-32">
+      <section className="mx-auto w-full max-w-[1420px] px-4 pt-8 sm:px-8">
         <div className="flex items-center gap-3">
-          {/* NEW: Navigate to filters page */}
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => navigate("/concerts/filters")}
+          <button
+            type="button"
+            onClick={() => navigate(-1)}
+            className="grid h-10 w-10 place-items-center rounded-[10px] text-black transition-colors hover:bg-black/5"
+            aria-label="Go back"
           >
-            <Filter className="w-4 h-4 mr-2" />
-            Filters
-          </Button>
-
-          <div className="flex items-center bg-secondary rounded-lg p-1">
-            <button
-              onClick={() => setViewMode("list")}
-              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                viewMode === "list"
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-              aria-label="List view"
-              type="button"
-            >
-              <List className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => setViewMode("map")}
-              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                viewMode === "map"
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-              aria-label="Map view"
-              type="button"
-            >
-              <MapPin className="w-4 h-4" />
-            </button>
+            <ArrowLeft className="h-7 w-7" />
+          </button>
+          <div className="grid h-12 w-12 place-items-center rounded-[10px] border border-black bg-white">
+            <Music2 className="h-7 w-7 text-black" />
           </div>
         </div>
-      </div>
 
-      {viewMode === "list" ? (
-        <section>
-          <SectionHeader title="Upcoming Events" subtitle="Don't miss these shows" />
-          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {/* NEW: render filteredConcerts */}
-            {filteredConcerts.map((concert) => (
-              <ConcertCard key={concert.id} concert={concert as any} />
-            ))}
-          </div>
-        </section>
-      ) : (
-        <div className="relative h-[60vh] min-h-[420px] rounded-2xl bg-card border border-border overflow-hidden">
-          {!MAPBOX_TOKEN ? (
-            <div className="absolute inset-0 flex items-center justify-center p-6 text-center">
-              <div className="max-w-md">
-                <div className="mx-auto w-12 h-12 rounded-full bg-secondary flex items-center justify-center mb-3">
-                  <MapPin className="w-6 h-6 text-muted-foreground" />
-                </div>
-                <h3 className="text-lg font-semibold">Mapbox token missing</h3>
-                <p className="text-sm text-muted-foreground mt-2">
-                  Add{" "}
-                  <code className="px-1 py-0.5 rounded bg-secondary">
-                    VITE_MAPBOX_TOKEN
-                  </code>{" "}
-                  in{" "}
-                  <code className="px-1 py-0.5 rounded bg-secondary">
-                    .env.local
-                  </code>
-                  , then restart the dev server.
-                </p>
-              </div>
+        <div className="mt-5">
+          <h1 className="font-['Arimo',sans-serif] text-[56px] font-bold leading-none text-black sm:text-[60px]">Map</h1>
+          <p className="font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black">
+            Discover music gigs close to you
+          </p>
+        </div>
+
+        <div className="mt-4 grid w-full gap-0 lg:grid-cols-[361px_1fr]">
+          <aside className="h-[420px] rounded-t-[10px] bg-[#d9d9d9] px-[14px] py-[23px] lg:h-[662px] lg:rounded-l-[10px] lg:rounded-r-none">
+            <div className="space-y-7 font-['Arimo',sans-serif] text-[20px] font-bold leading-tight text-black">
+              {filteredConcerts.slice(0, 8).map((concert, index) => {
+                const title = `Concert ${index + 1}`;
+                const venue = concert.venue ?? "Venue TBA";
+                const isSelected = concert.id === selectedConcert?.id;
+
+                return (
+                  <button
+                    key={concert.id}
+                    type="button"
+                    onClick={() => setSelectedId(concert.id)}
+                    className={
+                      isSelected
+                        ? "flex w-full items-end justify-between rounded-[8px] bg-white/70 px-2 py-1 text-left"
+                        : "flex w-full items-end justify-between text-left"
+                    }
+                  >
+                    <div>
+                      <p>{title}</p>
+                      <p>{venue}</p>
+                    </div>
+                    <span className="underline underline-offset-2">Tickets</span>
+                  </button>
+                );
+              })}
             </div>
-          ) : (
-            <>
-              <div ref={mapContainerRef} className="absolute inset-0" />
+          </aside>
 
-              {/* Overlay hint */}
-              <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-2 rounded-full bg-background/70 backdrop-blur px-3 py-1.5 text-xs text-muted-foreground border border-border">
-                <ExternalLink className="w-3.5 h-3.5" />
-                Click a pin to view details
+          <div className="relative h-[420px] overflow-hidden rounded-b-[10px] bg-[#e7e7e7] lg:h-[662px] lg:rounded-l-none lg:rounded-r-[10px] lg:rounded-bl-none">
+            {!MAPBOX_TOKEN ? (
+              <div className="grid h-full place-items-center p-6 text-center font-['Arimo',sans-serif] text-[22px] font-bold text-black">
+                Missing Mapbox token (`VITE_MAPBOX_TOKEN`)
               </div>
-
-              {/* Error overlay (prevents “blank white box” mystery) */}
-              {mapError && (
-                <div className="absolute inset-0 flex items-center justify-center p-6 text-center bg-background/70 backdrop-blur">
-                  <div className="max-w-md rounded-2xl border border-border bg-card p-5 shadow-xl">
-                    <h3 className="text-lg font-semibold">Map couldn’t load</h3>
-                    <p className="text-sm text-muted-foreground mt-2">
-                      {mapError}
-                    </p>
-                    {mapDiag && (
-                      <p className="text-xs text-muted-foreground mt-2">
-                        Status: <code className="px-1 py-0.5 rounded bg-secondary">{mapDiag}</code>
-                      </p>
-                    )}
-                    <p className="text-xs text-muted-foreground mt-3">
-                      Debug: <span className="font-mono">{mapDiag ?? 'n/a'}</span> · token: <span className="font-mono">{MAPBOX_TOKEN ? MAPBOX_TOKEN.slice(0, 8) + '…' : 'missing'}</span>
-                      <br />
-
-                      Common fixes: restart{" "}
-                      <code className="px-1 py-0.5 rounded bg-secondary">
-                        npm run dev
-                      </code>{" "}
-                      after adding env vars, confirm your token allows{" "}
-                      <code className="px-1 py-0.5 rounded bg-secondary">
-                        localhost
-                      </code>
-                      , and ensure
-                      <code className="px-1 py-0.5 rounded bg-secondary">
-                        mapbox-gl/dist/mapbox-gl.css
-                      </code>{" "}
-                      is imported in{" "}
-                      <code className="px-1 py-0.5 rounded bg-secondary">
-                        main.tsx
-                      </code>
-                      .
-                    </p>
+            ) : (
+              <>
+                <div ref={mapContainerRef} className="absolute inset-0" />
+                {mapError && (
+                  <div className="absolute inset-0 grid place-items-center bg-white/75 p-6 text-center font-['Arimo',sans-serif] text-[20px] font-bold text-black">
+                    {mapError}
                   </div>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
+                )}
+              </>
+            )}
 
-      {/* Featured Venues */}
-      <section>
-        <SectionHeader title="Featured Venues" />
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {[
-            { name: "Madison Square Garden", city: "New York" },
-            { name: "The Forum", city: "Los Angeles" },
-            { name: "O2 Arena", city: "London" },
-            { name: "Red Rocks", city: "Denver" },
-          ].map((venue) => (
-            <div
-              key={venue.name}
-              className="p-4 rounded-xl bg-card border border-border hover:bg-accent transition-colors cursor-pointer"
-            >
-              <h4 className="font-semibold text-sm">{venue.name}</h4>
-              <p className="text-xs text-muted-foreground mt-1">{venue.city}</p>
+            <div className="absolute bottom-6 right-6 w-[min(361px,calc(100%-2rem))] rounded-[10px] bg-[#d9d9d9] p-2">
+              <div className="font-['Arimo',sans-serif] text-[20px] font-bold leading-tight text-black">
+                <p>Concert</p>
+                <p>{selectedConcert?.artist ?? selectedConcert?.title ?? "Wetleg"}</p>
+                <p className="mt-1">{prettyDate(selectedConcert?.date)}</p>
+                <p>
+                  Location: {selectedConcert?.venue ?? "30 Bowery St"}
+                  {selectedConcert?.city ? `, ${selectedConcert.city}` : ""}
+                </p>
+                <a
+                  href={selectedConcert?.ticketUrl && selectedConcert.ticketUrl !== "#" ? selectedConcert.ticketUrl : "#"}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline underline-offset-2"
+                >
+                  More info
+                </a>
+              </div>
             </div>
-          ))}
+          </div>
         </div>
       </section>
     </div>

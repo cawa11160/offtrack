@@ -10,6 +10,7 @@ export default function SignUp() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [accountType, setAccountType] = useState<"listener" | "artist">("listener");
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -18,8 +19,8 @@ export default function SignUp() {
     setErr(null);
     setLoading(true);
     try {
-      await signup(name, email, password);
-      navigate("/");
+      await signup(name.trim(), email.trim().toLowerCase(), password, accountType);
+      navigate(accountType === "artist" ? "/uploads" : "/");
     } catch (e: any) {
       setErr(e?.message ?? "Signup failed");
     } finally {
@@ -47,6 +48,21 @@ export default function SignUp() {
         )}
 
         <form onSubmit={onSubmit} className="mt-8 space-y-4">
+          <div>
+            <label className="text-sm font-medium">Account type</label>
+            <select
+              value={accountType}
+              onChange={(e) => setAccountType((e.target.value as "listener" | "artist") || "listener")}
+              className="mt-2 h-11 w-full rounded-xl border border-black/10 bg-white px-4 outline-none focus:ring-2 focus:ring-black/10"
+            >
+              <option value="listener">Listener</option>
+              <option value="artist">Artist</option>
+            </select>
+            <p className="mt-2 text-xs text-black/60">
+              Artist accounts are redirected to song uploads after signup.
+            </p>
+          </div>
+
           <div>
             <label className="text-sm font-medium">Name</label>
             <input

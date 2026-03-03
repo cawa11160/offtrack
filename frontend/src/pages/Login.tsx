@@ -17,7 +17,7 @@ export default function Login() {
     setErr(null);
     setLoading(true);
     try {
-      await login(email, password);
+      await login(email.trim().toLowerCase(), password);
       navigate("/");
     } catch (e: any) {
       setErr(e?.message ?? "Login failed");

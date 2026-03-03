@@ -31,7 +31,7 @@ async function readErr(res: Response): Promise<string> {
   return (await res.text().catch(() => "")) || `${res.status} ${res.statusText}`;
 }
 
-export async function apiSignup(params: { name?: string; email: string; password: string }) {
+export async function apiSignup(params: { name?: string; email: string; password: string; account_type?: "listener" | "artist" }) {
   const res = await fetch(makeUrl("/api/auth/signup"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -80,7 +80,7 @@ type AuthState = {
   token: string | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  signup: (name: string, email: string, password: string) => Promise<void>;
+  signup: (name: string, email: string, password: string, accountType?: "listener" | "artist") => Promise<void>;
   logout: () => Promise<void>;
   refreshMe: () => Promise<void>;
 };
@@ -133,8 +133,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await refreshMe();
   }
 
-  async function signup(name: string, email: string, password: string) {
-    const r = await apiSignup({ name, email, password });
+  async function signup(name: string, email: string, password: string, accountType: "listener" | "artist" = "listener") {
+    const r = await apiSignup({ name, email, password, account_type: accountType });
     setAccessToken(r.access_token);
     setToken(r.access_token);
     await refreshMe();

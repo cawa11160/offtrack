@@ -23,15 +23,29 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy.orm import Session
-from sqlalchemy import or_, text
+from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import func, inspect, or_, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from db import get_db, SessionLocal, engine, wait_for_db
-from models import Track, Interaction, User, TrackAudio, UploadedTrack, LyricReel, Base
+from models import (
+    Artist,
+    AudioAsset,
+    AudioFeatures,
+    Base,
+    CatalogTrack,
+    Interaction,
+    LyricReel,
+    Track,
+    TrackArtist,
+    TrackAudio,
+    UploadedTrack,
+    User,
+)
 from models import PaymentMethod, BillingReceipt, SecurityAuditLog
 from recommender import get_recommender
 from analytics import get_analytics
+from catalog_sync import ensure_catalog_backfill, parse_artist_names as _sync_parse_artist_names
 
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.responses import PlainTextResponse
@@ -78,7 +92,8 @@ BRUTE_FORCE_WINDOW_SEC = int(os.getenv("BRUTE_FORCE_WINDOW_SEC", "300"))
 BRUTE_FORCE_BLOCK_SEC = int(os.getenv("BRUTE_FORCE_BLOCK_SEC", "600"))
 RATE_LIMIT_BACKEND = (os.getenv("RATE_LIMIT_BACKEND", "memory").strip().lower() or "memory")
 REDIS_URL = (os.getenv("REDIS_URL", "").strip() or "redis://localhost:6379/0")
-ADMIN_API_KEY = (os.getenv("ADMIN_API_KEY", "").strip())
+def _admin_api_key() -> str:
+    return (os.getenv("ADMIN_API_KEY", "").strip())
 _rate_lock = threading.Lock()
 _rate_state: Dict[str, List[float]] = {}
 _auth_fail_state: Dict[str, Dict[str, float]] = {}
@@ -498,10 +513,11 @@ def _last4(number: str) -> str:
 
 
 def _require_admin(req: Request) -> None:
-    if not ADMIN_API_KEY:
+    admin_api_key = _admin_api_key()
+    if not admin_api_key:
         raise HTTPException(status_code=503, detail="Admin API not configured")
     supplied = (req.headers.get("X-Admin-Api-Key") or "").strip()
-    if supplied != ADMIN_API_KEY:
+    if supplied != admin_api_key:
         raise HTTPException(status_code=403, detail="Admin access denied")
 
 
@@ -950,6 +966,55 @@ def _require_uploader_identity(req: Request) -> Optional[int]:
         raise HTTPException(status_code=401, detail="Login required to upload tracks")
 
 
+def _parse_artist_names(raw_artist: str) -> List[str]:
+    return _sync_parse_artist_names(raw_artist)
+
+
+def _get_or_create_artist(db: Session, name: str) -> Artist:
+    artist_name = (name or "").strip()
+    row = db.query(Artist).filter(Artist.name == artist_name).first()
+    if row:
+        return row
+
+    row = Artist(name=artist_name)
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _catalog_track_artist_text(track: CatalogTrack) -> str:
+    names: List[str] = []
+    for link in sorted(track.artist_links, key=lambda item: (item.position, item.artist_id)):
+        if link.artist and link.artist.name:
+            names.append(link.artist.name.strip())
+    return ", ".join([n for n in names if n])
+
+
+def _catalog_track_primary_asset(track: CatalogTrack, kind: str = "full") -> Optional[AudioAsset]:
+    ranked = sorted(
+        [
+            asset for asset in track.audio_assets
+            if (asset.kind or "").strip().lower() == kind.lower()
+        ],
+        key=lambda asset: (0 if asset.is_primary else 1, str(asset.created_at or "")),
+    )
+    return ranked[0] if ranked else None
+
+
+def _serialize_uploaded_catalog_track(track: CatalogTrack) -> Dict[str, Any]:
+    asset = _catalog_track_primary_asset(track, kind="full")
+    return {
+        "id": track.id,
+        "title": track.canonical_title,
+        "artist": _catalog_track_artist_text(track),
+        "imageUrl": track.image_url,
+        "audioUrl": f"/api/uploads/{track.id}/stream" if asset else None,
+        "mimeType": asset.mime_type if asset else None,
+        "sizeBytes": int(asset.size_bytes or 0) if asset else 0,
+        "createdAt": getattr(track, "created_at", None),
+    }
+
+
 # -----------------------------
 # Spotify helpers (optional)
 # -----------------------------
@@ -975,12 +1040,15 @@ def get_spotify_token() -> str:
         f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()
     ).decode()
 
-    r = requests.post(
-        "https://accounts.spotify.com/api/token",
-        headers={"Authorization": f"Basic {auth}"},
-        data={"grant_type": "client_credentials"},
-        timeout=15,
-    )
+    try:
+        r = requests.post(
+            "https://accounts.spotify.com/api/token",
+            headers={"Authorization": f"Basic {auth}"},
+            data={"grant_type": "client_credentials"},
+            timeout=15,
+        )
+    except requests.RequestException:
+        return ""
     if r.status_code != 200:
         return ""
 
@@ -1188,6 +1256,8 @@ def _startup():
     try:
         wait_for_db(timeout_s=45)
         Base.metadata.create_all(engine)
+        with SessionLocal() as db:
+            ensure_catalog_backfill(db)
         get_recommender().load()
         app.state.recommender_error = ""
     except Exception as e:
@@ -1211,13 +1281,30 @@ def db_status():
         wait_for_db(timeout_s=10)
         Base.metadata.create_all(engine)
         with engine.connect() as conn:
-            exists = conn.execute(
-                text("SELECT to_regclass('public.tracks')")).scalar_one()
-            if not exists:
-                return {"ok": True, "tracks_exists": False, "tracks_count": 0}
-            cnt = int(conn.execute(
-                text("SELECT COUNT(*) FROM tracks")).scalar_one())
-            return {"ok": True, "tracks_exists": True, "tracks_count": cnt}
+            dialect = (getattr(engine.dialect, "name", "") or "").lower()
+            if dialect == "postgresql":
+                legacy_exists = bool(conn.execute(text("SELECT to_regclass('public.tracks')")).scalar_one())
+                catalog_exists = bool(conn.execute(text("SELECT to_regclass('public.catalog_tracks')")).scalar_one())
+                features_exists = bool(conn.execute(text("SELECT to_regclass('public.audio_features')")).scalar_one())
+            else:
+                inspector = inspect(engine)
+                legacy_exists = inspector.has_table("tracks")
+                catalog_exists = inspector.has_table("catalog_tracks")
+                features_exists = inspector.has_table("audio_features")
+
+            legacy_count = int(conn.execute(text("SELECT COUNT(*) FROM tracks")).scalar_one()) if legacy_exists else 0
+            catalog_count = int(conn.execute(text("SELECT COUNT(*) FROM catalog_tracks")).scalar_one()) if catalog_exists else 0
+            feature_count = int(conn.execute(text("SELECT COUNT(*) FROM audio_features")).scalar_one()) if features_exists else 0
+            return {
+                "ok": True,
+                "tracks_exists": legacy_exists,
+                "tracks_count": legacy_count,
+                "catalog_tracks_exists": catalog_exists,
+                "catalog_tracks_count": catalog_count,
+                "audio_features_exists": features_exists,
+                "audio_features_count": feature_count,
+                "catalog_ready": bool(catalog_exists and features_exists and catalog_count > 0 and feature_count > 0),
+            }
     except Exception:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
@@ -1233,7 +1320,54 @@ def reload_now():
 # -----------------------------
 def db_search(db: Session, q: str, limit: int = 8):
     q2 = f"%{q}%"
-    rows = (
+    ranked_track_ids = (
+        db.query(
+            CatalogTrack.id.label("track_id"),
+            func.max(func.coalesce(AudioFeatures.popularity, -1)).label("rank_popularity"),
+            func.max(CatalogTrack.created_at).label("rank_created_at"),
+        )
+        .outerjoin(AudioFeatures, AudioFeatures.track_id == CatalogTrack.id)
+        .outerjoin(TrackArtist, TrackArtist.track_id == CatalogTrack.id)
+        .outerjoin(Artist, Artist.id == TrackArtist.artist_id)
+        .filter(or_(CatalogTrack.canonical_title.ilike(q2), Artist.name.ilike(q2)))
+        .group_by(CatalogTrack.id)
+        .order_by(
+            func.max(func.coalesce(AudioFeatures.popularity, -1)).desc(),
+            func.max(CatalogTrack.created_at).desc(),
+        )
+        .limit(int(limit))
+        .all()
+    )
+    track_ids = [row.track_id for row in ranked_track_ids]
+    if track_ids:
+        rows = (
+            db.query(CatalogTrack)
+            .options(
+                selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+                selectinload(CatalogTrack.audio_features),
+            )
+            .filter(CatalogTrack.id.in_(track_ids))
+            .all()
+        )
+        row_map = {row.id: row for row in rows}
+        return [
+            {
+                "title": row_map[track_id].canonical_title,
+                "artist": _catalog_track_artist_text(row_map[track_id]),
+                "year": int(row_map[track_id].release_year) if row_map[track_id].release_year is not None else None,
+                "id": row_map[track_id].id,
+                "imageUrl": (getattr(row_map[track_id], "image_url", "") or ""),
+                "source": "db",
+                "previewUrl": None,
+                "spotifyUrl": None,
+                "spotifyUri": None,
+                "durationMs": row_map[track_id].duration_ms,
+            }
+            for track_id in track_ids
+            if track_id in row_map
+        ]
+
+    legacy_rows = (
         db.query(Track)
         .filter(or_(Track.name.ilike(q2), Track.artists.ilike(q2)))
         .order_by(Track.popularity.desc())
@@ -1253,7 +1387,7 @@ def db_search(db: Session, q: str, limit: int = 8):
             "spotifyUri": None,
             "durationMs": None,
         }
-        for r in rows
+        for r in legacy_rows
     ]
 
 
@@ -1634,22 +1768,43 @@ def track_detail(
     a = (artist or "").strip()
 
     row = None
+    catalog_row = None
     if tid:
         try:
             row = db.query(Track).filter(Track.id == tid).first()
         except Exception:
             row = None
+        if not row:
+            try:
+                catalog_row = (
+                    db.query(CatalogTrack)
+                    .options(
+                        selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+                        selectinload(CatalogTrack.audio_assets),
+                    )
+                    .filter(CatalogTrack.id == tid)
+                    .first()
+                )
+            except Exception:
+                catalog_row = None
 
     if row:
         t = (row.name or "").strip() or t
         a = (row.artists or "").strip() or a
+    elif catalog_row:
+        t = (catalog_row.canonical_title or "").strip() or t
+        a = _catalog_track_artist_text(catalog_row) or a
     if not t:
         raise HTTPException(status_code=404, detail="Track not found")
 
-    details = spotify_track_lookup(t, a) if spotify_enabled() else None
+    details = None
+    if spotify_enabled() and not (catalog_row and (catalog_row.source_type or "").strip() == "upload"):
+        details = spotify_track_lookup(t, a)
     image_url = ""
     if row and isinstance(getattr(row, "image_url", None), str):
         image_url = (row.image_url or "").strip()
+    elif catalog_row and isinstance(getattr(catalog_row, "image_url", None), str):
+        image_url = (catalog_row.image_url or "").strip()
     if not image_url and details:
         dimg = details.get("imageUrl")
         if isinstance(dimg, str):
@@ -1660,9 +1815,14 @@ def track_detail(
     audio_url = None
     if tid:
         try:
-            has_audio = db.query(TrackAudio.track_id).filter(TrackAudio.track_id == tid).first()
-            if has_audio:
-                audio_url = f"/api/audio/{quote(tid)}"
+            if row:
+                has_audio = db.query(TrackAudio.track_id).filter(TrackAudio.track_id == tid).first()
+                if has_audio:
+                    audio_url = f"/api/audio/{quote(tid)}"
+            elif catalog_row:
+                asset = _catalog_track_primary_asset(catalog_row, kind="full")
+                if asset:
+                    audio_url = f"/api/uploads/{quote(tid)}/stream"
         except Exception:
             audio_url = None
 
@@ -1676,7 +1836,7 @@ def track_detail(
         "spotifyUrl": (details.get("spotifyUrl") if details else None),
         "spotifyUri": (details.get("spotifyUri") if details else None),
         "durationMs": (details.get("durationMs") if details else None),
-        "source": "db" if row else ("spotify" if details else "unknown"),
+        "source": "db" if row else ("upload" if catalog_row else ("spotify" if details else "unknown")),
     }
 
 
@@ -1866,16 +2026,42 @@ async def upload_new_track(
                 raise HTTPException(status_code=413, detail=f"File too large (>{MAX_UPLOAD_MB}MB)")
             out_f.write(chunk)
 
-    row = UploadedTrack(
+    canonical_track = CatalogTrack(
         id=tid,
-        title=title,
-        artist=artist,
+        canonical_title=title,
+        source_type="upload",
+        release_year=None,
+        duration_ms=None,
+        explicit=False,
         image_url=(image_url or "").strip() or None,
-        file_path=str(dest),
-        mime_type=mime_type,
-        size_bytes=int(size),
+        legacy_uploaded_track_id=None,
     )
-    db.add(row)
+    db.add(canonical_track)
+    db.flush()
+
+    artist_names = _parse_artist_names(artist)
+    for position, artist_name in enumerate(artist_names):
+        artist_row = _get_or_create_artist(db, artist_name)
+        db.add(
+            TrackArtist(
+                track_id=canonical_track.id,
+                artist_id=artist_row.id,
+                role="primary" if position == 0 else "featured",
+                position=position,
+            )
+        )
+
+    db.add(
+        AudioAsset(
+            id=str(uuid.uuid4()),
+            track_id=canonical_track.id,
+            storage_path=str(dest),
+            mime_type=mime_type,
+            size_bytes=int(size),
+            kind="full",
+            is_primary=True,
+        )
+    )
     try:
         db.commit()
     except SQLAlchemyError:
@@ -1886,7 +2072,7 @@ async def upload_new_track(
         "id": tid,
         "title": title,
         "artist": artist,
-        "imageUrl": row.image_url,
+        "imageUrl": canonical_track.image_url,
         "audioUrl": f"/api/uploads/{tid}/stream",
         "mimeType": mime_type,
         "sizeBytes": int(size),
@@ -1897,11 +2083,35 @@ async def upload_new_track(
 def list_uploads(limit: int = 50, db: Session = Depends(get_db)):
     limit = max(1, min(int(limit or 50), 200))
     try:
-        rows = db.query(UploadedTrack).order_by(UploadedTrack.created_at.desc()).limit(limit).all()
+        normalized_rows = (
+            db.query(CatalogTrack)
+            .options(
+                selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+                selectinload(CatalogTrack.audio_assets),
+            )
+            .filter(CatalogTrack.source_type == "upload")
+            .order_by(CatalogTrack.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+
+    normalized_items = [_serialize_uploaded_catalog_track(row) for row in normalized_rows]
+    if len(normalized_items) >= limit:
+        return {"tracks": normalized_items}
+
+    normalized_ids = {item["id"] for item in normalized_items}
+    remaining = max(0, limit - len(normalized_items))
+    try:
+        legacy_query = db.query(UploadedTrack)
+        if normalized_ids:
+            legacy_query = legacy_query.filter(~UploadedTrack.id.in_(normalized_ids))
+        legacy_rows = legacy_query.order_by(UploadedTrack.created_at.desc()).limit(remaining).all()
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
     return {
-        "tracks": [
+        "tracks": normalized_items + [
             {
                 "id": r.id,
                 "title": r.title,
@@ -1912,7 +2122,7 @@ def list_uploads(limit: int = 50, db: Session = Depends(get_db)):
                 "sizeBytes": r.size_bytes,
                 "createdAt": getattr(r, "created_at", None),
             }
-            for r in rows
+            for r in legacy_rows
         ]
     }
 
@@ -1920,6 +2130,19 @@ def list_uploads(limit: int = 50, db: Session = Depends(get_db)):
 @app.get("/api/uploads/{upload_id}/stream")
 def stream_uploaded_track(upload_id: str, request: Request, db: Session = Depends(get_db)):
     uid = (upload_id or "").strip()
+    try:
+        catalog_track = (
+            db.query(CatalogTrack)
+            .options(selectinload(CatalogTrack.audio_assets))
+            .filter(CatalogTrack.id == uid, CatalogTrack.source_type == "upload")
+            .first()
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+    asset = _catalog_track_primary_asset(catalog_track, kind="full") if catalog_track else None
+    if asset:
+        return _stream_file(Path(asset.storage_path), asset.mime_type or "audio/mpeg", request)
+
     try:
         row = db.query(UploadedTrack).filter(UploadedTrack.id == uid).first()
     except SQLAlchemyError:

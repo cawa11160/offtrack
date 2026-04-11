@@ -3,6 +3,7 @@ import { UploadCloud, Music2, RefreshCcw } from "lucide-react";
 import { apiListUploads, apiUploadNewTrack, apiUrl, type UploadedTrackItem } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useNavigate } from "react-router-dom";
+import { getErrorMessage } from "@/lib/errors";
 
 export default function Uploads() {
   const { user, loading: authLoading } = useAuth();
@@ -22,8 +23,8 @@ export default function Uploads() {
     try {
       const t = await apiListUploads(50);
       setTracks(t);
-    } catch (e: any) {
-      setError(e?.message ?? "Failed to load uploads");
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Failed to load uploads"));
     } finally {
       setRefreshing(false);
     }
@@ -55,8 +56,8 @@ export default function Uploads() {
       setArtist("");
       setFile(null);
       await refresh();
-    } catch (e: any) {
-      setError(e?.message ?? "Upload failed");
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Upload failed"));
     } finally {
       setLoading(false);
     }

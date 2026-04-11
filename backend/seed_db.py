@@ -4,7 +4,8 @@ import hashlib
 import pandas as pd
 from sqlalchemy import text
 
-from db import engine, DATABASE_URL, wait_for_db
+from db import engine, DATABASE_URL, SessionLocal, wait_for_db
+from catalog_sync import ensure_catalog_backfill
 from models import Track, Interaction
 
 HERE = Path(__file__).resolve().parent
@@ -115,13 +116,17 @@ def main():
     Track.__table__.create(bind=engine, checkfirst=True)
     Interaction.__table__.create(bind=engine, checkfirst=True)
 
-    # Clear only recommender-related tables
-    with engine.begin() as conn:
-        conn.execute(text('TRUNCATE TABLE interactions RESTART IDENTITY CASCADE'))
-        conn.execute(text('TRUNCATE TABLE tracks RESTART IDENTITY CASCADE'))
-
     dialect = getattr(engine.dialect, "name", "unknown")
     num_cols = len(df.columns)
+
+    # Clear only recommender-related tables
+    with engine.begin() as conn:
+        if str(dialect).lower() == "postgresql":
+            conn.execute(text("TRUNCATE TABLE interactions RESTART IDENTITY CASCADE"))
+            conn.execute(text("TRUNCATE TABLE tracks RESTART IDENTITY CASCADE"))
+        else:
+            conn.execute(text("DELETE FROM interactions"))
+            conn.execute(text("DELETE FROM tracks"))
 
     if str(dialect).lower() == "postgresql":
         safe_rows = max(1, PG_MAX_PARAMS // max(1, num_cols))
@@ -146,9 +151,16 @@ def main():
 
     df.to_sql(**kwargs)
 
+    with SessionLocal() as db:
+        stats = ensure_catalog_backfill(db)
+        print("Catalog sync:", stats)
+
     with engine.connect() as conn:
-        cnt = conn.execute(text("SELECT COUNT(*) FROM tracks")).scalar_one()
-        print("Seed complete. tracks_count =", int(cnt))
+        legacy_cnt = int(conn.execute(text("SELECT COUNT(*) FROM tracks")).scalar_one())
+        catalog_cnt = int(conn.execute(text("SELECT COUNT(*) FROM catalog_tracks")).scalar_one())
+        features_cnt = int(conn.execute(text("SELECT COUNT(*) FROM audio_features")).scalar_one())
+        print("Seed complete. tracks_count =", legacy_cnt)
+        print("Catalog ready. catalog_tracks_count =", catalog_cnt, "audio_features_count =", features_cnt)
 
 
 if __name__ == "__main__":

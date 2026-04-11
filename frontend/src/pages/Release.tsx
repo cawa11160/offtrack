@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Play, Shuffle, Plus, Download, MoreHorizontal } from "lucide-react";
 import ColorThief from "colorthief";
-import { albums, featuredPlaylists } from "@/data/mockData";
+import { albums, featuredPlaylists, type Album } from "@/data/mockData";
 import { cn } from "@/lib/utils";
 
 type Track = {
@@ -13,11 +13,7 @@ type Track = {
   plays?: number;
 };
 
-type Release = {
-  id: string | number;
-  title: string;
-  artist?: string;
-  year?: number | string;
+type Release = Album & {
   coverUrl?: string;
   image?: string;
   type?: "Single" | "Album" | "Playlist";
@@ -69,7 +65,7 @@ export default function ReleasePage() {
   const [dominant, setDominant] = useState<[number, number, number] | null>(null);
 
   const release: Release | undefined = useMemo(() => {
-    const all = [...(albums as any[]), ...(featuredPlaylists as any[])] as Release[];
+    const all: Release[] = [...albums, ...featuredPlaylists];
     return all.find((x) => String(x.id) === String(id));
   }, [id]);
 
@@ -109,12 +105,12 @@ export default function ReleasePage() {
   }
 
   const cover =
-    (release as any).coverUrl ??
-    (release as any).image ??
+    release.coverUrl ??
+    release.image ??
     "https://placehold.co/600x600/png";
 
   const tracks: Track[] =
-    (release as any).tracks ??
+    release.tracks ??
     [
       {
         id: `${release.id}-t1`,
@@ -126,7 +122,7 @@ export default function ReleasePage() {
     ];
 
   const totalDuration = formatTotalDuration(tracks);
-  const releaseType = (release as any).type ?? (tracks.length === 1 ? "Single" : "Album");
+  const releaseType = release.type ?? (tracks.length === 1 ? "Single" : "Album");
 
   const gradient = dominant ? makeGradient(dominant) : "linear-gradient(90deg, #7a1d4a 0%, #2a0f1f 70%)";
 

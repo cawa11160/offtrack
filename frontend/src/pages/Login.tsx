@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Music2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { getErrorMessage } from "@/lib/errors";
 
 export default function Login() {
   const navigate = useNavigate();
@@ -19,8 +20,8 @@ export default function Login() {
     try {
       await login(email.trim().toLowerCase(), password);
       navigate("/");
-    } catch (e: any) {
-      setErr(e?.message ?? "Login failed");
+    } catch (e: unknown) {
+      setErr(getErrorMessage(e, "Login failed"));
     } finally {
       setLoading(false);
     }

@@ -16,7 +16,7 @@ export function initPostHog() {
   posthog.identify(getDistinctId());
 }
 
-export function phCapture(event: string, properties: Record<string, any> = {}) {
+export function phCapture(event: string, properties: Record<string, unknown> = {}) {
   try {
     posthog.capture(event, { ...properties, distinct_id: getDistinctId() });
   } catch {

@@ -20,7 +20,7 @@ export const AlbumCard = ({ album, onPlay, onClick }: AlbumCardProps) => {
 
     // Otherwise navigate to your details page route.
     // IMPORTANT: your Album must have a stable `id` for this to work.
-    const id = (album as any).id;
+    const id = album.id;
     if (!id) {
       console.warn(
         "AlbumCard: album.id is missing. Add an `id` field in mockData so cards can route to /release/:id",

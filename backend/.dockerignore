@@ -1,0 +1,12 @@
+.pytest_cache/
+pytest-cache-files-*/
+*.sqlite3
+__pycache__/
+tests/.tmp_media/
+*.pyc
+.env
+.env.*
+.venv/
+alembic/__pycache__/
+alembic/versions/__pycache__/
+tests/__pycache__/

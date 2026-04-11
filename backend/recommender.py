@@ -6,10 +6,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import inspect, text
+from sqlalchemy.orm import selectinload
 
-from db import engine, wait_for_db
-from models import Base
+from db import SessionLocal, engine, wait_for_db
+from models import AudioFeatures, Base, CatalogTrack, TrackArtist
 
 # -----------------------------
 # Recommendation core
@@ -68,6 +69,14 @@ def _artist_key(s: Any) -> str:
     return " ".join(s.strip().lower().split())
 
 
+def _catalog_artist_text(track: CatalogTrack) -> str:
+    names: List[str] = []
+    for link in sorted(track.artist_links, key=lambda item: (item.position, item.artist_id)):
+        if link.artist and link.artist.name:
+            names.append(link.artist.name.strip())
+    return ", ".join([name for name in names if name])
+
+
 @dataclass
 class Recommender:
     df: Optional[pd.DataFrame] = None
@@ -77,22 +86,73 @@ class Recommender:
     feat_mu: Optional[np.ndarray] = None
     feat_sigma: Optional[np.ndarray] = None
 
+    def _load_dataframe_from_catalog(self) -> pd.DataFrame:
+        with SessionLocal() as db:
+            rows = (
+                db.query(CatalogTrack)
+                .options(
+                    selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+                    selectinload(CatalogTrack.audio_features),
+                )
+                .filter(CatalogTrack.source_type == "catalog")
+                .order_by(CatalogTrack.created_at.asc(), CatalogTrack.id.asc())
+                .all()
+            )
+
+            records: List[Dict[str, Any]] = []
+            for row in rows:
+                features = row.audio_features
+                if features is None:
+                    continue
+                records.append(
+                    {
+                        "id": row.id,
+                        "name": row.canonical_title,
+                        "artists": _catalog_artist_text(row),
+                        "image_url": (row.image_url or ""),
+                        "year": int(row.release_year or 0),
+                        "duration_ms": int(row.duration_ms or 0),
+                        "explicit": bool(row.explicit),
+                        "valence": float(features.valence or 0.0),
+                        "acousticness": float(features.acousticness or 0.0),
+                        "danceability": float(features.danceability or 0.0),
+                        "energy": float(features.energy or 0.0),
+                        "instrumentalness": float(features.instrumentalness or 0.0),
+                        "liveness": float(features.liveness or 0.0),
+                        "loudness": float(features.loudness or 0.0),
+                        "speechiness": float(features.speechiness or 0.0),
+                        "tempo": float(features.tempo or 0.0),
+                        "key": int(features.key or 0),
+                        "mode": int(features.mode or 0),
+                        "popularity": int(features.popularity or 0),
+                    }
+                )
+
+        return pd.DataFrame.from_records(records)
+
+    def _load_dataframe_from_legacy_tracks(self) -> pd.DataFrame:
+        inspector = inspect(engine)
+        if not inspector.has_table("tracks"):
+            return pd.DataFrame()
+
+        with engine.connect() as conn:
+            cnt = int(conn.execute(text("SELECT COUNT(*) FROM tracks")).scalar_one())
+            if cnt <= 0:
+                return pd.DataFrame()
+
+            return pd.read_sql_query(text("SELECT * FROM tracks"), conn)
+
     def load(self) -> None:
         wait_for_db(timeout_s=45)
 
         # Ensure schema exists before querying
         Base.metadata.create_all(engine)
 
-        with engine.connect() as conn:
-            exists = conn.execute(text("SELECT to_regclass('public.tracks')")).scalar_one()
-            if not exists:
-                raise RuntimeError("Postgres table 'tracks' does not exist. Seed the DB first.")
-
-            cnt = int(conn.execute(text("SELECT COUNT(*) FROM tracks")).scalar_one())
-            if cnt <= 0:
-                raise RuntimeError("Postgres table 'tracks' is empty. Run: python seed_db.py")
-
-            df = pd.read_sql_query(text("SELECT * FROM tracks"), conn)
+        df = self._load_dataframe_from_catalog()
+        if len(df) == 0:
+            df = self._load_dataframe_from_legacy_tracks()
+        if len(df) == 0:
+            raise RuntimeError("No recommender catalog found. Seed the DB first.")
 
         # minimal validation
         for c in FEATURE_COLS + ["id", "name", "artists", "year", "popularity"]:

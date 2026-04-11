@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ShieldAlert } from "lucide-react";
 import { apiAdminAuditLogs, apiAdminLockUser, apiAdminUnlockUser, type AdminAuditLog } from "@/lib/api";
+import { getErrorMessage } from "@/lib/errors";
 
 const ADMIN_KEY_STORAGE = "offtrack_admin_api_key";
 
@@ -45,8 +46,8 @@ export default function AdminSecurity() {
       const data = await apiAdminAuditLogs({ adminApiKey, limit: 100 });
       setLogs(data);
       setMessage(`Loaded ${data.length} audit logs.`);
-    } catch (e: any) {
-      setError(e?.message || "Failed to load audit logs");
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Failed to load audit logs"));
     } finally {
       setLoadingLogs(false);
     }
@@ -70,8 +71,8 @@ export default function AdminSecurity() {
       });
       setMessage(`User ${res.userId} locked until ${res.lockedUntil || "N/A"}.`);
       await refreshLogs();
-    } catch (e: any) {
-      setError(e?.message || "Failed to lock user");
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Failed to lock user"));
     } finally {
       setBusy(false);
     }
@@ -88,8 +89,8 @@ export default function AdminSecurity() {
       const res = await apiAdminUnlockUser({ adminApiKey, userId: parsedUserId });
       setMessage(`User ${res.userId} unlocked.`);
       await refreshLogs();
-    } catch (e: any) {
-      setError(e?.message || "Failed to unlock user");
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Failed to unlock user"));
     } finally {
       setBusy(false);
     }

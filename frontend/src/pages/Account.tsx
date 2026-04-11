@@ -11,6 +11,7 @@ import {
   type BillingPaymentMethod,
   type BillingReceipt,
 } from "@/lib/api";
+import { getErrorMessage } from "@/lib/errors";
 
 export default function Account() {
   const { user, loading } = useAuth();
@@ -42,7 +43,7 @@ export default function Account() {
         setMethods(m);
         setReceipts(r);
       })
-      .catch((e: any) => setBillingError(e?.message || "Failed to load billing data"))
+      .catch((e: unknown) => setBillingError(getErrorMessage(e, "Failed to load billing data")))
       .finally(() => setLoadingBilling(false));
   }, [user]);
 
@@ -73,8 +74,8 @@ export default function Account() {
       setCardNumber("");
       setExpMonth("");
       setExpYear("");
-    } catch (e: any) {
-      setBillingError(e?.message || "Failed to add payment method");
+    } catch (e: unknown) {
+      setBillingError(getErrorMessage(e, "Failed to add payment method"));
     } finally {
       setSubmittingMethod(false);
     }
@@ -85,8 +86,8 @@ export default function Account() {
     try {
       await apiDeletePaymentMethod(methodId);
       setMethods((prev) => prev.filter((m) => m.id !== methodId));
-    } catch (e: any) {
-      setBillingError(e?.message || "Failed to delete payment method");
+    } catch (e: unknown) {
+      setBillingError(getErrorMessage(e, "Failed to delete payment method"));
     }
   }
 
@@ -102,8 +103,8 @@ export default function Account() {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-    } catch (e: any) {
-      setBillingError(e?.message || "Failed to download receipt");
+    } catch (e: unknown) {
+      setBillingError(getErrorMessage(e, "Failed to download receipt"));
     }
   }
 

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Music2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { getErrorMessage } from "@/lib/errors";
 
 export default function SignUp() {
   const navigate = useNavigate();
@@ -21,8 +22,8 @@ export default function SignUp() {
     try {
       await signup(name.trim(), email.trim().toLowerCase(), password, accountType);
       navigate(accountType === "artist" ? "/uploads" : "/");
-    } catch (e: any) {
-      setErr(e?.message ?? "Signup failed");
+    } catch (e: unknown) {
+      setErr(getErrorMessage(e, "Signup failed"));
     } finally {
       setLoading(false);
     }

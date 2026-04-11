@@ -2,12 +2,12 @@ import { useMemo, useState } from "react";
 import { ArrowLeft, Music2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
-import { merchItems } from "@/data/mockData";
+import { merchItems, type MerchItem } from "@/data/mockData";
 
 const categories = ["All", "Apparel", "Accessories", "Vinyl", "CD"] as const;
 
-function getArtistName(item: any): string {
-  return item.artist || item.artistName || item.creator || item.band || item.performer || "Unknown Artist";
+function getArtistName(item: MerchItem): string {
+  return item.artist || "Unknown Artist";
 }
 
 function normalizeCategory(value?: string): string {
@@ -26,7 +26,7 @@ const Merchandise = () => {
 
   const artists = useMemo(() => {
     const set = new Set<string>();
-    for (const item of merchItems as any[]) set.add(getArtistName(item));
+    for (const item of merchItems) set.add(getArtistName(item));
 
     const ordered = Array.from(set).sort((a, b) => a.localeCompare(b));
     return ["All", ...ordered];
@@ -35,8 +35,8 @@ const Merchandise = () => {
   const filteredItems = useMemo(() => {
     const byArtist =
       activeArtist === "All"
-        ? (merchItems as any[])
-        : (merchItems as any[]).filter((item) => getArtistName(item) === activeArtist);
+        ? merchItems
+        : merchItems.filter((item) => getArtistName(item) === activeArtist);
 
     const byCategory =
       activeCategory === "All"
@@ -46,7 +46,7 @@ const Merchandise = () => {
     return byCategory;
   }, [activeArtist, activeCategory]);
 
-  const featuredItem = filteredItems[0] ?? (merchItems as any[])[0] ?? null;
+  const featuredItem = filteredItems[0] ?? merchItems[0] ?? null;
   const featuredArtist = featuredItem ? getArtistName(featuredItem) : "Artist";
   const featuredName = featuredItem?.name || "Merch item";
   const featuredPrice = typeof featuredItem?.price === "number" ? `$${featuredItem.price}` : "$50";

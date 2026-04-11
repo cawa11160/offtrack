@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ExternalLink, Play, Pause } from "lucide-react";
 import { apiGetTrackDetail, apiUrl, type TrackDetail } from "@/lib/api";
-import { extractSpotifyTrackId, fetchSpotifyStatus, initSpotifyPlayer, playSpotifyTrack } from "@/lib/spotify";
+import { getErrorMessage, getErrorStatus } from "@/lib/errors";
+import { extractSpotifyTrackId, fetchSpotifyStatus, initSpotifyPlayer, playSpotifyTrack, type SpotifySession } from "@/lib/spotify";
 
 function msToClock(ms?: number | null) {
   if (!ms || ms <= 0) return "--:--";
@@ -27,7 +28,7 @@ export default function TrackDetailPage() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [showEmbed, setShowEmbed] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const spotifySessionRef = useRef<{ player: any; deviceId: string } | null>(null);
+  const spotifySessionRef = useRef<SpotifySession | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -42,9 +43,9 @@ export default function TrackDetailPage() {
         });
         if (!alive) return;
         setTrack(data);
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (!alive) return;
-        setError(e?.message || "Failed to load track");
+        setError(getErrorMessage(e, "Failed to load track"));
       } finally {
         if (alive) setLoading(false);
       }
@@ -111,8 +112,8 @@ export default function TrackDetailPage() {
         setIsPlaying(true);
         setShowEmbed(false);
         return;
-      } catch (e: any) {
-        const status = Number(e?.status || 0);
+      } catch (e: unknown) {
+        const status = getErrorStatus(e);
         if (status === 401) {
           // One-time auth flow, then comes back to app.
           window.location.href = apiUrl("/api/spotify/login");
@@ -120,7 +121,7 @@ export default function TrackDetailPage() {
         }
         // SDK can fail for non-premium or blocked autoplay. Keep playback in-app with embed.
         setShowEmbed(true);
-        setError("SDK playback unavailable in this browser/account. Use embedded player below.");
+        setError(getErrorMessage(e, "SDK playback unavailable in this browser/account. Use embedded player below."));
         return;
       }
     }

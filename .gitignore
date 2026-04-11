@@ -13,6 +13,12 @@
 **/__pycache__/
 **/*.pyc
 .venv/
+**/.pytest_cache/
+**/.coverage
+**/htmlcov/
+backend/pytest-cache-files-*/
+backend/*.sqlite3
+backend/tests/.tmp_media/
 
 # OS
 **/.DS_Store

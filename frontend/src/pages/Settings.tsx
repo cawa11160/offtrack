@@ -16,7 +16,7 @@ const soundItems = [
 
 const ADMIN_KEY_STORAGE = "offtrack_admin_api_key";
 const ADMIN_UI_ENABLED = ["1", "true", "yes", "on"].includes(
-  String((import.meta as any).env?.VITE_ENABLE_ADMIN_SECURITY ?? "false").toLowerCase()
+  String(import.meta.env.VITE_ENABLE_ADMIN_SECURITY ?? "false").toLowerCase()
 );
 
 function hasAdminKeyStored(): boolean {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiCreateReel, apiListReels, apiUrl, type ReelItem } from "@/lib/api";
+import { getErrorMessage } from "@/lib/errors";
 
 export default function LyricAI() {
   const [lyrics, setLyrics] = useState("");
@@ -50,8 +51,8 @@ export default function LyricAI() {
         setLatest(r);
         await refreshHistory();
       }
-    } catch (e: any) {
-      setError(e?.message || "Failed to generate output");
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Failed to generate output"));
     } finally {
       setLoading(false);
     }

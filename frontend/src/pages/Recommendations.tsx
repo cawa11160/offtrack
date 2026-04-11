@@ -4,8 +4,9 @@ import { useNavigate } from "react-router-dom";
 
 import { apiFeedback, apiRecommend, apiSearch, apiUrl, type MusicianRec, type RecItem, type SearchResult, type SeedSong } from "@/lib/api";
 import { addAlreadyShownIds, getAlreadyShownIds } from "@/lib/analytics";
+import { getErrorMessage, getErrorStatus } from "@/lib/errors";
 import { phCapture } from "@/lib/posthog";
-import { extractSpotifyTrackId, fetchSpotifyStatus, initSpotifyPlayer, playSpotifyTrack } from "@/lib/spotify";
+import { extractSpotifyTrackId, fetchSpotifyStatus, initSpotifyPlayer, playSpotifyTrack, type SpotifySession } from "@/lib/spotify";
 
 type Rec = RecItem;
 type FeedbackAction = "superlike" | "like" | "dislike";
@@ -103,7 +104,7 @@ export default function Recommendations() {
   >({});
   const [feedbackBusyByTrack, setFeedbackBusyByTrack] = useState<Record<string, boolean>>({});
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const spotifySessionRef = useRef<{ player: any; deviceId: string } | null>(null);
+  const spotifySessionRef = useRef<SpotifySession | null>(null);
   const [playingId, setPlayingId] = useState<string>("");
 
   useEffect(() => {
@@ -224,13 +225,13 @@ export default function Recommendations() {
       phCapture("play_full_spotify_sdk", { track_id: rec.id, title: rec.title, artist: rec.artist });
       apiFeedback(rec.id, "open_spotify");
       return true;
-    } catch (e: any) {
-      const status = Number(e?.status || 0);
+    } catch (e: unknown) {
+      const status = getErrorStatus(e);
       if (status === 401) {
         window.location.href = apiUrl("/api/spotify/login");
         return true;
       }
-      setError("Spotify SDK playback unavailable for this track/account.");
+      setError(getErrorMessage(e, "Spotify SDK playback unavailable for this track/account."));
       return false;
     }
   }
@@ -301,8 +302,8 @@ export default function Recommendations() {
         throw new Error("Feedback not accepted by backend.");
       }
       await loadRecommendations({ fromFeedback: true });
-    } catch (e: any) {
-      setError(e?.message || "Failed to save feedback.");
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Failed to save feedback."));
     } finally {
       setFeedbackBusyByTrack((prev) => ({ ...prev, [rec.id]: false }));
     }
@@ -310,12 +311,10 @@ export default function Recommendations() {
 
   useEffect(() => {
     return () => stopAudio();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     stopAudio();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recs.length]);
 
   const outputSlots = useMemo(() => {

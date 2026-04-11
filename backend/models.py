@@ -1,13 +1,201 @@
 from __future__ import annotations
 
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import Text, String, Integer, Float, Boolean, Index, DateTime, func, ForeignKey
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import Text, String, Integer, Float, Boolean, Index, DateTime, func, ForeignKey, UniqueConstraint
 
 
 class Base(DeclarativeBase):
     pass
 
 
+
+
+class Artist(Base):
+    __tablename__ = "artists"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    track_links = relationship("TrackArtist", back_populates="artist", cascade="all, delete-orphan")
+
+
+class Album(Base):
+    __tablename__ = "albums"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, index=True)
+    release_date: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    label_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    tracks = relationship("CatalogTrack", back_populates="primary_album")
+    external_refs = relationship("ExternalTrackRef", back_populates="album")
+
+
+class Genre(Base):
+    __tablename__ = "genres"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    track_links = relationship("TrackGenre", back_populates="genre", cascade="all, delete-orphan")
+
+
+class CatalogTrack(Base):
+    __tablename__ = "catalog_tracks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    canonical_title: Mapped[str] = mapped_column(Text, index=True)
+    source_type: Mapped[str] = mapped_column(String(32), default="catalog", index=True)
+    release_year: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    explicit: Mapped[bool] = mapped_column(Boolean, default=False)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    primary_album_id: Mapped[str | None] = mapped_column(ForeignKey("albums.id", ondelete="SET NULL"), nullable=True, index=True)
+    legacy_dataset_track_id: Mapped[str | None] = mapped_column(String, nullable=True, unique=True, index=True)
+    legacy_uploaded_track_id: Mapped[str | None] = mapped_column(String, nullable=True, unique=True, index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        index=True,
+    )
+
+    primary_album = relationship("Album", back_populates="tracks")
+    artist_links = relationship(
+        "TrackArtist",
+        back_populates="track",
+        cascade="all, delete-orphan",
+        order_by="TrackArtist.position",
+    )
+    genre_links = relationship("TrackGenre", back_populates="track", cascade="all, delete-orphan")
+    audio_features = relationship("AudioFeatures", back_populates="track", cascade="all, delete-orphan", uselist=False)
+    audio_assets = relationship("AudioAsset", back_populates="track", cascade="all, delete-orphan")
+    external_refs = relationship("ExternalTrackRef", back_populates="track", cascade="all, delete-orphan")
+
+
+class TrackArtist(Base):
+    __tablename__ = "track_artists"
+
+    track_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("catalog_tracks.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    artist_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("artists.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    role: Mapped[str] = mapped_column(String(32), default="primary")
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+    track = relationship("CatalogTrack", back_populates="artist_links")
+    artist = relationship("Artist", back_populates="track_links")
+
+
+class TrackGenre(Base):
+    __tablename__ = "track_genres"
+
+    track_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("catalog_tracks.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    genre_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("genres.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    track = relationship("CatalogTrack", back_populates="genre_links")
+    genre = relationship("Genre", back_populates="track_links")
+
+
+class AudioFeatures(Base):
+    __tablename__ = "audio_features"
+
+    track_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("catalog_tracks.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    valence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    acousticness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    danceability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    energy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    instrumentalness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    liveness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    loudness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    speechiness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tempo: Mapped[float | None] = mapped_column(Float, nullable=True)
+    key: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    popularity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    feature_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        index=True,
+    )
+
+    track = relationship("CatalogTrack", back_populates="audio_features")
+
+
+class AudioAsset(Base):
+    __tablename__ = "audio_assets"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    track_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("catalog_tracks.id", ondelete="CASCADE"),
+        index=True,
+    )
+    storage_path: Mapped[str] = mapped_column(Text)
+    mime_type: Mapped[str] = mapped_column(String(128), default="audio/mpeg")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    kind: Mapped[str] = mapped_column(String(32), default="full", index=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    track = relationship("CatalogTrack", back_populates="audio_assets")
+
+
+class ExternalTrackRef(Base):
+    __tablename__ = "external_track_refs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    track_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("catalog_tracks.id", ondelete="CASCADE"),
+        index=True,
+    )
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    provider_track_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    provider_artist_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    provider_album_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    provider_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preview_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    album_id: Mapped[str | None] = mapped_column(ForeignKey("albums.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    track = relationship("CatalogTrack", back_populates="external_refs")
+    album = relationship("Album", back_populates="external_refs")
+
+    __table_args__ = (
+        UniqueConstraint("track_id", "provider", "provider_track_id", name="uq_external_track_ref_provider_track"),
+    )
 
 
 class User(Base):
@@ -162,6 +350,9 @@ class LyricReel(Base):
 
 
 Index("ix_tracks_name_artists", Track.name, Track.artists)
+Index("ix_catalog_tracks_source_created", CatalogTrack.source_type, CatalogTrack.created_at)
+Index("ix_track_artists_track_position", TrackArtist.track_id, TrackArtist.position)
+Index("ix_audio_assets_track_kind_primary", AudioAsset.track_id, AudioAsset.kind, AudioAsset.is_primary)
 Index("ix_interactions_distinct_track", Interaction.distinct_id, Interaction.track_id)
 Index("ix_track_audio_track_id", TrackAudio.track_id)
 Index("ix_uploaded_tracks_title_artist", UploadedTrack.title, UploadedTrack.artist)

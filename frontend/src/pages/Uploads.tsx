@@ -1,9 +1,54 @@
 import { useEffect, useMemo, useState } from "react";
-import { UploadCloud, Music2, RefreshCcw } from "lucide-react";
-import { apiListUploads, apiUploadNewTrack, apiUrl, type UploadedTrackItem } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
+import { Eye, EyeOff, Music2, RefreshCcw, Save, Trash2, UploadCloud } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+
+import {
+  apiListManagedUploads,
+  apiListUploads,
+  apiReplaceUploadAudio,
+  apiUnpublishUpload,
+  apiUpdateUpload,
+  apiUploadNewTrack,
+  apiUrl,
+  type UploadedTrackItem,
+} from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { getErrorMessage } from "@/lib/errors";
+
+type EditState = {
+  title: string;
+  artist: string;
+  imageUrl: string;
+};
+
+function formatBytes(size?: number) {
+  const value = Number(size || 0);
+  if (!value) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let n = value;
+  let idx = 0;
+  while (n >= 1024 && idx < units.length - 1) {
+    n /= 1024;
+    idx += 1;
+  }
+  return `${n.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
+}
+
+function formatDuration(ms?: number | null) {
+  if (!ms || ms <= 0) return "--:--";
+  const total = Math.floor(ms / 1000);
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
+function editFromTrack(track: UploadedTrackItem): EditState {
+  return {
+    title: track.title || "",
+    artist: track.artist || "",
+    imageUrl: track.imageUrl || "",
+  };
+}
 
 export default function Uploads() {
   const { user, loading: authLoading } = useAuth();
@@ -16,13 +61,17 @@ export default function Uploads() {
 
   const [tracks, setTracks] = useState<UploadedTrackItem[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [busyByTrack, setBusyByTrack] = useState<Record<string, boolean>>({});
+  const [editByTrack, setEditByTrack] = useState<Record<string, EditState>>({});
+  const [replaceFileByTrack, setReplaceFileByTrack] = useState<Record<string, File | null>>({});
 
   async function refresh() {
     setRefreshing(true);
     setError("");
     try {
-      const t = await apiListUploads(50);
-      setTracks(t);
+      const next = user ? await apiListManagedUploads(100) : await apiListUploads(50);
+      setTracks(next);
+      setEditByTrack(Object.fromEntries(next.map((item) => [item.id, editFromTrack(item)])));
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Failed to load uploads"));
     } finally {
@@ -31,19 +80,23 @@ export default function Uploads() {
   }
 
   useEffect(() => {
-    refresh();
-  }, []);
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   const canUpload = useMemo(() => title.trim().length > 0 && !!file && !loading, [title, file, loading]);
+  const isArtist = user?.account_type === "artist";
 
   useEffect(() => {
     if (!authLoading && !user) {
       setError("Please log in as an artist to upload songs.");
+    } else if (!authLoading && user && !isArtist) {
+      setError("Uploads require an artist account.");
     }
-  }, [authLoading, user]);
+  }, [authLoading, user, isArtist]);
 
   async function onUpload() {
-    if (!user) {
+    if (!user || !isArtist) {
       setError("Please log in as an artist to upload songs.");
       return;
     }
@@ -63,22 +116,90 @@ export default function Uploads() {
     }
   }
 
+  async function saveTrack(track: UploadedTrackItem) {
+    const edit = editByTrack[track.id];
+    if (!edit) return;
+    setBusyByTrack((prev) => ({ ...prev, [track.id]: true }));
+    setError("");
+    try {
+      const updated = await apiUpdateUpload({
+        id: track.id,
+        title: edit.title.trim(),
+        artist: edit.artist.trim(),
+        imageUrl: edit.imageUrl.trim(),
+      });
+      setTracks((prev) => prev.map((item) => (item.id === track.id ? updated : item)));
+      setEditByTrack((prev) => ({ ...prev, [track.id]: editFromTrack(updated) }));
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Failed to save upload"));
+    } finally {
+      setBusyByTrack((prev) => ({ ...prev, [track.id]: false }));
+    }
+  }
+
+  async function replaceAudio(track: UploadedTrackItem) {
+    const nextFile = replaceFileByTrack[track.id];
+    if (!nextFile) return;
+    setBusyByTrack((prev) => ({ ...prev, [track.id]: true }));
+    setError("");
+    try {
+      const updated = await apiReplaceUploadAudio({ id: track.id, file: nextFile });
+      setTracks((prev) => prev.map((item) => (item.id === track.id ? updated : item)));
+      setReplaceFileByTrack((prev) => ({ ...prev, [track.id]: null }));
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Failed to replace audio"));
+    } finally {
+      setBusyByTrack((prev) => ({ ...prev, [track.id]: false }));
+    }
+  }
+
+  async function setPublished(track: UploadedTrackItem, isPublished: boolean) {
+    setBusyByTrack((prev) => ({ ...prev, [track.id]: true }));
+    setError("");
+    try {
+      const updated = await apiUpdateUpload({ id: track.id, isPublished });
+      setTracks((prev) => prev.map((item) => (item.id === track.id ? updated : item)));
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Failed to update publish state"));
+    } finally {
+      setBusyByTrack((prev) => ({ ...prev, [track.id]: false }));
+    }
+  }
+
+  async function unpublishTrack(track: UploadedTrackItem) {
+    if (!window.confirm(`Unpublish "${track.title}"? It will disappear from public playback lists.`)) return;
+    setBusyByTrack((prev) => ({ ...prev, [track.id]: true }));
+    setError("");
+    try {
+      const updated = await apiUnpublishUpload(track.id);
+      if (updated) {
+        setTracks((prev) => prev.map((item) => (item.id === track.id ? updated : item)));
+      }
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Failed to unpublish upload"));
+    } finally {
+      setBusyByTrack((prev) => ({ ...prev, [track.id]: false }));
+    }
+  }
+
   return (
-    <div className="mx-auto w-full max-w-5xl px-4 py-8">
+    <div className="mx-auto w-full max-w-6xl px-4 py-8">
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-black text-white">
+          <div className="grid h-11 w-11 place-items-center rounded-xl bg-black text-white">
             <UploadCloud className="h-5 w-5" />
           </div>
           <div>
             <div className="text-sm text-muted-foreground">Uploads</div>
-            <div className="text-base text-muted-foreground">Upload full songs (MP3/WAV/M4A) and stream them.</div>
+            <div className="text-base text-muted-foreground">
+              Upload full songs, manage metadata, replace audio, and control public playback.
+            </div>
           </div>
         </div>
 
         <button
           type="button"
-          onClick={refresh}
+          onClick={() => void refresh()}
           className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-sm font-medium"
           disabled={refreshing}
         >
@@ -87,9 +208,9 @@ export default function Uploads() {
         </button>
       </div>
 
-      <div className="mt-6 rounded-2xl border border-border bg-card p-5 shadow-sm">
+      <div className="mt-6 rounded-xl border border-border bg-card p-5 shadow-sm">
         <div className="grid gap-4 md:grid-cols-3">
-          <div className="md:col-span-1">
+          <div>
             <label className="text-sm font-medium">Title</label>
             <input
               value={title}
@@ -98,7 +219,7 @@ export default function Uploads() {
               placeholder="Song title"
             />
           </div>
-          <div className="md:col-span-1">
+          <div>
             <label className="text-sm font-medium">Artist</label>
             <input
               value={artist}
@@ -107,7 +228,7 @@ export default function Uploads() {
               placeholder="Artist name"
             />
           </div>
-          <div className="md:col-span-1">
+          <div>
             <label className="text-sm font-medium">Audio file</label>
             <input
               type="file"
@@ -120,27 +241,27 @@ export default function Uploads() {
 
         <div className="mt-4 flex items-center justify-between gap-4">
           <div className="text-xs text-muted-foreground">
-            Tip: Browsers need Range support for seeking — the backend streams with Range headers.
+            {isArtist ? "New uploads are owned by your artist account." : "Artist accounts can upload and manage tracks."}
           </div>
           <button
             type="button"
-            onClick={onUpload}
-            disabled={!canUpload || !user}
+            onClick={() => void onUpload()}
+            disabled={!canUpload || !isArtist}
             className="rounded-xl bg-black px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
-            {loading ? "Uploading…" : "Upload"}
+            {loading ? "Uploading..." : "Upload"}
           </button>
         </div>
 
         {error ? <div className="mt-3 text-sm text-red-600">{error}</div> : null}
-        {!user ? (
+        {!isArtist ? (
           <div className="mt-3 text-sm text-black/70">
             <button
               type="button"
-              onClick={() => navigate("/login")}
+              onClick={() => navigate(user ? "/signup" : "/login")}
               className="rounded-lg border border-black/10 px-3 py-1 font-medium hover:bg-black/5"
             >
-              Log in to upload
+              {user ? "Create artist account" : "Log in to upload"}
             </button>
           </div>
         ) : null}
@@ -148,25 +269,148 @@ export default function Uploads() {
 
       <div className="mt-6 grid gap-4">
         {tracks.length === 0 ? (
-          <div className="rounded-2xl border border-border bg-card p-6 text-sm text-muted-foreground">
+          <div className="rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground">
             No uploads yet. Upload a song above.
           </div>
         ) : (
-          tracks.map((t) => (
-            <div key={t.id} className="flex flex-col gap-3 rounded-2xl border border-border bg-card p-5 shadow-sm md:flex-row md:items-center md:justify-between">
-              <div className="flex items-center gap-3">
-                <div className="grid h-11 w-11 place-items-center rounded-2xl bg-black/5">
-                  <Music2 className="h-5 w-5" />
-                </div>
-                <div>
-                  <div className="font-semibold">{t.title}</div>
-                  <div className="text-sm text-muted-foreground">{t.artist || ""}</div>
-                </div>
-              </div>
+          tracks.map((track) => {
+            const edit = editByTrack[track.id] || editFromTrack(track);
+            const busy = Boolean(busyByTrack[track.id]);
+            const replacement = replaceFileByTrack[track.id];
+            return (
+              <div key={track.id} className="rounded-xl border border-border bg-card p-5 shadow-sm">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="flex min-w-0 flex-1 gap-3">
+                    <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-black/5">
+                      <Music2 className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      {user ? (
+                        <div className="grid gap-2 md:grid-cols-3">
+                          <input
+                            value={edit.title}
+                            onChange={(e) =>
+                              setEditByTrack((prev) => ({ ...prev, [track.id]: { ...edit, title: e.target.value } }))
+                            }
+                            className="rounded-xl border border-border bg-background px-3 py-2 text-sm font-semibold"
+                            placeholder="Title"
+                          />
+                          <input
+                            value={edit.artist}
+                            onChange={(e) =>
+                              setEditByTrack((prev) => ({ ...prev, [track.id]: { ...edit, artist: e.target.value } }))
+                            }
+                            className="rounded-xl border border-border bg-background px-3 py-2 text-sm"
+                            placeholder="Artist"
+                          />
+                          <input
+                            value={edit.imageUrl}
+                            onChange={(e) =>
+                              setEditByTrack((prev) => ({ ...prev, [track.id]: { ...edit, imageUrl: e.target.value } }))
+                            }
+                            className="rounded-xl border border-border bg-background px-3 py-2 text-sm"
+                            placeholder="Image URL"
+                          />
+                        </div>
+                      ) : (
+                        <>
+                          <div className="font-semibold">{track.title}</div>
+                          <div className="text-sm text-muted-foreground">{track.artist || ""}</div>
+                        </>
+                      )}
 
-              <audio controls preload="none" src={apiUrl(t.audioUrl)} className="w-full md:w-[420px]" />
-            </div>
-          ))
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                        <span className="rounded-lg bg-black/5 px-2 py-1">{track.storageBackend || "unknown"}</span>
+                        <span className="rounded-lg bg-black/5 px-2 py-1">{track.mimeType || "audio"}</span>
+                        <span className="rounded-lg bg-black/5 px-2 py-1">{formatBytes(track.sizeBytes)}</span>
+                        <span className="rounded-lg bg-black/5 px-2 py-1">{formatDuration(track.durationMs)}</span>
+                        <span className="rounded-lg bg-black/5 px-2 py-1">{track.processingStatus || "ready"}</span>
+                        <span className="rounded-lg bg-black/5 px-2 py-1">
+                          {track.isPublished === false ? "Unpublished" : "Published"}
+                        </span>
+                      </div>
+
+                      {track.waveformPeaks && track.waveformPeaks.length > 0 ? (
+                        <div className="mt-3 flex h-10 items-center gap-[2px] rounded-xl bg-black/5 px-2">
+                          {track.waveformPeaks.slice(0, 64).map((peak, idx) => (
+                            <span
+                              key={`${track.id}-peak-${idx}`}
+                              className="w-full rounded-full bg-black/50"
+                              style={{ height: `${Math.max(8, Math.min(100, Number(peak || 0) * 100))}%` }}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+
+                      {track.processingError ? (
+                        <div className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700">{track.processingError}</div>
+                      ) : null}
+
+                      {user ? (
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <input
+                            type="file"
+                            accept="audio/*"
+                            onChange={(e) =>
+                              setReplaceFileByTrack((prev) => ({ ...prev, [track.id]: e.target.files?.[0] ?? null }))
+                            }
+                            className="max-w-[260px] rounded-xl border border-border bg-background px-3 py-2 text-xs"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void replaceAudio(track)}
+                            disabled={busy || !replacement}
+                            className="inline-flex items-center gap-2 rounded-xl border border-border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50"
+                          >
+                            <RefreshCcw className="h-3.5 w-3.5" />
+                            Replace audio
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {user ? (
+                    <div className="flex flex-wrap gap-2 lg:justify-end">
+                      <button
+                        type="button"
+                        onClick={() => void saveTrack(track)}
+                        disabled={busy}
+                        className="inline-flex items-center gap-2 rounded-xl bg-black px-3 py-2 text-xs font-medium text-white disabled:opacity-50"
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void setPublished(track, track.isPublished === false)}
+                        disabled={busy}
+                        className="inline-flex items-center gap-2 rounded-xl border border-border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50"
+                      >
+                        {track.isPublished === false ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                        {track.isPublished === false ? "Publish" : "Hide"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void unpublishTrack(track)}
+                        disabled={busy || track.isPublished === false}
+                        className="inline-flex items-center gap-2 rounded-xl border border-red-200 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Unpublish
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+
+                {track.audioUrl ? (
+                  <audio controls preload="none" src={apiUrl(track.audioUrl)} className="mt-4 w-full" />
+                ) : (
+                  <div className="mt-4 rounded-xl bg-black/5 px-3 py-2 text-sm text-muted-foreground">No playable audio asset.</div>
+                )}
+              </div>
+            );
+          })
         )}
       </div>
     </div>

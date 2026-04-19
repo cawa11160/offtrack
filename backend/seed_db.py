@@ -139,17 +139,21 @@ def main():
     print(
         f"Seeding: dialect={dialect}, cols={num_cols}, chunksize={chunksize}, method={method}")
 
-    kwargs = dict(
-        name="tracks",
-        con=engine,
-        if_exists="append",
-        index=False,
-        chunksize=chunksize,
-    )
-    if method is not None:
-        kwargs["method"] = method
-
-    df.to_sql(**kwargs)
+    total = len(df)
+    for start in range(0, total, chunksize):
+        end = min(start + chunksize, total)
+        chunk = df.iloc[start:end]
+        with engine.begin() as conn:
+            kwargs = dict(
+                name="tracks",
+                con=conn,
+                if_exists="append",
+                index=False,
+            )
+            if method is not None:
+                kwargs["method"] = method
+            chunk.to_sql(**kwargs)
+        print(f"Seeded tracks rows {start + 1}-{end} of {total}")
 
     with SessionLocal() as db:
         stats = ensure_catalog_backfill(db)

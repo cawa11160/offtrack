@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
+import { usePlaybackMilestones } from "@/lib/playbackTracking";
 
 export type TrackPlayable = {
+  id?: string | null;
   title: string;
   artist: string;
   imageUrl?: string | null;
@@ -21,6 +23,7 @@ export default function AudioPlayerBar({
   const [isPlaying, setIsPlaying] = useState(false);
   const [t, setT] = useState(0);
   const [dur, setDur] = useState(0);
+  const playback = usePlaybackMilestones("audio_player_bar");
 
   useEffect(() => {
     if (!audioRef.current) return;
@@ -34,17 +37,30 @@ export default function AudioPlayerBar({
     if (src) {
       audioRef.current.src = src;
       audioRef.current.load();
-      audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+      audioRef.current.play().then(() => {
+        setIsPlaying(true);
+        playback.start(
+          { id: track?.id, title: track?.title, artist: track?.artist, sourceKind: track?.audioUrl ? "upload" : "preview" },
+          track?.durationMs ?? undefined
+        );
+      }).catch(() => setIsPlaying(false));
     }
-  }, [track?.audioUrl, track?.previewUrl]);
+  }, [playback, track?.id, track?.audioUrl, track?.previewUrl, track?.title, track?.artist, track?.durationMs]);
 
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
 
-    const onTime = () => setT(a.currentTime || 0);
+    const onTime = () => {
+      setT(a.currentTime || 0);
+      playback.progress(a.currentTime || 0, Number.isFinite(a.duration) ? a.duration : undefined);
+    };
     const onMeta = () => setDur(a.duration || 0);
-    const onEnd = () => setIsPlaying(false);
+    const onEnd = () => {
+      playback.progress(a.currentTime || 0, Number.isFinite(a.duration) ? a.duration : undefined);
+      playback.complete();
+      setIsPlaying(false);
+    };
 
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("loadedmetadata", onMeta);
@@ -54,7 +70,7 @@ export default function AudioPlayerBar({
       a.removeEventListener("loadedmetadata", onMeta);
       a.removeEventListener("ended", onEnd);
     };
-  }, []);
+  }, [playback]);
 
   const toggle = async () => {
     const a = audioRef.current;
@@ -65,12 +81,17 @@ export default function AudioPlayerBar({
       try {
         await a.play();
         setIsPlaying(true);
+        playback.start(
+          { id: track?.id, title: track?.title, artist: track?.artist, sourceKind: track?.audioUrl ? "upload" : "preview" },
+          track?.durationMs ?? undefined
+        );
       } catch {
         setIsPlaying(false);
       }
     } else {
       a.pause();
       setIsPlaying(false);
+      playback.skip();
     }
   };
 
@@ -82,7 +103,7 @@ export default function AudioPlayerBar({
 
   if (!track) return null;
 
-  const disabled = !track.previewUrl;
+  const disabled = !track.audioUrl && !track.previewUrl;
 
   return (
     <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, padding: 12, background: "#111", color: "#fff", display: "flex", gap: 12, alignItems: "center" }}>
@@ -126,7 +147,7 @@ export default function AudioPlayerBar({
         {disabled ? "No preview" : isPlaying ? "Pause" : "Play"}
       </button>
 
-      <button onClick={() => { audioRef.current?.pause(); setIsPlaying(false); onClose(); }} style={{ padding: "8px 12px" }}>
+      <button onClick={() => { playback.skip(); audioRef.current?.pause(); setIsPlaying(false); onClose(); }} style={{ padding: "8px 12px" }}>
         Close
       </button>
     </div>

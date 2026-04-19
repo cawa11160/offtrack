@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Music2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { apiFeedback, apiRecommend, apiSearch, apiUrl, type MusicianRec, type RecItem, type SearchResult, type SeedSong } from "@/lib/api";
 import { addAlreadyShownIds, getAlreadyShownIds } from "@/lib/analytics";
 import { getErrorMessage, getErrorStatus } from "@/lib/errors";
+import { usePlaybackMilestones } from "@/lib/playbackTracking";
 import { phCapture } from "@/lib/posthog";
 import { extractSpotifyTrackId, fetchSpotifyStatus, initSpotifyPlayer, playSpotifyTrack, type SpotifySession } from "@/lib/spotify";
 
@@ -106,6 +107,7 @@ export default function Recommendations() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const spotifySessionRef = useRef<SpotifySession | null>(null);
   const [playingId, setPlayingId] = useState<string>("");
+  const playback = usePlaybackMilestones("recommendations");
 
   useEffect(() => {
     const q = seed1.trim();
@@ -193,13 +195,14 @@ export default function Recommendations() {
     }
   }
 
-  function stopAudio() {
+  const stopAudio = useCallback(() => {
+    playback.skip();
     const a = audioRef.current;
     if (!a) return;
     a.pause();
     a.currentTime = 0;
     setPlayingId("");
-  }
+  }, [playback]);
 
   async function playViaSpotify(rec: Rec): Promise<boolean> {
     const trackId = extractSpotifyTrackId(rec.spotifyUri || rec.spotifyUrl || "");
@@ -224,6 +227,10 @@ export default function Recommendations() {
       await playSpotifyTrack(apiBase, spotifySessionRef.current.deviceId, trackId);
       phCapture("play_full_spotify_sdk", { track_id: rec.id, title: rec.title, artist: rec.artist });
       apiFeedback(rec.id, "open_spotify");
+      playback.start(
+        { id: rec.id, title: rec.title, artist: rec.artist, sourceKind: "spotify" },
+        rec.durationMs ?? undefined
+      );
       return true;
     } catch (e: unknown) {
       const status = getErrorStatus(e);
@@ -259,6 +266,10 @@ export default function Recommendations() {
           title: rec.title,
           artist: rec.artist,
         });
+        playback.start(
+          { id: rec.id, title: rec.title, artist: rec.artist, sourceKind: fullAudioUrl ? "upload" : "preview" },
+          rec.durationMs ?? undefined
+        );
         apiFeedback(rec.id, "play");
         return;
       } catch {
@@ -311,11 +322,11 @@ export default function Recommendations() {
 
   useEffect(() => {
     return () => stopAudio();
-  }, []);
+  }, [stopAudio]);
 
   useEffect(() => {
     stopAudio();
-  }, [recs.length]);
+  }, [recs.length, stopAudio]);
 
   const outputSlots = useMemo(() => {
     const capped = recs.slice(0, 9);
@@ -469,7 +480,14 @@ export default function Recommendations() {
         <audio
           ref={audioRef}
           className="hidden"
-          onEnded={() => {
+          onTimeUpdate={(event) => {
+            const audio = event.currentTarget;
+            playback.progress(audio.currentTime || 0, Number.isFinite(audio.duration) ? audio.duration : undefined);
+          }}
+          onEnded={(event) => {
+            const audio = event.currentTarget;
+            playback.progress(audio.currentTime || 0, Number.isFinite(audio.duration) ? audio.duration : undefined);
+            playback.complete();
             setPlayingId("");
           }}
         />

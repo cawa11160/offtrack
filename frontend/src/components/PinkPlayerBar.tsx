@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Pause, Play, Repeat, Shuffle, SkipBack, SkipForward, Volume2, VolumeX } from "lucide-react";
 import { apiListUploads, apiRecommend, apiUrl, type RecItem } from "@/lib/api";
+import { usePlaybackMilestones } from "@/lib/playbackTracking";
 
 type Song = {
   title: string;
@@ -10,6 +11,7 @@ type Song = {
 };
 
 type PlayableSong = Song & {
+  id: string;
   sourceUrl: string;
   sourceKind: "upload" | "preview";
 };
@@ -54,6 +56,7 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
   const [isShuffle, setIsShuffle] = useState(false);
   const [isRepeat, setIsRepeat] = useState(false);
   const [duration, setDuration] = useState(currentSong.duration || 0);
+  const playback = usePlaybackMilestones("pink_player");
   const activeSong = audioLibrary[activeIndex] ?? audioLibrary[0];
   const displaySong: Song = activeSong ?? currentSong;
 
@@ -72,6 +75,7 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
       for (const u of uploads) {
         if (!u.audioUrl) continue;
         next.push({
+          id: u.id,
           title: (u.title || "Uploaded Track").trim(),
           artist: (u.artist || "Unknown Artist").trim(),
           coverUrl: (u.imageUrl || currentSong.coverUrl || "").trim(),
@@ -86,6 +90,7 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
         const src = (r.audioUrl ? apiUrl(r.audioUrl) : "") || (r.previewUrl || "");
         if (!src) continue;
         next.push({
+          id: r.id,
           title: (r.title || "Unknown Track").trim(),
           artist: (r.artist || "Unknown Artist").trim(),
           coverUrl: (r.imageUrl || currentSong.coverUrl || "").trim(),
@@ -109,7 +114,7 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
     };
   }, [currentSong]);
 
-  const getNextIndex = (fromIndex: number) => {
+  const getNextIndex = useCallback((fromIndex: number) => {
     if (audioLibrary.length <= 1) return fromIndex;
     if (isShuffle) {
       let idx = fromIndex;
@@ -119,17 +124,20 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
       return idx;
     }
     return (fromIndex + 1) % audioLibrary.length;
-  };
+  }, [audioLibrary.length, isShuffle]);
 
-  const getPrevIndex = (fromIndex: number) => {
+  const getPrevIndex = useCallback((fromIndex: number) => {
     if (audioLibrary.length <= 1) return fromIndex;
     return (fromIndex - 1 + audioLibrary.length) % audioLibrary.length;
-  };
+  }, [audioLibrary.length]);
 
-  const playTrack = async (index: number) => {
+  const playTrack = useCallback(async (index: number) => {
     const audio = audioRef.current;
     const song = audioLibrary[index];
     if (!audio || !song?.sourceUrl) return;
+    if (activeSong?.id && activeSong.id !== song.id) {
+      playback.skip();
+    }
     setActiveIndex(index);
     setCurrentTime(0);
     setDuration(song.duration || 0);
@@ -139,24 +147,41 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
     try {
       await audio.play();
       setIsPlaying(true);
+      playback.start(
+        { id: song.id, title: song.title, artist: song.artist, sourceKind: song.sourceKind },
+        song.duration ? song.duration * 1000 : undefined
+      );
     } catch {
       setIsPlaying(false);
     }
-  };
+  }, [activeSong?.id, audioLibrary, playback]);
 
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
 
-    const onTime = () => setCurrentTime(audio.currentTime || 0);
+    const onTime = () => {
+      setCurrentTime(audio.currentTime || 0);
+      playback.progress(audio.currentTime || 0, Number.isFinite(audio.duration) ? audio.duration : undefined);
+    };
     const onMeta = () => {
       const nextDuration = Number.isFinite(audio.duration) ? audio.duration : 0;
       setDuration(nextDuration || activeSong?.duration || 0);
     };
     const onEnded = () => {
+      playback.progress(audio.currentTime || 0, Number.isFinite(audio.duration) ? audio.duration : undefined);
+      playback.complete();
       if (isRepeat) {
         audio.currentTime = 0;
-        audio.play().catch(() => setIsPlaying(false));
+        audio.play().then(() => {
+          if (activeSong) {
+            playback.resetForTrack(activeSong, activeSong.duration ? activeSong.duration * 1000 : undefined);
+            playback.start(
+              { id: activeSong.id, title: activeSong.title, artist: activeSong.artist, sourceKind: activeSong.sourceKind },
+              activeSong.duration ? activeSong.duration * 1000 : undefined
+            );
+          }
+        }).catch(() => setIsPlaying(false));
         return;
       }
       if (audioLibrary.length > 0) {
@@ -179,7 +204,7 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("error", onError);
     };
-  }, [activeIndex, activeSong?.duration, audioLibrary.length, isRepeat]);
+  }, [activeIndex, activeSong, audioLibrary.length, getNextIndex, isRepeat, playback, playTrack]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -193,6 +218,7 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
     if (isPlaying) {
       audio.pause();
       setIsPlaying(false);
+      playback.skip();
       return;
     }
     if (audioLibrary.length === 0) return;

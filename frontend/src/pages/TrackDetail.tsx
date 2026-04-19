@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ExternalLink, Play, Pause } from "lucide-react";
-import { apiGetTrackDetail, apiUrl, type TrackDetail } from "@/lib/api";
+import { apiFeedback, apiGetTrackDetail, apiUrl, type TrackDetail } from "@/lib/api";
 import { getErrorMessage, getErrorStatus } from "@/lib/errors";
+import { usePlaybackMilestones } from "@/lib/playbackTracking";
 import { extractSpotifyTrackId, fetchSpotifyStatus, initSpotifyPlayer, playSpotifyTrack, type SpotifySession } from "@/lib/spotify";
 
 function msToClock(ms?: number | null) {
@@ -29,6 +30,7 @@ export default function TrackDetailPage() {
   const [showEmbed, setShowEmbed] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const spotifySessionRef = useRef<SpotifySession | null>(null);
+  const playback = usePlaybackMilestones("track_detail");
 
   useEffect(() => {
     let alive = true;
@@ -78,12 +80,22 @@ export default function TrackDetailPage() {
       if (!a.paused) {
         a.pause();
         setIsPlaying(false);
+        playback.skip();
         return;
       }
       try {
         a.src = playableSrc;
         await a.play();
         setIsPlaying(true);
+        playback.start(
+          {
+            id: track.id,
+            title: track.title,
+            artist: track.artist || "",
+            sourceKind: track.audioUrl ? "upload" : "preview",
+          },
+          track.durationMs ?? undefined
+        );
         return;
       } catch {
         // fall through to Spotify in-app playback
@@ -110,6 +122,10 @@ export default function TrackDetailPage() {
         }
         await playSpotifyTrack(base, spotifySessionRef.current.deviceId, spotifyTrackId);
         setIsPlaying(true);
+        playback.start(
+          { id: track.id, title: track.title, artist: track.artist || "", sourceKind: "spotify" },
+          track.durationMs ?? undefined
+        );
         setShowEmbed(false);
         return;
       } catch (e: unknown) {
@@ -182,6 +198,9 @@ export default function TrackDetailPage() {
                   href={track.spotifyUrl || "#"}
                   target="_blank"
                   rel="noreferrer"
+                  onClick={() => {
+                    if (track.id) void apiFeedback(track.id, "open_spotify", { sourcePage: "track_detail" });
+                  }}
                   className={`inline-flex h-[46px] items-center gap-2 rounded-[10px] px-5 font-['Arimo',sans-serif] text-[18px] font-bold ${
                     track.spotifyUrl ? "bg-black text-white" : "pointer-events-none bg-black/30 text-white/70"
                   }`}
@@ -210,7 +229,16 @@ export default function TrackDetailPage() {
         <audio
           ref={audioRef}
           className="hidden"
-          onEnded={() => setIsPlaying(false)}
+          onTimeUpdate={(event) => {
+            const audio = event.currentTarget;
+            playback.progress(audio.currentTime || 0, Number.isFinite(audio.duration) ? audio.duration : undefined);
+          }}
+          onEnded={(event) => {
+            const audio = event.currentTarget;
+            playback.progress(audio.currentTime || 0, Number.isFinite(audio.duration) ? audio.duration : undefined);
+            playback.complete();
+            setIsPlaying(false);
+          }}
           onPause={() => setIsPlaying(false)}
           onPlay={() => setIsPlaying(true)}
         />

@@ -20,7 +20,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency in some envs
     redis = None
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response, UploadFile, File, Form
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Request, Response, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session, selectinload
@@ -33,19 +33,26 @@ from models import (
     AudioAsset,
     AudioFeatures,
     Base,
+    CatalogSyncRun,
     CatalogTrack,
+    ExternalTrackRef,
+    Genre,
     Interaction,
     LyricReel,
     Track,
     TrackArtist,
     TrackAudio,
+    TrackGenre,
     UploadedTrack,
     User,
 )
 from models import PaymentMethod, BillingReceipt, SecurityAuditLog
 from recommender import get_recommender
 from analytics import get_analytics
+from audio_processing import process_audio_file, validate_audio_upload
 from catalog_sync import ensure_catalog_backfill, parse_artist_names as _sync_parse_artist_names
+from catalog_ingest import catalog_sync_status, sync_current_catalog
+from storage import is_remote_storage_path, remote_redirect_response, save_upload_file, storage_backend_for_path
 
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.responses import PlainTextResponse
@@ -239,6 +246,11 @@ def _check_upload_secret(request: Request) -> bool:
 
 
 def _guess_mime_and_ext(filename: str | None, content_type: str | None) -> tuple[str, str]:
+    try:
+        validate_audio_upload(filename, content_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     ct = (content_type or "").split(";")[0].strip() or "audio/mpeg"
     name = (filename or "").strip()
     ext = ""
@@ -292,12 +304,16 @@ def _parse_range_header(range_header: str | None, file_size: int) -> tuple[int, 
     return start, end
 
 
-def _stream_file(path: Path, mime_type: str, request: Request):
+def _stream_file(path: Path | str, mime_type: str, request: Request):
     """Stream a file with HTTP Range support.
 
     This makes `<audio ...>` seeking work in browsers (and stops large files from being
     downloaded from byte 0 every time).
     """
+    if is_remote_storage_path(path):
+        return remote_redirect_response(str(path))
+
+    path = Path(path)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Audio file not found")
 
@@ -478,6 +494,7 @@ class MeOut(BaseModel):
     id: int
     email: EmailStr
     name: str | None = None
+    account_type: str = "listener"
 
 
 class PaymentMethodIn(BaseModel):
@@ -584,12 +601,15 @@ def auth_signup(payload: SignupIn, req: Request, resp: Response, db: Session = D
     _enforce_rate_limit("signup", req, RATE_LIMIT_SIGNUP_PER_MIN, 60)
     email = payload.email.lower().strip()
     name = (payload.name or "").strip() or None
+    account_type = (payload.account_type or "listener").strip().lower()
+    if account_type not in {"listener", "artist"}:
+        account_type = "listener"
     try:
         exists = db.query(User).filter(User.email == email).first()
         if exists:
             raise HTTPException(status_code=409, detail="Email already exists")
 
-        user = User(email=email, name=name, password_hash=_hash_password(payload.password))
+        user = User(email=email, name=name, account_type=account_type, password_hash=_hash_password(payload.password))
         db.add(user)
         db.commit()
         db.refresh(user)
@@ -668,7 +688,7 @@ def auth_me(req: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.")
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
-    return {"id": user.id, "email": user.email, "name": user.name}
+    return {"id": user.id, "email": user.email, "name": user.name, "account_type": user.account_type or "listener"}
 
 
 @app.post("/api/admin/users/{user_id}/lock")
@@ -754,6 +774,76 @@ def admin_audit_logs(req: Request, limit: int = 50, db: Session = Depends(get_db
             for r in rows
         ]
     }
+
+
+@app.get("/api/admin/uploads/unowned")
+def admin_unowned_uploads(req: Request, limit: int = 100, db: Session = Depends(get_db)):
+    _require_admin(req)
+    limit = max(1, min(int(limit or 100), 200))
+    try:
+        rows = (
+            db.query(CatalogTrack)
+            .options(
+                selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+                selectinload(CatalogTrack.audio_assets),
+            )
+            .filter(CatalogTrack.source_type == "upload", CatalogTrack.owner_user_id.is_(None))
+            .order_by(CatalogTrack.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+    return {"tracks": [_serialize_uploaded_catalog_track(row) for row in rows]}
+
+
+@app.post("/api/admin/uploads/{upload_id}/claim")
+def admin_claim_upload_owner(
+    upload_id: str,
+    req: Request,
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    _require_admin(req)
+    uid = (upload_id or "").strip()
+    try:
+        owner_user_id = int(payload.get("owner_user_id"))
+    except Exception:
+        raise HTTPException(status_code=422, detail="owner_user_id is required")
+    if owner_user_id <= 0:
+        raise HTTPException(status_code=422, detail="owner_user_id is required")
+    try:
+        track = _managed_upload_query(db, uid)
+        user = db.query(User).filter(User.id == owner_user_id).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+    if not track:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    if not user:
+        raise HTTPException(status_code=404, detail="Owner user not found")
+    if (user.account_type or "listener").strip().lower() != "artist":
+        raise HTTPException(status_code=400, detail="Owner must be an artist account")
+
+    previous_owner = getattr(track, "owner_user_id", None)
+    track.owner_user_id = int(user.id)
+    _audit_log(
+        action="admin_claim_upload_owner",
+        db=db,
+        user_id=user.id,
+        email=user.email,
+        req=req,
+        actor="admin",
+        reason="claim_upload_owner",
+        meta={"upload_id": track.id, "previous_owner_user_id": previous_owner},
+    )
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not claim upload. Please try again.")
+
+    refreshed = _managed_upload_query(db, track.id)
+    return {"ok": True, "track": _serialize_uploaded_catalog_track(refreshed or track)}
 
 
 @app.get("/api/billing/payment-methods")
@@ -961,9 +1051,23 @@ def _require_uploader_identity(req: Request) -> Optional[int]:
     if not REQUIRE_AUTH_UPLOADS:
         return None
     try:
-        return get_current_user_id(req)
+        user_id = get_current_user_id(req)
     except HTTPException:
         raise HTTPException(status_code=401, detail="Login required to upload tracks")
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        if (getattr(user, "account_type", "listener") or "listener").strip().lower() != "artist":
+            raise HTTPException(status_code=403, detail="Artist account required to upload tracks")
+        return user_id
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.")
+    finally:
+        db.close()
 
 
 def _parse_artist_names(raw_artist: str) -> List[str]:
@@ -991,6 +1095,8 @@ def _catalog_track_artist_text(track: CatalogTrack) -> str:
 
 
 def _catalog_track_primary_asset(track: CatalogTrack, kind: str = "full") -> Optional[AudioAsset]:
+    if track is None:
+        return None
     ranked = sorted(
         [
             asset for asset in track.audio_assets
@@ -1011,8 +1117,59 @@ def _serialize_uploaded_catalog_track(track: CatalogTrack) -> Dict[str, Any]:
         "audioUrl": f"/api/uploads/{track.id}/stream" if asset else None,
         "mimeType": asset.mime_type if asset else None,
         "sizeBytes": int(asset.size_bytes or 0) if asset else 0,
+        "durationMs": int(asset.duration_ms) if asset and asset.duration_ms is not None else track.duration_ms,
+        "waveformPeaks": (json.loads(asset.waveform_peaks_json) if asset and asset.waveform_peaks_json else []),
+        "processingStatus": asset.processing_status if asset else None,
+        "processingError": asset.processing_error if asset else None,
+        "storageBackend": storage_backend_for_path(asset.storage_path if asset else None),
+        "storagePath": asset.storage_path if asset else None,
+        "ownerUserId": getattr(track, "owner_user_id", None),
+        "isPublished": bool(getattr(track, "is_published", True)),
         "createdAt": getattr(track, "created_at", None),
     }
+
+
+def _managed_upload_query(db: Session, upload_id: str) -> Optional[CatalogTrack]:
+    return (
+        db.query(CatalogTrack)
+        .options(
+            selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+            selectinload(CatalogTrack.audio_assets),
+        )
+        .filter(CatalogTrack.id == upload_id, CatalogTrack.source_type == "upload")
+        .first()
+    )
+
+
+def _require_upload_owner(db: Session, req: Request, upload_id: str) -> tuple[int, CatalogTrack]:
+    user_id = get_current_user_id(req)
+    try:
+        track = _managed_upload_query(db, upload_id)
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+    if not track:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    owner_id = getattr(track, "owner_user_id", None)
+    if owner_id is not None and int(owner_id) != int(user_id):
+        raise HTTPException(status_code=403, detail="You can only manage your own uploads")
+    if owner_id is None:
+        raise HTTPException(status_code=403, detail="This upload has no owner and can only be managed by an admin migration")
+    return user_id, track
+
+
+def _replace_track_artists(db: Session, track_id: str, artist: str) -> None:
+    db.query(TrackArtist).filter(TrackArtist.track_id == track_id).delete(synchronize_session="fetch")
+    db.flush()
+    for position, artist_name in enumerate(_parse_artist_names(artist)):
+        artist_row = _get_or_create_artist(db, artist_name)
+        db.add(
+            TrackArtist(
+                track_id=track_id,
+                artist_id=artist_row.id,
+                role="primary" if position == 0 else "featured",
+                position=position,
+            )
+        )
 
 
 # -----------------------------
@@ -1243,7 +1400,29 @@ class FeedbackRequest(BaseModel):
     track_id: str
     event: str
     distinct_id: Optional[str] = None  # optional; otherwise derived from request headers
+    artist_id: Optional[int] = None
+    genre_id: Optional[int] = None
+    duration_ms: Optional[int] = Field(default=None, ge=0, le=24 * 60 * 60 * 1000)
+    play_position_ms: Optional[int] = Field(default=None, ge=0, le=24 * 60 * 60 * 1000)
+    source_page: Optional[str] = Field(default=None, max_length=128)
     context: Optional[Dict[str, Any]] = None
+
+
+class CatalogSyncRequest(BaseModel):
+    query: Optional[str] = Field(default="", max_length=300)
+    limit: int = Field(default=10, ge=1, le=50)
+    enrich: bool = True
+
+
+class UploadUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    artist: Optional[str] = Field(default=None, max_length=1000)
+    image_url: Optional[str] = Field(default=None, max_length=2000)
+    is_published: Optional[bool] = None
+
+
+class AdminClaimUploadRequest(BaseModel):
+    owner_user_id: int = Field(ge=1)
 
 
 
@@ -1309,6 +1488,30 @@ def db_status():
         raise HTTPException(status_code=503, detail="Database unavailable")
 
 
+@app.get("/api/catalog/sync/status")
+def catalog_sync_status_endpoint(limit: int = 5, db: Session = Depends(get_db)):
+    try:
+        return catalog_sync_status(db, limit=limit)
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+
+@app.post("/api/admin/catalog/sync")
+def catalog_sync_endpoint(req: CatalogSyncRequest, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request)
+    try:
+        return sync_current_catalog(
+            db,
+            query=(req.query or "").strip(),
+            limit=req.limit,
+            enrich=bool(req.enrich),
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Catalog sync failed: {exc}")
+
+
 @app.post("/api/reload")
 def reload_now():
     err = _try_reload_recommender()
@@ -1329,7 +1532,10 @@ def db_search(db: Session, q: str, limit: int = 8):
         .outerjoin(AudioFeatures, AudioFeatures.track_id == CatalogTrack.id)
         .outerjoin(TrackArtist, TrackArtist.track_id == CatalogTrack.id)
         .outerjoin(Artist, Artist.id == TrackArtist.artist_id)
-        .filter(or_(CatalogTrack.canonical_title.ilike(q2), Artist.name.ilike(q2)))
+        .filter(
+            CatalogTrack.is_published.is_(True),
+            or_(CatalogTrack.canonical_title.ilike(q2), Artist.name.ilike(q2)),
+        )
         .group_by(CatalogTrack.id)
         .order_by(
             func.max(func.coalesce(AudioFeatures.popularity, -1)).desc(),
@@ -1649,7 +1855,22 @@ def feedback_endpoint(
       - product analytics (PostHog)
     """
     event = (req.event or "").strip().lower()
-    if event not in {"like", "superlike", "dislike", "play", "open_spotify", "click_recommendation"}:
+    allowed_events = {
+        "like",
+        "superlike",
+        "dislike",
+        "play",
+        "play_start",
+        "play_30s",
+        "play_complete",
+        "skip",
+        "open_spotify",
+        "click_recommendation",
+        "upload_play",
+        "genre_click",
+        "artist_click",
+    }
+    if event not in allowed_events:
         raise HTTPException(status_code=400, detail="Invalid event")
 
     track_id = (req.track_id or "").strip()
@@ -1665,6 +1886,13 @@ def feedback_endpoint(
             distinct_id = get_analytics().distinct_id(request, explicit=explicit_distinct) or distinct_id
     except Exception:
         pass
+
+    user_id = None
+    try:
+        if request is not None:
+            user_id = get_current_user_id(request)
+    except Exception:
+        user_id = None
 
     # persist interaction
     try:
@@ -1689,7 +1917,22 @@ def feedback_endpoint(
                 pass
 
         if should_insert:
-            db.add(Interaction(distinct_id=distinct_id, track_id=track_id, event=event))
+            db.add(
+                Interaction(
+                    distinct_id=distinct_id,
+                    user_id=user_id,
+                    track_id=track_id,
+                    artist_id=req.artist_id,
+                    genre_id=req.genre_id,
+                    event=event,
+                    duration_ms=req.duration_ms,
+                    play_position_ms=req.play_position_ms,
+                    source_page=(req.source_page or "").strip() or None,
+                    context_json=json.dumps(req.context or {}, ensure_ascii=True, default=str)[:20000]
+                    if req.context
+                    else None,
+                )
+            )
             db.commit()
     except Exception:
         db.rollback()
@@ -1699,11 +1942,220 @@ def feedback_endpoint(
         if request is not None and background_tasks is not None:
             a = get_analytics()
             did = a.distinct_id(request, explicit=distinct_id)
-            a.capture(background_tasks, distinct_id=did, event="feedback", properties={"event": event})
+            a.capture(
+                background_tasks,
+                distinct_id=did,
+                event="feedback",
+                properties={"event": event, "source_page": (req.source_page or None)},
+            )
     except Exception:
         pass
 
     return {"ok": True}
+
+
+def _interaction_weight(event: str) -> float:
+    return {
+        "superlike": 6.0,
+        "like": 4.0,
+        "play_complete": 4.0,
+        "play_30s": 3.0,
+        "upload_play": 3.0,
+        "play": 2.0,
+        "play_start": 1.5,
+        "click_recommendation": 1.5,
+        "open_spotify": 1.0,
+        "artist_click": 1.0,
+        "genre_click": 1.0,
+        "skip": 0.25,
+        "dislike": -2.0,
+    }.get((event or "").strip().lower(), 1.0)
+
+
+def _add_graph_node(nodes: Dict[str, Dict[str, Any]], node_id: str, **values: Any) -> Dict[str, Any]:
+    node = nodes.get(node_id)
+    if node is None:
+        node = {"id": node_id, **values}
+        nodes[node_id] = node
+    else:
+        for key, value in values.items():
+            if value not in (None, "", []):
+                node[key] = value
+    return node
+
+
+def _add_graph_edge(edges: Dict[str, Dict[str, Any]], source: str, target: str, relation: str, weight: float = 1.0) -> None:
+    edge_id = f"{source}->{target}:{relation}"
+    edge = edges.get(edge_id)
+    if edge is None:
+        edges[edge_id] = {
+            "id": edge_id,
+            "source": source,
+            "target": target,
+            "relation": relation,
+            "weight": float(weight),
+        }
+    else:
+        edge["weight"] = float(edge.get("weight", 0)) + float(weight)
+
+
+@app.get("/api/profile/music-web")
+def profile_music_web(
+    distinct_id: str = "",
+    limit: int = 120,
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    explicit_distinct = (distinct_id or "").strip() or None
+    did = explicit_distinct or "anonymous"
+    try:
+        if request is not None:
+            did = get_analytics().distinct_id(request, explicit=explicit_distinct) or did
+    except Exception:
+        pass
+
+    limit = max(20, min(int(limit or 120), 300))
+    try:
+        rows = (
+            db.query(Interaction)
+            .filter(Interaction.distinct_id == did)
+            .order_by(Interaction.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    track_ids = []
+    for row in rows:
+        tid = (row.track_id or "").strip()
+        if tid and tid not in track_ids:
+            track_ids.append(tid)
+
+    catalog_rows: Dict[str, CatalogTrack] = {}
+    legacy_rows: Dict[str, Track] = {}
+    if track_ids:
+        try:
+            catalog = (
+                db.query(CatalogTrack)
+                .options(
+                    selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+                    selectinload(CatalogTrack.genre_links).selectinload(TrackGenre.genre),
+                )
+                .filter(CatalogTrack.id.in_(track_ids))
+                .all()
+            )
+            catalog_rows = {row.id: row for row in catalog}
+            missing = [tid for tid in track_ids if tid not in catalog_rows]
+            if missing:
+                legacy = db.query(Track).filter(Track.id.in_(missing)).all()
+                legacy_rows = {row.id: row for row in legacy}
+        except SQLAlchemyError:
+            raise HTTPException(status_code=503, detail="Database unavailable")
+
+    nodes: Dict[str, Dict[str, Any]] = {}
+    edges: Dict[str, Dict[str, Any]] = {}
+    user_node_id = f"user:{did}"
+    _add_graph_node(nodes, user_node_id, type="user", label="You", weight=8)
+
+    artist_scores: Dict[str, float] = {}
+    genre_scores: Dict[str, float] = {}
+    event_counts: Dict[str, int] = {}
+
+    for row in rows:
+        event = (row.event or "").strip().lower()
+        event_counts[event] = event_counts.get(event, 0) + 1
+        weight = _interaction_weight(event)
+        tid = (row.track_id or "").strip()
+        if not tid:
+            continue
+
+        track_node_id = f"track:{tid}"
+        catalog_track = catalog_rows.get(tid)
+        legacy_track = legacy_rows.get(tid)
+        title = tid
+        artist_text = ""
+        image_url = None
+        source = "interaction"
+        if catalog_track:
+            title = catalog_track.canonical_title
+            artist_text = _catalog_track_artist_text(catalog_track)
+            image_url = catalog_track.image_url
+            source = catalog_track.source_type or "catalog"
+        elif legacy_track:
+            title = legacy_track.name
+            artist_text = legacy_track.artists
+            image_url = legacy_track.image_url
+            source = "legacy"
+
+        track_node = _add_graph_node(
+            nodes,
+            track_node_id,
+            type="track",
+            label=title,
+            subtitle=artist_text,
+            imageUrl=image_url,
+            source=source,
+            weight=1,
+        )
+        track_node["weight"] = float(track_node.get("weight", 0)) + max(0.25, abs(weight))
+        track_node["lastEvent"] = event
+        track_node["lastSeenAt"] = row.created_at
+        _add_graph_edge(edges, user_node_id, track_node_id, event or "interaction", weight)
+
+        if catalog_track:
+            for link in catalog_track.artist_links:
+                if not link.artist:
+                    continue
+                artist_node_id = f"artist:{link.artist_id}"
+                artist_scores[link.artist.name] = artist_scores.get(link.artist.name, 0) + max(0.25, weight)
+                _add_graph_node(
+                    nodes,
+                    artist_node_id,
+                    type="artist",
+                    label=link.artist.name,
+                    weight=artist_scores[link.artist.name],
+                )
+                _add_graph_edge(edges, track_node_id, artist_node_id, "artist", 1.0)
+                _add_graph_edge(edges, user_node_id, artist_node_id, "taste", max(0.25, weight / 2))
+
+            for link in catalog_track.genre_links:
+                if not link.genre:
+                    continue
+                genre_node_id = f"genre:{link.genre_id}"
+                genre_scores[link.genre.name] = genre_scores.get(link.genre.name, 0) + max(0.25, weight)
+                _add_graph_node(
+                    nodes,
+                    genre_node_id,
+                    type="genre",
+                    label=link.genre.name,
+                    weight=genre_scores[link.genre.name],
+                )
+                _add_graph_edge(edges, track_node_id, genre_node_id, "genre", float(link.weight or 1.0))
+                _add_graph_edge(edges, user_node_id, genre_node_id, "taste", max(0.25, weight / 2))
+
+    top_artists = [
+        {"name": name, "score": round(score, 2)}
+        for name, score in sorted(artist_scores.items(), key=lambda item: item[1], reverse=True)[:8]
+    ]
+    top_genres = [
+        {"name": name, "score": round(score, 2)}
+        for name, score in sorted(genre_scores.items(), key=lambda item: item[1], reverse=True)[:8]
+    ]
+
+    return {
+        "distinctId": did,
+        "hasData": bool(rows),
+        "nodes": list(nodes.values()),
+        "edges": list(edges.values()),
+        "stats": {
+            "events": event_counts,
+            "topArtists": top_artists,
+            "topGenres": top_genres,
+            "trackCount": len(track_ids),
+            "interactionCount": len(rows),
+        },
+    }
 
 
 class PreviewRequest(BaseModel):
@@ -1782,7 +2234,7 @@ def track_detail(
                         selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
                         selectinload(CatalogTrack.audio_assets),
                     )
-                    .filter(CatalogTrack.id == tid)
+                    .filter(CatalogTrack.id == tid, CatalogTrack.is_published.is_(True))
                     .first()
                 )
             except Exception:
@@ -1929,43 +2381,39 @@ async def upload_catalog_track_audio(
         raise HTTPException(status_code=404, detail="Unknown track_id")
 
     mime_type, ext = _guess_mime_and_ext(file.filename, file.content_type)
-    dest = MEDIA_TRACKS_DIR / f"{tid}{ext}"
-
-    # write file with a size limit
     max_bytes = MAX_UPLOAD_MB * 1024 * 1024
-    size = 0
-    with open(dest, "wb") as out_f:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > max_bytes:
-                try:
-                    dest.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                raise HTTPException(status_code=413, detail=f"File too large (>{MAX_UPLOAD_MB}MB)")
-            out_f.write(chunk)
+    stored = await save_upload_file(
+        file,
+        local_dir=MEDIA_TRACKS_DIR,
+        object_kind="tracks",
+        object_id=tid,
+        ext=ext,
+        mime_type=mime_type,
+        max_bytes=max_bytes,
+    )
+    processing = process_audio_file(stored.storage_path, stored.mime_type)
 
     try:
         row = db.query(TrackAudio).filter(TrackAudio.track_id == tid).first()
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
     if row:
-        row.file_path = str(dest)
-        row.mime_type = mime_type
-        row.size_bytes = int(size)
+        row.file_path = stored.storage_path
+        row.mime_type = stored.mime_type
+        row.size_bytes = int(stored.size_bytes)
     else:
         db.add(
             TrackAudio(
                 track_id=tid,
-                file_path=str(dest),
-                mime_type=mime_type,
-                size_bytes=int(size),
+                file_path=stored.storage_path,
+                mime_type=stored.mime_type,
+                size_bytes=int(stored.size_bytes),
             )
         )
     try:
+        catalog_track = db.query(CatalogTrack).filter(CatalogTrack.id == tid).first()
+        if catalog_track and processing.duration_ms is not None:
+            catalog_track.duration_ms = int(processing.duration_ms)
         db.commit()
     except SQLAlchemyError:
         db.rollback()
@@ -1982,8 +2430,7 @@ def stream_catalog_track_audio(track_id: str, request: Request, db: Session = De
     if not row:
         raise HTTPException(status_code=404, detail="No full audio uploaded for this track")
 
-    path = Path(row.file_path)
-    return _stream_file(path, row.mime_type or "audio/mpeg", request)
+    return _stream_file(row.file_path, row.mime_type or "audio/mpeg", request)
 
 
 @app.post("/api/uploads")
@@ -1999,7 +2446,7 @@ async def upload_new_track(
     _enforce_rate_limit("upload", request, RATE_LIMIT_UPLOAD_PER_MIN, 60)
     if not _check_upload_secret(request):
         raise HTTPException(status_code=403, detail="Upload secret required")
-    _require_uploader_identity(request)
+    owner_user_id = _require_uploader_identity(request)
 
     title = (title or "").strip()
     artist = (artist or "").strip()
@@ -2008,31 +2455,27 @@ async def upload_new_track(
 
     tid = str(uuid.uuid4())
     mime_type, ext = _guess_mime_and_ext(file.filename, file.content_type)
-    dest = MEDIA_UPLOADS_DIR / f"{tid}{ext}"
-
     max_bytes = MAX_UPLOAD_MB * 1024 * 1024
-    size = 0
-    with open(dest, "wb") as out_f:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > max_bytes:
-                try:
-                    dest.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                raise HTTPException(status_code=413, detail=f"File too large (>{MAX_UPLOAD_MB}MB)")
-            out_f.write(chunk)
+    stored = await save_upload_file(
+        file,
+        local_dir=MEDIA_UPLOADS_DIR,
+        object_kind="uploads",
+        object_id=tid,
+        ext=ext,
+        mime_type=mime_type,
+        max_bytes=max_bytes,
+    )
+    processing = process_audio_file(stored.storage_path, stored.mime_type)
 
     canonical_track = CatalogTrack(
         id=tid,
         canonical_title=title,
         source_type="upload",
         release_year=None,
-        duration_ms=None,
+        duration_ms=processing.duration_ms,
         explicit=False,
+        is_published=True,
+        owner_user_id=owner_user_id,
         image_url=(image_url or "").strip() or None,
         legacy_uploaded_track_id=None,
     )
@@ -2055,9 +2498,13 @@ async def upload_new_track(
         AudioAsset(
             id=str(uuid.uuid4()),
             track_id=canonical_track.id,
-            storage_path=str(dest),
-            mime_type=mime_type,
-            size_bytes=int(size),
+            storage_path=stored.storage_path,
+            mime_type=stored.mime_type,
+            size_bytes=int(stored.size_bytes),
+            duration_ms=processing.duration_ms,
+            waveform_peaks_json=processing.peaks_json(),
+            processing_status=processing.status,
+            processing_error=processing.error,
             kind="full",
             is_primary=True,
         )
@@ -2074,9 +2521,140 @@ async def upload_new_track(
         "artist": artist,
         "imageUrl": canonical_track.image_url,
         "audioUrl": f"/api/uploads/{tid}/stream",
-        "mimeType": mime_type,
-        "sizeBytes": int(size),
+        "mimeType": stored.mime_type,
+        "sizeBytes": int(stored.size_bytes),
+        "durationMs": processing.duration_ms,
+        "waveformPeaks": processing.waveform_peaks,
+        "processingStatus": processing.status,
+        "processingError": processing.error,
     }
+
+
+@app.get("/api/uploads/manage")
+def list_managed_uploads(limit: int = 100, request: Request = None, db: Session = Depends(get_db)):
+    user_id = get_current_user_id(request)
+    limit = max(1, min(int(limit or 100), 200))
+    try:
+        rows = (
+            db.query(CatalogTrack)
+            .options(
+                selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+                selectinload(CatalogTrack.audio_assets),
+            )
+            .filter(CatalogTrack.source_type == "upload", CatalogTrack.owner_user_id == user_id)
+            .order_by(CatalogTrack.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+    return {"tracks": [_serialize_uploaded_catalog_track(row) for row in rows]}
+
+
+@app.patch("/api/uploads/{upload_id}")
+def update_managed_upload(upload_id: str, payload: UploadUpdateRequest, request: Request, db: Session = Depends(get_db)):
+    uid = (upload_id or "").strip()
+    _, track = _require_upload_owner(db, request, uid)
+
+    if payload.title is not None:
+        title = (payload.title or "").strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="title is required")
+        track.canonical_title = title
+    if payload.image_url is not None:
+        track.image_url = (payload.image_url or "").strip() or None
+    if payload.is_published is not None:
+        track.is_published = bool(payload.is_published)
+    if payload.artist is not None:
+        _replace_track_artists(db, track.id, payload.artist)
+
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not update upload. Please try again.")
+
+    db.refresh(track)
+    refreshed = _managed_upload_query(db, track.id)
+    return _serialize_uploaded_catalog_track(refreshed or track)
+
+
+@app.post("/api/uploads/{upload_id}/replace")
+async def replace_managed_upload_audio(
+    upload_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    _enforce_rate_limit("upload", request, RATE_LIMIT_UPLOAD_PER_MIN, 60)
+    if not _check_upload_secret(request):
+        raise HTTPException(status_code=403, detail="Upload secret required")
+    uid = (upload_id or "").strip()
+    _, track = _require_upload_owner(db, request, uid)
+
+    mime_type, ext = _guess_mime_and_ext(file.filename, file.content_type)
+    stored = await save_upload_file(
+        file,
+        local_dir=MEDIA_UPLOADS_DIR,
+        object_kind="uploads",
+        object_id=uid,
+        ext=ext,
+        mime_type=mime_type,
+        max_bytes=MAX_UPLOAD_MB * 1024 * 1024,
+    )
+    processing = process_audio_file(stored.storage_path, stored.mime_type)
+
+    asset = _catalog_track_primary_asset(track, kind="full")
+    if asset is None:
+        db.add(
+            AudioAsset(
+                id=str(uuid.uuid4()),
+                track_id=track.id,
+                storage_path=stored.storage_path,
+                mime_type=stored.mime_type,
+                size_bytes=int(stored.size_bytes),
+                duration_ms=processing.duration_ms,
+                waveform_peaks_json=processing.peaks_json(),
+                processing_status=processing.status,
+                processing_error=processing.error,
+                kind="full",
+                is_primary=True,
+            )
+        )
+    else:
+        asset.storage_path = stored.storage_path
+        asset.mime_type = stored.mime_type
+        asset.size_bytes = int(stored.size_bytes)
+        asset.duration_ms = processing.duration_ms
+        asset.waveform_peaks_json = processing.peaks_json()
+        asset.processing_status = processing.status
+        asset.processing_error = processing.error
+        asset.is_primary = True
+
+    try:
+        if processing.duration_ms is not None:
+            track.duration_ms = processing.duration_ms
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not replace audio. Please try again.")
+
+    refreshed = _managed_upload_query(db, track.id)
+    return _serialize_uploaded_catalog_track(refreshed or track)
+
+
+@app.delete("/api/uploads/{upload_id}")
+def unpublish_managed_upload(upload_id: str, request: Request, db: Session = Depends(get_db)):
+    uid = (upload_id or "").strip()
+    _, track = _require_upload_owner(db, request, uid)
+    track.is_published = False
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not unpublish upload. Please try again.")
+    refreshed = _managed_upload_query(db, track.id)
+    return {"ok": True, "track": _serialize_uploaded_catalog_track(refreshed or track)}
 
 
 @app.get("/api/uploads")
@@ -2089,7 +2667,7 @@ def list_uploads(limit: int = 50, db: Session = Depends(get_db)):
                 selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
                 selectinload(CatalogTrack.audio_assets),
             )
-            .filter(CatalogTrack.source_type == "upload")
+            .filter(CatalogTrack.source_type == "upload", CatalogTrack.is_published.is_(True))
             .order_by(CatalogTrack.created_at.desc())
             .limit(limit)
             .all()
@@ -2134,14 +2712,14 @@ def stream_uploaded_track(upload_id: str, request: Request, db: Session = Depend
         catalog_track = (
             db.query(CatalogTrack)
             .options(selectinload(CatalogTrack.audio_assets))
-            .filter(CatalogTrack.id == uid, CatalogTrack.source_type == "upload")
+            .filter(CatalogTrack.id == uid, CatalogTrack.source_type == "upload", CatalogTrack.is_published.is_(True))
             .first()
         )
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
     asset = _catalog_track_primary_asset(catalog_track, kind="full") if catalog_track else None
     if asset:
-        return _stream_file(Path(asset.storage_path), asset.mime_type or "audio/mpeg", request)
+        return _stream_file(asset.storage_path, asset.mime_type or "audio/mpeg", request)
 
     try:
         row = db.query(UploadedTrack).filter(UploadedTrack.id == uid).first()
@@ -2149,7 +2727,7 @@ def stream_uploaded_track(upload_id: str, request: Request, db: Session = Depend
         raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
     if not row:
         raise HTTPException(status_code=404, detail="Unknown upload id")
-    return _stream_file(Path(row.file_path), row.mime_type or "audio/mpeg", request)
+    return _stream_file(row.file_path, row.mime_type or "audio/mpeg", request)
 
 
 # -----------------------------

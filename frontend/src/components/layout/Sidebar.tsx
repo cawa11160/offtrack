@@ -50,6 +50,49 @@ function inferRoute(label: string): string {
   return `/${key.replace(/\s+/g, "-")}`;
 }
 
+const fallbackNav: SidebarItem[] = [
+  {
+    to: "/",
+    label: "Home",
+    icon: <Home className="text-black" size={22} strokeWidth={1.8} />,
+  },
+  {
+    to: "/search",
+    label: "Search",
+    icon: <Search className="text-black" size={22} strokeWidth={1.8} />,
+  },
+  {
+    to: "/liked",
+    label: "Library",
+    icon: <Library className="text-black" size={22} strokeWidth={1.8} />,
+  },
+  {
+    to: "/playlists",
+    label: "Playlists",
+    icon: <ListMusic className="text-black" size={22} strokeWidth={1.8} />,
+  },
+  {
+    to: "/concerts",
+    label: "Concert Map",
+    icon: <Map className="text-black" size={22} strokeWidth={1.8} />,
+  },
+  {
+    to: "/web",
+    label: "Interactive Web",
+    icon: <Share2 className="text-black" size={22} strokeWidth={1.8} />,
+  },
+  {
+    to: "/uploads",
+    label: "Uploads",
+    icon: <UploadCloud className="text-black" size={22} strokeWidth={1.8} />,
+  },
+  {
+    to: "/merch",
+    label: "Merchandise",
+    icon: <ShoppingBag className="text-black" size={22} strokeWidth={1.8} />,
+  },
+];
+
 export function Sidebar({
   items,
   initialWidth = 240,
@@ -74,49 +117,6 @@ export function Sidebar({
   const startWidthRef = useRef<number>(initialWidth);
 
   const isCompact = collapsed ?? width <= 100;
-
-  const fallbackNav: SidebarItem[] = [
-    {
-      to: "/",
-      label: "Home",
-      icon: <Home className="text-black" size={22} strokeWidth={1.8} />,
-    },
-    {
-      to: "/search",
-      label: "Search",
-      icon: <Search className="text-black" size={22} strokeWidth={1.8} />,
-    },
-    {
-      to: "/liked",
-      label: "Library",
-      icon: <Library className="text-black" size={22} strokeWidth={1.8} />,
-    },
-    {
-      to: "/playlists",
-      label: "Playlists",
-      icon: <ListMusic className="text-black" size={22} strokeWidth={1.8} />,
-    },
-    {
-      to: "/concerts",
-      label: "Concert Map",
-      icon: <Map className="text-black" size={22} strokeWidth={1.8} />,
-    },
-    {
-      to: "/web",
-      label: "Interactive Web",
-      icon: <Share2 className="text-black" size={22} strokeWidth={1.8} />,
-    },
-    {
-      to: "/uploads",
-      label: "Uploads",
-      icon: <UploadCloud className="text-black" size={22} strokeWidth={1.8} />,
-    },
-    {
-      to: "/merch",
-      label: "Merchandise",
-      icon: <ShoppingBag className="text-black" size={22} strokeWidth={1.8} />,
-    },
-  ];
 
   const navItems = useMemo(() => {
     if (items && items.length) {

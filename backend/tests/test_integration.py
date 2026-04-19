@@ -1,5 +1,9 @@
 import os
 import sys
+import math
+import struct
+import wave
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +17,7 @@ if str(BACKEND_DIR) not in sys.path:
 # Test env must be set before importing backend modules that build engine/app.
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_offtrack.sqlite3")
 os.environ.setdefault("MEDIA_DIR", str(BACKEND_DIR / "tests" / ".tmp_media"))
+os.environ.setdefault("MEDIA_STORAGE_BACKEND", "local")
 os.environ.setdefault("REQUIRE_AUTH_UPLOADS", "true")
 os.environ.setdefault("UPLOAD_SECRET", "")
 os.environ.setdefault("SPOTIFY_CLIENT_ID", "test-client")
@@ -21,10 +26,26 @@ os.environ.setdefault("FRONTEND_URL", "http://localhost:8080")
 os.environ["ADMIN_API_KEY"] = "test-admin-key"
 
 from api import app  # noqa: E402
+from catalog_ingest import sync_current_catalog  # noqa: E402
 from catalog_sync import ensure_catalog_backfill  # noqa: E402
 from db import SessionLocal, engine  # noqa: E402
-from models import Artist, AudioAsset, AudioFeatures, Base, CatalogTrack, Track, TrackArtist  # noqa: E402
+from models import (  # noqa: E402
+    Artist,
+    AudioAsset,
+    AudioFeatures,
+    Base,
+    CatalogSyncRun,
+    CatalogTrack,
+    ExternalTrackRef,
+    Genre,
+    Interaction,
+    Track,
+    TrackArtist,
+    TrackGenre,
+)
+from providers import ProviderTrack  # noqa: E402
 from recommender import Recommender  # noqa: E402
+from storage import is_remote_storage_path, remote_media_url  # noqa: E402
 
 
 def _fresh_client() -> TestClient:
@@ -33,12 +54,27 @@ def _fresh_client() -> TestClient:
     return TestClient(app)
 
 
+def _wav_bytes(duration_s: float = 0.25, sample_rate: int = 8000) -> bytes:
+    buf = BytesIO()
+    frame_count = int(duration_s * sample_rate)
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        frames = bytearray()
+        for idx in range(frame_count):
+            value = int(12000 * math.sin(2 * math.pi * 440 * idx / sample_rate))
+            frames.extend(struct.pack("<h", value))
+        wav.writeframes(bytes(frames))
+    return buf.getvalue()
+
+
 def test_auth_signup_login_and_upload_authorization():
     client = _fresh_client()
 
     signup = client.post(
         "/api/auth/signup",
-        json={"name": "Artist One", "email": "artist1@example.com", "password": "password123"},
+        json={"name": "Artist One", "email": "artist1@example.com", "password": "password123", "account_type": "artist"},
     )
     assert signup.status_code == 200, signup.text
     token = signup.json()["access_token"]
@@ -47,6 +83,7 @@ def test_auth_signup_login_and_upload_authorization():
     me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200, me.text
     assert me.json()["email"] == "artist1@example.com"
+    assert me.json()["account_type"] == "artist"
 
     # Upload should be blocked when auth is missing.
     unauth_upload = client.post(
@@ -55,6 +92,19 @@ def test_auth_signup_login_and_upload_authorization():
         files={"file": ("song.mp3", b"FAKEAUDIO", "audio/mpeg")},
     )
     assert unauth_upload.status_code == 401, unauth_upload.text
+
+    listener_signup = client.post(
+        "/api/auth/signup",
+        json={"name": "Listener One", "email": "listener1@example.com", "password": "password123"},
+    )
+    assert listener_signup.status_code == 200, listener_signup.text
+    listener_upload = client.post(
+        "/api/uploads",
+        headers={"Authorization": f"Bearer {listener_signup.json()['access_token']}"},
+        data={"title": "Listener Song", "artist": "Listener"},
+        files={"file": ("song.mp3", b"LISTENERAUDIO", "audio/mpeg")},
+    )
+    assert listener_upload.status_code == 403, listener_upload.text
 
     auth_upload = client.post(
         "/api/uploads",
@@ -73,7 +123,7 @@ def test_upload_persists_to_normalized_catalog_tables():
 
     signup = client.post(
         "/api/auth/signup",
-        json={"name": "Artist Two", "email": "artist2@example.com", "password": "password123"},
+        json={"name": "Artist Two", "email": "artist2@example.com", "password": "password123", "account_type": "artist"},
     )
     assert signup.status_code == 200, signup.text
     token = signup.json()["access_token"]
@@ -93,6 +143,8 @@ def test_upload_persists_to_normalized_catalog_tables():
         assert track is not None
         assert track.canonical_title == "Normalized Song"
         assert track.source_type == "upload"
+        assert track.owner_user_id is not None
+        assert track.is_published is True
 
         assets = db.query(AudioAsset).filter(AudioAsset.track_id == track_id).all()
         assert len(assets) == 1
@@ -113,6 +165,170 @@ def test_upload_persists_to_normalized_catalog_tables():
         assert artist_names == ["Artist Two", "Guest Voice"]
     finally:
         db.close()
+
+
+def test_wav_upload_extracts_duration_and_waveform():
+    client = _fresh_client()
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Wave Artist",
+            "email": "wave-artist@example.com",
+            "password": "password123",
+            "account_type": "artist",
+        },
+    )
+    assert signup.status_code == 200, signup.text
+    token = signup.json()["access_token"]
+
+    upload = client.post(
+        "/api/uploads",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": "Wave Song", "artist": "Wave Artist"},
+        files={"file": ("wave.wav", _wav_bytes(0.3), "audio/wav")},
+    )
+    assert upload.status_code == 200, upload.text
+    body = upload.json()
+    assert body["processingStatus"] == "ready"
+    assert 250 <= int(body["durationMs"]) <= 350
+    assert len(body["waveformPeaks"]) == 64
+
+    managed = client.get("/api/uploads/manage", headers={"Authorization": f"Bearer {token}"})
+    assert managed.status_code == 200, managed.text
+    row = next(item for item in managed.json()["tracks"] if item["id"] == body["id"])
+    assert 250 <= int(row["durationMs"]) <= 350
+    assert len(row["waveformPeaks"]) == 64
+
+
+def test_artist_can_manage_owned_uploads_and_unpublish():
+    client = _fresh_client()
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Manager Artist",
+            "email": "manager-artist@example.com",
+            "password": "password123",
+            "account_type": "artist",
+        },
+    )
+    assert signup.status_code == 200, signup.text
+    token = signup.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    upload = client.post(
+        "/api/uploads",
+        headers=headers,
+        data={"title": "Manage Me", "artist": "Manager Artist"},
+        files={"file": ("song.mp3", b"MANAGEAUDIO", "audio/mpeg")},
+    )
+    assert upload.status_code == 200, upload.text
+    upload_id = upload.json()["id"]
+
+    managed = client.get("/api/uploads/manage", headers=headers)
+    assert managed.status_code == 200, managed.text
+    rows = managed.json().get("tracks") or []
+    assert any(row.get("id") == upload_id and row.get("ownerUserId") for row in rows)
+
+    updated = client.patch(
+        f"/api/uploads/{upload_id}",
+        headers=headers,
+        json={"title": "Managed Title", "artist": "Manager Artist, Guest", "is_published": True},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["title"] == "Managed Title"
+    assert updated.json()["artist"] == "Manager Artist, Guest"
+
+    replaced = client.post(
+        f"/api/uploads/{upload_id}/replace",
+        headers=headers,
+        files={"file": ("replacement.mp3", b"REPLACEDAUDIO", "audio/mpeg")},
+    )
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["sizeBytes"] == len(b"REPLACEDAUDIO")
+
+    public_before = client.get("/api/uploads")
+    assert public_before.status_code == 200, public_before.text
+    assert any(row.get("id") == upload_id for row in public_before.json().get("tracks") or [])
+
+    deleted = client.delete(f"/api/uploads/{upload_id}", headers=headers)
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["track"]["isPublished"] is False
+
+    public_after = client.get("/api/uploads")
+    assert public_after.status_code == 200, public_after.text
+    assert not any(row.get("id") == upload_id for row in public_after.json().get("tracks") or [])
+
+
+def test_admin_can_claim_unowned_upload_for_artist():
+    client = _fresh_client()
+
+    artist_signup = client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Claim Artist",
+            "email": "claim-artist@example.com",
+            "password": "password123",
+            "account_type": "artist",
+        },
+    )
+    assert artist_signup.status_code == 200, artist_signup.text
+    artist_me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {artist_signup.json()['access_token']}"})
+    artist_id = artist_me.json()["id"]
+
+    db = SessionLocal()
+    try:
+        track = CatalogTrack(
+            id="unowned-upload",
+            canonical_title="Unowned Upload",
+            source_type="upload",
+            explicit=False,
+            is_published=True,
+            owner_user_id=None,
+        )
+        db.add(track)
+        db.flush()
+        artist = Artist(name="Legacy Upload Artist")
+        db.add(artist)
+        db.flush()
+        db.add(TrackArtist(track_id=track.id, artist_id=artist.id, role="primary", position=0))
+        db.add(
+            AudioAsset(
+                id="unowned-asset",
+                track_id=track.id,
+                storage_path=str(BACKEND_DIR / "tests" / ".tmp_media" / "missing.mp3"),
+                mime_type="audio/mpeg",
+                size_bytes=123,
+                kind="full",
+                is_primary=True,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    admin_headers = {"X-Admin-Api-Key": "test-admin-key"}
+    unowned = client.get("/api/admin/uploads/unowned", headers=admin_headers)
+    assert unowned.status_code == 200, unowned.text
+    assert any(row.get("id") == "unowned-upload" for row in unowned.json().get("tracks") or [])
+
+    claimed = client.post(
+        "/api/admin/uploads/unowned-upload/claim",
+        headers=admin_headers,
+        json={"owner_user_id": artist_id},
+    )
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["track"]["ownerUserId"] == artist_id
+
+    unowned_after = client.get("/api/admin/uploads/unowned", headers=admin_headers)
+    assert unowned_after.status_code == 200, unowned_after.text
+    assert not any(row.get("id") == "unowned-upload" for row in unowned_after.json().get("tracks") or [])
+
+
+def test_remote_storage_url_helpers(monkeypatch):
+    monkeypatch.setenv("S3_PUBLIC_BASE_URL", "https://cdn.example.com/media")
+    assert is_remote_storage_path("s3://bucket/offtrack/uploads/song.mp3")
+    assert remote_media_url("s3://bucket/offtrack/uploads/song.mp3") == "https://cdn.example.com/media/offtrack/uploads/song.mp3"
 
 
 def test_catalog_backfill_migrates_legacy_track_rows():
@@ -181,7 +397,12 @@ def test_search_finds_normalized_uploaded_tracks():
 
     signup = client.post(
         "/api/auth/signup",
-        json={"name": "Artist Search", "email": "artist-search@example.com", "password": "password123"},
+        json={
+            "name": "Artist Search",
+            "email": "artist-search@example.com",
+            "password": "password123",
+            "account_type": "artist",
+        },
     )
     assert signup.status_code == 200, signup.text
     token = signup.json()["access_token"]
@@ -200,6 +421,89 @@ def test_search_finds_normalized_uploaded_tracks():
     assert res.status_code == 200, res.text
     results = res.json().get("results") or []
     assert any(item.get("id") == uploaded_id and item.get("title") == "Searchable Upload" for item in results)
+
+
+def test_catalog_sync_ingests_seed_provider_tracks():
+    _fresh_client()
+    db = SessionLocal()
+    try:
+        result = sync_current_catalog(
+            db,
+            query="Provider Song",
+            limit=1,
+            enrich=False,
+            seed_tracks=[
+                ProviderTrack(
+                    title="Provider Song",
+                    artist="Provider Artist",
+                    provider="musicbrainz",
+                    provider_track_id="mbid-provider-song",
+                    provider_artist_id="mbid-provider-artist",
+                    provider_album_id="mbid-provider-release",
+                    provider_url="https://musicbrainz.org/recording/mbid-provider-song",
+                    album_title="Provider Album",
+                    release_date="2026-04-17",
+                    duration_ms=180000,
+                    tags=["indie pop", "current"],
+                )
+            ],
+        )
+        assert result["ok"] is True
+        assert result["inserted"] == 1
+
+        track = db.query(CatalogTrack).filter(CatalogTrack.canonical_title == "Provider Song").first()
+        assert track is not None
+        assert track.release_year == 2026
+
+        ref = db.query(ExternalTrackRef).filter(ExternalTrackRef.provider_track_id == "mbid-provider-song").first()
+        assert ref is not None
+        assert ref.provider == "musicbrainz"
+
+        genres = [row.name for row in db.query(Genre).order_by(Genre.name.asc()).all()]
+        assert "current" in genres
+        assert "indie pop" in genres
+
+        run = db.query(CatalogSyncRun).first()
+        assert run is not None
+        assert run.status == "completed"
+    finally:
+        db.close()
+
+
+def test_profile_music_web_returns_track_artist_genre_graph():
+    client = _fresh_client()
+    db = SessionLocal()
+    try:
+        artist = Artist(name="Graph Artist")
+        genre = Genre(name="dream pop")
+        db.add_all([artist, genre])
+        db.flush()
+
+        track = CatalogTrack(
+            id="graph-track",
+            canonical_title="Graph Song",
+            source_type="catalog",
+            release_year=2026,
+            duration_ms=200000,
+            explicit=False,
+        )
+        db.add(track)
+        db.flush()
+        db.add(TrackArtist(track_id=track.id, artist_id=artist.id, role="primary", position=0))
+        db.add(TrackGenre(track_id=track.id, genre_id=genre.id, source="test", weight=1.0))
+        db.add(Interaction(distinct_id="graph-user", track_id=track.id, event="like", source_page="test"))
+        db.commit()
+    finally:
+        db.close()
+
+    res = client.get("/api/profile/music-web?distinct_id=graph-user")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["hasData"] is True
+    node_labels = {node["label"] for node in body["nodes"]}
+    assert {"You", "Graph Song", "Graph Artist", "dream pop"}.issubset(node_labels)
+    assert body["stats"]["trackCount"] == 1
+    assert body["stats"]["interactionCount"] == 1
 
 
 def test_recommender_loads_from_normalized_catalog():

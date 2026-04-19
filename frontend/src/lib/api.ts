@@ -135,15 +135,87 @@ export async function apiRecommend(
 
 export async function apiFeedback(
   trackId: string,
-  event: "like" | "superlike" | "dislike" | "play" | "open_spotify" | "click_recommendation"
+  event:
+    | "like"
+    | "superlike"
+    | "dislike"
+    | "play"
+    | "play_start"
+    | "play_30s"
+    | "play_complete"
+    | "skip"
+    | "upload_play"
+    | "open_spotify"
+    | "click_recommendation"
+    | "artist_click"
+    | "genre_click",
+  context?: {
+    artistId?: number;
+    genreId?: number;
+    durationMs?: number;
+    playPositionMs?: number;
+    sourcePage?: string;
+    extra?: Record<string, unknown>;
+  }
 ): Promise<boolean> {
   const r = await apiFetch(`/api/feedback`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ track_id: trackId, event, distinct_id: getDistinctId() }),
+    body: JSON.stringify({
+      track_id: trackId,
+      event,
+      distinct_id: getDistinctId(),
+      artist_id: context?.artistId ?? null,
+      genre_id: context?.genreId ?? null,
+      duration_ms: context?.durationMs ?? null,
+      play_position_ms: context?.playPositionMs ?? null,
+      source_page: context?.sourcePage ?? null,
+      context: context?.extra ?? null,
+    }),
   });
   if (!r.ok) return false;
   return true;
+}
+
+export type MusicWebNode = {
+  id: string;
+  type: "user" | "track" | "artist" | "genre";
+  label: string;
+  subtitle?: string;
+  imageUrl?: string | null;
+  source?: string;
+  weight?: number;
+  lastEvent?: string;
+  lastSeenAt?: string;
+};
+
+export type MusicWebEdge = {
+  id: string;
+  source: string;
+  target: string;
+  relation: string;
+  weight: number;
+};
+
+export type MusicWebResponse = {
+  distinctId: string;
+  hasData: boolean;
+  nodes: MusicWebNode[];
+  edges: MusicWebEdge[];
+  stats: {
+    events?: Record<string, number>;
+    topArtists?: Array<{ name: string; score: number }>;
+    topGenres?: Array<{ name: string; score: number }>;
+    trackCount?: number;
+    interactionCount?: number;
+  };
+};
+
+export async function apiGetMusicWeb(limit = 120): Promise<MusicWebResponse> {
+  const q = new URLSearchParams({ distinct_id: getDistinctId(), limit: String(limit) });
+  const r = await apiFetch(`/api/profile/music-web?${q.toString()}`);
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as MusicWebResponse;
 }
 
 export async function apiGetTrackDetail(args: {
@@ -165,15 +237,30 @@ export type UploadedTrackItem = {
   title: string;
   artist?: string;
   imageUrl?: string | null;
-  audioUrl: string;
+  audioUrl?: string | null;
   mimeType?: string;
   sizeBytes?: number;
+  durationMs?: number | null;
+  waveformPeaks?: number[];
+  processingStatus?: string | null;
+  processingError?: string | null;
+  storageBackend?: string;
+  storagePath?: string | null;
+  ownerUserId?: number | null;
+  isPublished?: boolean;
   createdAt?: string;
 };
 
 export async function apiListUploads(limit = 50): Promise<UploadedTrackItem[]> {
   const r = await apiFetch(`/api/uploads?limit=${limit}`);
   if (!r.ok) return [];
+  const data = await r.json().catch(() => ({}));
+  return (data?.tracks ?? []) as UploadedTrackItem[];
+}
+
+export async function apiListManagedUploads(limit = 100): Promise<UploadedTrackItem[]> {
+  const r = await apiFetch(`/api/uploads/manage?limit=${limit}`);
+  if (!r.ok) throw new Error(await readError(r));
   const data = await r.json().catch(() => ({}));
   return (data?.tracks ?? []) as UploadedTrackItem[];
 }
@@ -193,6 +280,42 @@ export async function apiUploadNewTrack(args: {
   const r = await apiFetch(`/api/uploads`, { method: "POST", body: fd });
   if (!r.ok) throw new Error(await readError(r));
   return (await r.json()) as UploadedTrackItem;
+}
+
+export async function apiUpdateUpload(args: {
+  id: string;
+  title?: string;
+  artist?: string;
+  imageUrl?: string;
+  isPublished?: boolean;
+}): Promise<UploadedTrackItem> {
+  const r = await apiFetch(`/api/uploads/${encodeURIComponent(args.id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: args.title ?? undefined,
+      artist: args.artist ?? undefined,
+      image_url: args.imageUrl ?? undefined,
+      is_published: args.isPublished ?? undefined,
+    }),
+  });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as UploadedTrackItem;
+}
+
+export async function apiReplaceUploadAudio(args: { id: string; file: File }): Promise<UploadedTrackItem> {
+  const fd = new FormData();
+  fd.append("file", args.file);
+  const r = await apiFetch(`/api/uploads/${encodeURIComponent(args.id)}/replace`, { method: "POST", body: fd });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as UploadedTrackItem;
+}
+
+export async function apiUnpublishUpload(id: string): Promise<UploadedTrackItem | null> {
+  const r = await apiFetch(`/api/uploads/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(await readError(r));
+  const data = await r.json().catch(() => ({}));
+  return (data?.track ?? null) as UploadedTrackItem | null;
 }
 
 // -----------------------------
@@ -327,6 +450,30 @@ export type AdminAuditLog = {
   createdAt?: string;
 };
 
+export type CatalogSyncRun = {
+  id: string;
+  provider: string;
+  status: string;
+  query?: string | null;
+  inserted: number;
+  updated: number;
+  refs: number;
+  error?: string | null;
+  startedAt?: string;
+  finishedAt?: string | null;
+};
+
+export type CatalogSyncResult = {
+  ok: boolean;
+  runId: string;
+  inserted: number;
+  updated: number;
+  refs: number;
+  genres: number;
+  fetched: number;
+  providerNotes?: Record<string, string>;
+};
+
 async function adminFetch(path: string, adminApiKey: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   headers.set("X-Admin-Api-Key", adminApiKey);
@@ -369,4 +516,56 @@ export async function apiAdminAuditLogs(args: {
   if (!r.ok) throw new Error(await readError(r));
   const data = await r.json().catch(() => ({}));
   return (data?.logs ?? []) as AdminAuditLog[];
+}
+
+export async function apiAdminUnownedUploads(args: {
+  adminApiKey: string;
+  limit?: number;
+}): Promise<UploadedTrackItem[]> {
+  const limit = Math.max(1, Math.min(args.limit ?? 100, 200));
+  const r = await adminFetch(`/api/admin/uploads/unowned?limit=${limit}`, args.adminApiKey);
+  if (!r.ok) throw new Error(await readError(r));
+  const data = await r.json().catch(() => ({}));
+  return (data?.tracks ?? []) as UploadedTrackItem[];
+}
+
+export async function apiAdminClaimUploadOwner(args: {
+  adminApiKey: string;
+  uploadId: string;
+  ownerUserId: number;
+}): Promise<UploadedTrackItem | null> {
+  const r = await adminFetch(`/api/admin/uploads/${encodeURIComponent(args.uploadId)}/claim`, args.adminApiKey, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ owner_user_id: args.ownerUserId }),
+  });
+  if (!r.ok) throw new Error(await readError(r));
+  const data = await r.json().catch(() => ({}));
+  return (data?.track ?? null) as UploadedTrackItem | null;
+}
+
+export async function apiCatalogSyncStatus(limit = 5): Promise<CatalogSyncRun[]> {
+  const r = await apiFetch(`/api/catalog/sync/status?limit=${Math.max(1, Math.min(limit, 20))}`);
+  if (!r.ok) return [];
+  const data = await r.json().catch(() => ({}));
+  return (data?.runs ?? []) as CatalogSyncRun[];
+}
+
+export async function apiAdminCatalogSync(args: {
+  adminApiKey: string;
+  query?: string;
+  limit?: number;
+  enrich?: boolean;
+}): Promise<CatalogSyncResult> {
+  const r = await adminFetch(`/api/admin/catalog/sync`, args.adminApiKey, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query: args.query ?? "",
+      limit: Math.max(1, Math.min(args.limit ?? 10, 50)),
+      enrich: args.enrich ?? true,
+    }),
+  });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as CatalogSyncResult;
 }

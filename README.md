@@ -122,3 +122,51 @@ Set these env vars (backend):
 - `POSTHOG_API_KEY=...`
 
 The backend will emit events for search/recommend/preview/open_spotify and you can also call `POST /api/feedback` for likes/dislikes.
+
+## Catalog Sync Providers
+
+Catalog sync can enrich tracks from MusicBrainz, Last.fm, and Discogs. MusicBrainz and Discogs can run with an identifiable user agent; Last.fm requires an API key.
+
+```bash
+OFFTRACK_CONTACT_URL=https://your-site.example
+MUSICBRAINZ_USER_AGENT="Offtrack/0.1 (https://your-site.example)"
+LASTFM_API_KEY=...
+LASTFM_USER_AGENT=Offtrack/0.1
+DISCOGS_TOKEN=...
+DISCOGS_USER_AGENT="Offtrack/0.1 +https://your-site.example"
+```
+
+Run a sync from the admin panel, or directly:
+
+```bash
+curl -X POST http://localhost:8000/api/admin/catalog/sync \
+  -H "X-Admin-Api-Key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"indie pop","limit":10,"enrich":true}'
+```
+
+## Media Storage
+
+Artist-uploaded audio uses local disk by default:
+
+```bash
+MEDIA_STORAGE_BACKEND=local
+MEDIA_DIR=/app/media
+```
+
+For S3-compatible storage such as Cloudflare R2:
+
+```bash
+MEDIA_STORAGE_BACKEND=s3
+S3_BUCKET=your-bucket
+S3_KEY_PREFIX=offtrack
+S3_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
+S3_REGION=auto
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+# Optional. If omitted, stream endpoints generate signed URLs.
+S3_PUBLIC_BASE_URL=https://cdn.example.com
+S3_SIGNED_URL_TTL_SEC=3600
+```
+
+The database stores remote audio paths as `s3://bucket/key`; playback endpoints redirect browsers to the public or signed media URL.

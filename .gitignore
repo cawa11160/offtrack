@@ -16,9 +16,13 @@
 **/.pytest_cache/
 **/.coverage
 **/htmlcov/
+pytest-cache-files-*/
 backend/pytest-cache-files-*/
 backend/*.sqlite3
 backend/tests/.tmp_media/
+backend/media/
+backend/uploads/
+backend/reels/
 
 # OS
 **/.DS_Store

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, createContext, useContext } from "react";
+import { useCallback, useEffect, useMemo, useState, createContext, useContext } from "react";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").trim().replace(/\/$/, "");
 const TOKEN_KEY = "offtrack_access_token";
@@ -7,7 +7,7 @@ function makeUrl(path: string) {
   return API_BASE ? `${API_BASE}${path}` : path;
 }
 
-export type Me = { id: number; email: string; name?: string | null };
+export type Me = { id: number; email: string; name?: string | null; account_type?: "listener" | "artist" };
 
 export function getAccessToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -82,7 +82,7 @@ type AuthState = {
   login: (email: string, password: string) => Promise<void>;
   signup: (name: string, email: string, password: string, accountType?: "listener" | "artist") => Promise<void>;
   logout: () => Promise<void>;
-  refreshMe: () => Promise<void>;
+  refreshMe: (nextToken?: string) => Promise<void>;
 };
 
 const AuthCtx = createContext<AuthState | null>(null);
@@ -92,8 +92,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<Me | null>(null);
   const [loading, setLoading] = useState(true);
 
-  async function refreshMe() {
-    const t = token ?? getAccessToken();
+  const refreshMe = useCallback(async (nextToken?: string) => {
+    const t = nextToken ?? token ?? getAccessToken();
     if (!t) {
       setUser(null);
       return;
@@ -115,7 +115,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(null);
       }
     }
-  }
+  }, [token]);
 
   useEffect(() => {
     (async () => {
@@ -126,30 +126,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function login(email: string, password: string) {
+  const login = useCallback(async (email: string, password: string) => {
     const r = await apiLogin({ email, password });
     setAccessToken(r.access_token);
     setToken(r.access_token);
-    await refreshMe();
-  }
+    await refreshMe(r.access_token);
+  }, [refreshMe]);
 
-  async function signup(name: string, email: string, password: string, accountType: "listener" | "artist" = "listener") {
+  const signup = useCallback(async (name: string, email: string, password: string, accountType: "listener" | "artist" = "listener") => {
     const r = await apiSignup({ name, email, password, account_type: accountType });
     setAccessToken(r.access_token);
     setToken(r.access_token);
-    await refreshMe();
-  }
+    await refreshMe(r.access_token);
+  }, [refreshMe]);
 
-  async function logout() {
+  const logout = useCallback(async () => {
     await apiLogout().catch(() => {});
     clearAccessToken();
     setToken(null);
     setUser(null);
-  }
+  }, []);
 
   const value = useMemo<AuthState>(
     () => ({ user, token, loading, login, signup, logout, refreshMe }),
-    [user, token, loading]
+    [user, token, loading, login, signup, logout, refreshMe]
   );
 
   return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;

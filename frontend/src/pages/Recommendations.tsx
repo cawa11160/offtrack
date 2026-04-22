@@ -107,6 +107,7 @@ export default function Recommendations() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const spotifySessionRef = useRef<SpotifySession | null>(null);
   const [playingId, setPlayingId] = useState<string>("");
+  const [isPlaying, setIsPlaying] = useState(false);
   const playback = usePlaybackMilestones("recommendations");
 
   useEffect(() => {
@@ -198,10 +199,12 @@ export default function Recommendations() {
   const stopAudio = useCallback(() => {
     playback.skip();
     const a = audioRef.current;
-    if (!a) return;
-    a.pause();
-    a.currentTime = 0;
+    if (a) {
+      a.pause();
+      a.currentTime = 0;
+    }
     setPlayingId("");
+    setIsPlaying(false);
   }, [playback]);
 
   async function playViaSpotify(rec: Rec): Promise<boolean> {
@@ -250,8 +253,34 @@ export default function Recommendations() {
     const fullAudioUrl = rec.audioUrl ? apiUrl(rec.audioUrl) : "";
     const src = fullAudioUrl || rec.previewUrl || "";
 
-    if (playingId && playingId === rec.id && !a.paused) {
+    if (playingId === rec.id) {
+      if (!a.paused) {
+        a.pause();
+        setIsPlaying(false);
+        return;
+      }
+
+      if (a.src) {
+        try {
+          await a.play();
+          setIsPlaying(true);
+          playback.start(
+            { id: rec.id, title: rec.title, artist: rec.artist, sourceKind: fullAudioUrl ? "upload" : "preview" },
+            rec.durationMs ?? undefined
+          );
+          return;
+        } catch {
+          setIsPlaying(false);
+        }
+      }
+    }
+
+    if (playingId && playingId !== rec.id) {
       stopAudio();
+    }
+
+    if (!src && playingId === rec.id) {
+      setPlayingId("");
       return;
     }
 
@@ -261,6 +290,7 @@ export default function Recommendations() {
         a.src = src;
         await a.play();
         setPlayingId(rec.id);
+        setIsPlaying(true);
         phCapture(fullAudioUrl ? "play_full" : "play_preview", {
           track_id: rec.id,
           title: rec.title,
@@ -480,6 +510,8 @@ export default function Recommendations() {
         <audio
           ref={audioRef}
           className="hidden"
+          onPlay={() => setIsPlaying(true)}
+          onPause={() => setIsPlaying(false)}
           onTimeUpdate={(event) => {
             const audio = event.currentTarget;
             playback.progress(audio.currentTime || 0, Number.isFinite(audio.duration) ? audio.duration : undefined);
@@ -489,6 +521,7 @@ export default function Recommendations() {
             playback.progress(audio.currentTime || 0, Number.isFinite(audio.duration) ? audio.duration : undefined);
             playback.complete();
             setPlayingId("");
+            setIsPlaying(false);
           }}
         />
 
@@ -518,10 +551,10 @@ export default function Recommendations() {
                           disabled={!rec || (!rec.audioUrl && !rec.previewUrl && !rec.spotifyUrl && !rec.spotifyUri)}
                           onClick={() => (rec ? onPlay(rec) : undefined)}
                           className={`h-[38px] w-full rounded-[10px] font-['Arimo',sans-serif] text-[20px] font-bold leading-none text-black disabled:cursor-not-allowed disabled:opacity-60 ${
-                            rec && playingId === rec.id ? "bg-[#969696]" : "bg-[#ababab]"
+                            rec && playingId === rec.id && isPlaying ? "bg-[#969696]" : "bg-[#ababab]"
                           }`}
                         >
-                          Play
+                          {rec && playingId === rec.id && isPlaying ? "Pause" : "Play"}
                         </button>
                         <button
                           type="button"

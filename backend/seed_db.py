@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 import hashlib
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from db import engine, DATABASE_URL, SessionLocal, wait_for_db
 from catalog_sync import ensure_catalog_backfill
@@ -29,10 +29,86 @@ RENAME_MAP = {
     "image": "image_url",
 }
 
+REQUIRED_MIGRATED_SCHEMA = {
+    "tracks": {"id", "name", "artists"},
+    "interactions": {
+        "id",
+        "track_id",
+        "event",
+        "user_id",
+        "artist_id",
+        "genre_id",
+        "duration_ms",
+        "play_position_ms",
+        "source_page",
+        "context_json",
+    },
+    "users": {"id", "email", "account_type"},
+    "catalog_tracks": {"id", "canonical_title", "is_published", "owner_user_id"},
+    "audio_features": {"track_id", "feature_source"},
+    "audio_assets": {
+        "id",
+        "track_id",
+        "duration_ms",
+        "waveform_peaks_json",
+        "processing_status",
+        "processing_error",
+    },
+    "catalog_sync_runs": {"id", "provider", "status", "started_at", "finished_at"},
+}
+
 
 def stable_id(name: str, artists: str, year: int) -> str:
     s = f"{name}||{artists}||{year}"
     return hashlib.md5(s.encode("utf-8")).hexdigest()
+
+
+def env_truthy(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def table_count(conn, table_name: str) -> int:
+    return int(conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar_one())
+
+
+def seed_is_ready() -> bool:
+    inspector = inspect(engine)
+    required = {"tracks", "catalog_tracks", "audio_features"}
+    existing = set(inspector.get_table_names())
+    if not required.issubset(existing):
+        return False
+
+    with engine.connect() as conn:
+        return (
+            table_count(conn, "tracks") > 0
+            and table_count(conn, "catalog_tracks") > 0
+            and table_count(conn, "audio_features") > 0
+        )
+
+
+def validate_migrated_schema() -> None:
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    missing_tables = sorted(set(REQUIRED_MIGRATED_SCHEMA) - existing_tables)
+    if missing_tables:
+        raise RuntimeError(
+            "Database schema is not migrated. Missing tables: "
+            + ", ".join(missing_tables)
+            + ". Run `alembic -c alembic.ini upgrade head` before seeding."
+        )
+
+    missing_columns: list[str] = []
+    for table_name, required_columns in REQUIRED_MIGRATED_SCHEMA.items():
+        existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
+        for column in sorted(required_columns - existing_columns):
+            missing_columns.append(f"{table_name}.{column}")
+
+    if missing_columns:
+        raise RuntimeError(
+            "Database schema is not migrated. Missing columns: "
+            + ", ".join(missing_columns)
+            + ". Run `alembic -c alembic.ini upgrade head` before seeding."
+        )
 
 
 def main():
@@ -43,6 +119,12 @@ def main():
         raise FileNotFoundError(f"CSV not found: {DATA_CSV}")
 
     wait_for_db(timeout_s=45)
+    validate_migrated_schema()
+
+    if env_truthy("OFFTRACK_SEED_SKIP_IF_READY") and not env_truthy("OFFTRACK_SEED_FORCE"):
+        if seed_is_ready():
+            print("Seed skipped: existing catalog is already ready.")
+            return
 
     df = pd.read_csv(DATA_CSV)
     if len(df) == 0:

@@ -1521,29 +1521,57 @@ def reload_now():
 # -----------------------------
 # Search
 # -----------------------------
+def _catalog_search_schema_ready() -> bool:
+    inspector = inspect(engine)
+    required = {
+        "catalog_tracks": {column.name for column in CatalogTrack.__table__.columns},
+        "audio_features": {column.name for column in AudioFeatures.__table__.columns},
+        "track_artists": {column.name for column in TrackArtist.__table__.columns},
+        "artists": {column.name for column in Artist.__table__.columns},
+    }
+    existing_tables = set(inspector.get_table_names())
+    if not set(required).issubset(existing_tables):
+        return False
+
+    for table_name, columns in required.items():
+        existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+        if not columns.issubset(existing_columns):
+            return False
+
+    return True
+
+
 def db_search(db: Session, q: str, limit: int = 8):
     q2 = f"%{q}%"
-    ranked_track_ids = (
-        db.query(
-            CatalogTrack.id.label("track_id"),
-            func.max(func.coalesce(AudioFeatures.popularity, -1)).label("rank_popularity"),
-            func.max(CatalogTrack.created_at).label("rank_created_at"),
-        )
-        .outerjoin(AudioFeatures, AudioFeatures.track_id == CatalogTrack.id)
-        .outerjoin(TrackArtist, TrackArtist.track_id == CatalogTrack.id)
-        .outerjoin(Artist, Artist.id == TrackArtist.artist_id)
-        .filter(
-            CatalogTrack.is_published.is_(True),
-            or_(CatalogTrack.canonical_title.ilike(q2), Artist.name.ilike(q2)),
-        )
-        .group_by(CatalogTrack.id)
-        .order_by(
-            func.max(func.coalesce(AudioFeatures.popularity, -1)).desc(),
-            func.max(CatalogTrack.created_at).desc(),
-        )
-        .limit(int(limit))
-        .all()
-    )
+    ranked_track_ids = []
+
+    if _catalog_search_schema_ready():
+        try:
+            ranked_track_ids = (
+                db.query(
+                    CatalogTrack.id.label("track_id"),
+                    func.max(func.coalesce(AudioFeatures.popularity, -1)).label("rank_popularity"),
+                    func.max(CatalogTrack.created_at).label("rank_created_at"),
+                )
+                .outerjoin(AudioFeatures, AudioFeatures.track_id == CatalogTrack.id)
+                .outerjoin(TrackArtist, TrackArtist.track_id == CatalogTrack.id)
+                .outerjoin(Artist, Artist.id == TrackArtist.artist_id)
+                .filter(
+                    CatalogTrack.is_published.is_(True),
+                    or_(CatalogTrack.canonical_title.ilike(q2), Artist.name.ilike(q2)),
+                )
+                .group_by(CatalogTrack.id)
+                .order_by(
+                    func.max(func.coalesce(AudioFeatures.popularity, -1)).desc(),
+                    func.max(CatalogTrack.created_at).desc(),
+                )
+                .limit(int(limit))
+                .all()
+            )
+        except SQLAlchemyError:
+            db.rollback()
+            ranked_track_ids = []
+
     track_ids = [row.track_id for row in ranked_track_ids]
     if track_ids:
         rows = (

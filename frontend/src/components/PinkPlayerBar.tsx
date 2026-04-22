@@ -218,14 +218,25 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
     if (isPlaying) {
       audio.pause();
       setIsPlaying(false);
-      playback.skip();
       return;
     }
     if (audioLibrary.length === 0) return;
 
-    // User asked for a different song every time Play is pressed.
-    const next = getNextIndex(activeIndex);
-    await playTrack(next);
+    if (audio.src && !audio.ended && activeSong) {
+      try {
+        await audio.play();
+        setIsPlaying(true);
+        playback.start(
+          { id: activeSong.id, title: activeSong.title, artist: activeSong.artist, sourceKind: activeSong.sourceKind },
+          activeSong.duration ? activeSong.duration * 1000 : undefined
+        );
+      } catch {
+        setIsPlaying(false);
+      }
+      return;
+    }
+
+    await playTrack(activeIndex);
   };
 
   const onSeek = (value: number) => {

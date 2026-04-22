@@ -21,6 +21,9 @@ services:
       # In compose, backend talks to db via service name "db"
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/offtrack
       ALLOW_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+      OFFTRACK_AUTO_MIGRATE: ${OFFTRACK_AUTO_MIGRATE-true}
+      OFFTRACK_AUTO_SEED: ${OFFTRACK_AUTO_SEED-true}
+      OFFTRACK_SEED_SKIP_IF_READY: ${OFFTRACK_SEED_SKIP_IF_READY-true}
       # Optional Spotify creds:
       SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID-}
       SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET-}

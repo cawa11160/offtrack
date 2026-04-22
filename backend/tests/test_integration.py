@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 # Ensure backend module directory is importable when tests are run from repo root.
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -25,7 +26,7 @@ os.environ.setdefault("SPOTIFY_CLIENT_SECRET", "test-secret")
 os.environ.setdefault("FRONTEND_URL", "http://localhost:8080")
 os.environ["ADMIN_API_KEY"] = "test-admin-key"
 
-from api import app  # noqa: E402
+from api import app, db_search  # noqa: E402
 from catalog_ingest import sync_current_catalog  # noqa: E402
 from catalog_sync import ensure_catalog_backfill  # noqa: E402
 from db import SessionLocal, engine  # noqa: E402
@@ -67,6 +68,58 @@ def _wav_bytes(duration_s: float = 0.25, sample_rate: int = 8000) -> bytes:
             frames.extend(struct.pack("<h", value))
         wav.writeframes(bytes(frames))
     return buf.getvalue()
+
+
+def _legacy_track_row(track_id: str, name: str, artists: str, popularity: int = 50) -> dict:
+    return {
+        "id": track_id,
+        "name": name,
+        "artists": artists,
+        "image_url": "",
+        "year": 2020,
+        "valence": 0.5,
+        "acousticness": 0.2,
+        "danceability": 0.7,
+        "duration_ms": 180000,
+        "energy": 0.8,
+        "explicit": False,
+        "instrumentalness": 0.0,
+        "key": 1,
+        "liveness": 0.1,
+        "loudness": -6.0,
+        "mode": 1,
+        "popularity": popularity,
+        "speechiness": 0.05,
+        "tempo": 120.0,
+    }
+
+
+def test_recommendation_and_search_fall_back_when_catalog_schema_is_stale():
+    Base.metadata.drop_all(engine)
+    Track.__table__.create(bind=engine, checkfirst=True)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE catalog_tracks (id VARCHAR PRIMARY KEY, canonical_title TEXT)"))
+        conn.execute(
+            Track.__table__.insert(),
+            [
+                _legacy_track_row("seed-track", "Seed Song", "Seed Artist", 80),
+                _legacy_track_row("rec-track-1", "Recommended One", "Artist One", 70),
+                _legacy_track_row("rec-track-2", "Recommended Two", "Artist Two", 60),
+            ],
+        )
+
+    recommender = Recommender()
+    recommender.load()
+    recs = recommender.recommend([{"title": "Seed Song"}], n=2)
+    assert len(recs) >= 1
+    assert all(row["id"] != "seed-track" for row in recs)
+
+    db = SessionLocal()
+    try:
+        results = db_search(db, "Recommended", limit=2)
+    finally:
+        db.close()
+    assert [row["id"] for row in results] == ["rec-track-1", "rec-track-2"]
 
 
 def test_auth_signup_login_and_upload_authorization():

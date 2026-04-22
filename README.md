@@ -8,29 +8,34 @@
 docker compose up --build -d
 ```
 
-2. Run migrations:
+The backend container waits for Postgres, runs Alembic migrations, and seeds the
+catalog automatically. On later restarts it skips seeding when the catalog is
+already ready.
 
-```bash
-docker compose run --rm backend alembic -c alembic.ini upgrade head
-```
-
-3. Seed Postgres:
-
-```bash
-docker compose run --rm backend python seed_db.py
-```
-
-4. Run backend tests:
+2. Run backend tests:
 
 ```bash
 docker compose run --rm backend python -m pytest tests/test_integration.py -q
 ```
 
-5. Open:
+3. Open:
 
 - Frontend: http://localhost:8080
 - Backend health: http://localhost:8000/api/ping
 - DB status: http://localhost:8000/api/db_status
+
+To force reseeding in Docker:
+
+```bash
+OFFTRACK_SEED_FORCE=true docker compose up --build
+```
+
+PowerShell:
+
+```powershell
+$env:OFFTRACK_SEED_FORCE = "true"
+docker compose up --build
+```
 
 ## Dev (Local, no Docker)
 

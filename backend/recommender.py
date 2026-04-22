@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import selectinload
 
 from db import SessionLocal, engine, wait_for_db
@@ -86,18 +87,43 @@ class Recommender:
     feat_mu: Optional[np.ndarray] = None
     feat_sigma: Optional[np.ndarray] = None
 
+    def _catalog_schema_ready(self) -> bool:
+        inspector = inspect(engine)
+        required_tables = {"catalog_tracks", "audio_features", "track_artists", "artists"}
+        existing_tables = set(inspector.get_table_names())
+        if not required_tables.issubset(existing_tables):
+            return False
+
+        required_columns = {
+            "catalog_tracks": {column.name for column in CatalogTrack.__table__.columns},
+            "audio_features": {column.name for column in AudioFeatures.__table__.columns},
+            "track_artists": {column.name for column in TrackArtist.__table__.columns},
+        }
+        for table_name, expected in required_columns.items():
+            existing = {column["name"] for column in inspector.get_columns(table_name)}
+            if not expected.issubset(existing):
+                return False
+
+        return True
+
     def _load_dataframe_from_catalog(self) -> pd.DataFrame:
+        if not self._catalog_schema_ready():
+            return pd.DataFrame()
+
         with SessionLocal() as db:
-            rows = (
-                db.query(CatalogTrack)
-                .options(
-                    selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
-                    selectinload(CatalogTrack.audio_features),
+            try:
+                rows = (
+                    db.query(CatalogTrack)
+                    .options(
+                        selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+                        selectinload(CatalogTrack.audio_features),
+                    )
+                    .filter(CatalogTrack.source_type == "catalog")
+                    .order_by(CatalogTrack.created_at.asc(), CatalogTrack.id.asc())
+                    .all()
                 )
-                .filter(CatalogTrack.source_type == "catalog")
-                .order_by(CatalogTrack.created_at.asc(), CatalogTrack.id.asc())
-                .all()
-            )
+            except SQLAlchemyError:
+                return pd.DataFrame()
 
             records: List[Dict[str, Any]] = []
             for row in rows:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
+import secrets
 import time
 import uuid
 import mimetypes
@@ -46,7 +48,7 @@ from models import (
     UploadedTrack,
     User,
 )
-from models import PaymentMethod, BillingReceipt, SecurityAuditLog
+from models import PaymentMethod, BillingReceipt, RefreshSession, SecurityAuditLog
 from recommender import get_recommender
 from analytics import get_analytics
 from audio_processing import process_audio_file, validate_audio_upload
@@ -239,6 +241,10 @@ def _check_upload_secret(request: Request) -> bool:
     """
     if not UPLOAD_SECRET:
         return True
+    return _has_valid_upload_secret(request)
+
+
+def _has_valid_upload_secret(request: Request) -> bool:
     got = (request.headers.get("X-Upload-Secret") or "").strip()
     if not got:
         got = (request.query_params.get("secret") or "").strip()
@@ -409,6 +415,11 @@ JWT_SECRET = os.getenv("JWT_SECRET", "dev_change_me").strip()
 JWT_ALG = os.getenv("JWT_ALG", "HS256").strip() or "HS256"
 ACCESS_TTL_MIN = int(os.getenv("ACCESS_TTL_MIN", "30"))
 REFRESH_TTL_DAYS = int(os.getenv("REFRESH_TTL_DAYS", "30"))
+PASSWORD_MIN_LENGTH = int(os.getenv("PASSWORD_MIN_LENGTH", "10"))
+EMAIL_VERIFICATION_TOKEN_TTL_HOURS = int(os.getenv("EMAIL_VERIFICATION_TOKEN_TTL_HOURS", "24"))
+EMAIL_VERIFICATION_REQUIRED_FOR_ARTIST_UPLOADS = (
+    os.getenv("EMAIL_VERIFICATION_REQUIRED_FOR_ARTIST_UPLOADS", "true").strip().lower() in ("1", "true", "yes", "on")
+)
 
 REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "offtrack_refresh").strip() or "offtrack_refresh"
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
@@ -451,15 +462,128 @@ def _encode(payload: dict) -> str:
 def _decode(token: str) -> dict:
     return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
 
+
+def _hash_email_verification_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _issue_email_verification(user: User) -> str:
+    token = secrets.token_urlsafe(32)
+    user.email_verification_token_hash = _hash_email_verification_token(token)
+    user.email_verification_sent_at = _now_utc()
+    return token
+
+
+def _verification_url(req: Request, token: str) -> str:
+    return f"{req.url_for('auth_verify_email')}?token={quote(token)}"
+
+
+def _email_verified(user: User) -> bool:
+    return _coerce_utc_datetime(getattr(user, "email_verified_at", None)) is not None
+
+
+def _password_policy_error(password: str) -> str | None:
+    if len(password or "") < PASSWORD_MIN_LENGTH:
+        return f"Password must be at least {PASSWORD_MIN_LENGTH} characters."
+    if not any(ch.isalpha() for ch in password):
+        return "Password must include at least one letter."
+    if not any(ch.isdigit() for ch in password):
+        return "Password must include at least one number."
+    return None
+
 def _create_access_token(user_id: int) -> str:
     now = _now_utc()
     exp = now + timedelta(minutes=ACCESS_TTL_MIN)
     return _encode({"sub": str(user_id), "type": "access", "iat": int(now.timestamp()), "exp": int(exp.timestamp())})
 
-def _create_refresh_token(user_id: int) -> str:
+def _encode_refresh_token(user_id: int, session_id: str, expires_at: datetime) -> str:
     now = _now_utc()
-    exp = now + timedelta(days=REFRESH_TTL_DAYS)
-    return _encode({"sub": str(user_id), "type": "refresh", "iat": int(now.timestamp()), "exp": int(exp.timestamp())})
+    return _encode(
+        {
+            "sub": str(user_id),
+            "type": "refresh",
+            "jti": session_id,
+            "iat": int(now.timestamp()),
+            "exp": int(expires_at.timestamp()),
+        }
+    )
+
+
+def _hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _create_refresh_session(db: Session, user_id: int, req: Request) -> tuple[str, RefreshSession]:
+    session_id = str(uuid.uuid4())
+    expires_at = _now_utc() + timedelta(days=REFRESH_TTL_DAYS)
+    token = _encode_refresh_token(user_id, session_id, expires_at)
+    row = RefreshSession(
+        id=session_id,
+        user_id=int(user_id),
+        token_hash=_hash_refresh_token(token),
+        expires_at=expires_at,
+        ip=_client_ip(req),
+        user_agent=(req.headers.get("user-agent") or "")[:1000] or None,
+    )
+    db.add(row)
+    return token, row
+
+
+def _revoke_refresh_session(row: RefreshSession, replaced_by_session_id: str | None = None) -> None:
+    if not getattr(row, "revoked_at", None):
+        row.revoked_at = _now_utc()
+    if replaced_by_session_id:
+        row.replaced_by_session_id = replaced_by_session_id
+
+
+def _revoke_user_refresh_sessions(db: Session, user_id: int) -> int:
+    now = _now_utc()
+    rows = (
+        db.query(RefreshSession)
+        .filter(RefreshSession.user_id == int(user_id), RefreshSession.revoked_at.is_(None))
+        .all()
+    )
+    for row in rows:
+        row.revoked_at = now
+    return len(rows)
+
+
+def _refresh_session_from_token(db: Session, token: str) -> tuple[dict, User, RefreshSession]:
+    try:
+        data = _decode(token)
+        if data.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user_id = int(data["sub"])
+        session_id = str(data["jti"])
+    except (JWTError, KeyError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        row = db.query(RefreshSession).filter(RefreshSession.id == session_id).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.")
+    if not row or int(row.user_id) != int(user_id) or row.token_hash != _hash_refresh_token(token):
+        raise HTTPException(status_code=401, detail="Invalid refresh session")
+
+    if getattr(row, "revoked_at", None):
+        try:
+            _revoke_user_refresh_sessions(db, user_id)
+            db.commit()
+        except Exception:
+            db.rollback()
+        raise HTTPException(status_code=401, detail="Refresh session revoked")
+
+    expires_at = _coerce_utc_datetime(getattr(row, "expires_at", None))
+    if not expires_at or expires_at <= _now_utc():
+        _revoke_refresh_session(row)
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
+        raise HTTPException(status_code=401, detail="Refresh session expired")
+
+    user = _active_user_from_id(db, user_id)
+    return data, user, row
 
 def _set_refresh_cookie(resp: Response, token: str) -> None:
     # If COOKIE_SAMESITE is "none", Secure must be true in modern browsers.
@@ -489,12 +613,25 @@ class LoginIn(BaseModel):
 
 class AuthOut(BaseModel):
     access_token: str
+    email_verification_url: str | None = None
+    email_verified: bool = False
 
 class MeOut(BaseModel):
     id: int
     email: EmailStr
     name: str | None = None
     account_type: str = "listener"
+    email_verified: bool = False
+
+
+class VerifyEmailOut(BaseModel):
+    ok: bool
+    email_verified: bool = True
+
+
+class ResendVerificationOut(BaseModel):
+    ok: bool
+    email_verification_url: str | None = None
 
 
 class PaymentMethodIn(BaseModel):
@@ -596,6 +733,33 @@ def get_current_user_id(req: Request) -> int:
     except (JWTError, KeyError, ValueError):
         raise HTTPException(status_code=401, detail="Invalid token")
 
+
+def _active_user_from_id(db: Session, user_id: int) -> User:
+    try:
+        user = db.query(User).filter(User.id == int(user_id)).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.")
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    locked_until = _coerce_utc_datetime(getattr(user, "locked_until", None))
+    if locked_until and locked_until > _now_utc():
+        retry_after = int((locked_until - _now_utc()).total_seconds())
+        raise HTTPException(status_code=423, detail=f"Account locked. Retry in {max(1, retry_after)}s.")
+    return user
+
+
+def _require_active_user(req: Request, db: Session) -> User:
+    return _active_user_from_id(db, get_current_user_id(req))
+
+
+def _require_artist_user(req: Request, db: Session) -> User:
+    user = _require_active_user(req, db)
+    if (getattr(user, "account_type", "listener") or "listener").strip().lower() != "artist":
+        raise HTTPException(status_code=403, detail="Artist account required")
+    if EMAIL_VERIFICATION_REQUIRED_FOR_ARTIST_UPLOADS and not _email_verified(user):
+        raise HTTPException(status_code=403, detail="Verify your email before using artist uploads")
+    return user
+
 @app.post("/api/auth/signup", response_model=AuthOut)
 def auth_signup(payload: SignupIn, req: Request, resp: Response, db: Session = Depends(get_db)):
     _enforce_rate_limit("signup", req, RATE_LIMIT_SIGNUP_PER_MIN, 60)
@@ -604,13 +768,19 @@ def auth_signup(payload: SignupIn, req: Request, resp: Response, db: Session = D
     account_type = (payload.account_type or "listener").strip().lower()
     if account_type not in {"listener", "artist"}:
         account_type = "listener"
+    policy_error = _password_policy_error(payload.password)
+    if policy_error:
+        raise HTTPException(status_code=422, detail=policy_error)
     try:
         exists = db.query(User).filter(User.email == email).first()
         if exists:
             raise HTTPException(status_code=409, detail="Email already exists")
 
         user = User(email=email, name=name, account_type=account_type, password_hash=_hash_password(payload.password))
+        verification_token = _issue_email_verification(user)
         db.add(user)
+        db.flush()
+        refresh, _ = _create_refresh_session(db, user.id, req)
         db.commit()
         db.refresh(user)
     except HTTPException:
@@ -624,9 +794,13 @@ def auth_signup(payload: SignupIn, req: Request, resp: Response, db: Session = D
         raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.")
 
     access = _create_access_token(user.id)
-    refresh = _create_refresh_token(user.id)
     _set_refresh_cookie(resp, refresh)
-    return {"access_token": access}
+    _audit_log(action="auth_signup", user_id=user.id, email=email, req=req, meta={"account_type": account_type})
+    return {
+        "access_token": access,
+        "email_verification_url": _verification_url(req, verification_token),
+        "email_verified": _email_verified(user),
+    }
 
 @app.post("/api/auth/login", response_model=AuthOut)
 def auth_login(payload: LoginIn, req: Request, resp: Response, db: Session = Depends(get_db)):
@@ -648,47 +822,119 @@ def auth_login(payload: LoginIn, req: Request, resp: Response, db: Session = Dep
         _audit_log(action="auth_login_failed", user_id=(user.id if user else None), email=email, req=req, reason="invalid_credentials")
         raise HTTPException(status_code=401, detail="Invalid credentials")
     _record_auth_result(email, ip, ok=True)
+    try:
+        refresh, _ = _create_refresh_session(db, user.id, req)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not create session. Please try again.")
     _audit_log(action="auth_login_success", user_id=user.id, email=email, req=req)
 
     access = _create_access_token(user.id)
-    refresh = _create_refresh_token(user.id)
     _set_refresh_cookie(resp, refresh)
-    return {"access_token": access}
+    return {"access_token": access, "email_verified": _email_verified(user)}
 
 @app.post("/api/auth/refresh", response_model=AuthOut)
-def auth_refresh(req: Request, resp: Response):
+def auth_refresh(req: Request, resp: Response, db: Session = Depends(get_db)):
     token = req.cookies.get(REFRESH_COOKIE_NAME)
     if not token:
         raise HTTPException(status_code=401, detail="Missing refresh token")
     try:
-        data = _decode(token)
-        if data.get("type") != "refresh":
-            raise HTTPException(status_code=401, detail="Invalid token")
-        user_id = int(data["sub"])
-    except (JWTError, KeyError, ValueError):
-        raise HTTPException(status_code=401, detail="Invalid token")
+        _, user, old_session = _refresh_session_from_token(db, token)
+        new_refresh, new_session = _create_refresh_session(db, user.id, req)
+        old_session.last_used_at = _now_utc()
+        _revoke_refresh_session(old_session, replaced_by_session_id=new_session.id)
+        db.commit()
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not refresh session. Please try again.")
 
-    access = _create_access_token(user_id)
-    # rotate refresh
-    new_refresh = _create_refresh_token(user_id)
+    access = _create_access_token(user.id)
     _set_refresh_cookie(resp, new_refresh)
-    return {"access_token": access}
+    _audit_log(action="auth_refresh", user_id=user.id, email=user.email, req=req)
+    return {"access_token": access, "email_verified": _email_verified(user)}
 
 @app.post("/api/auth/logout")
-def auth_logout(resp: Response):
+def auth_logout(req: Request, resp: Response, db: Session = Depends(get_db)):
+    refresh_token = req.cookies.get(REFRESH_COOKIE_NAME)
+    revoked_session_id = None
+    user_id = None
+    if refresh_token:
+        try:
+            _, user, row = _refresh_session_from_token(db, refresh_token)
+            _revoke_refresh_session(row)
+            db.commit()
+            revoked_session_id = row.id
+            user_id = user.id
+        except HTTPException:
+            db.rollback()
+        except SQLAlchemyError:
+            db.rollback()
     _clear_refresh_cookie(resp)
+    if user_id is None:
+        try:
+            user_id = get_current_user_id(req)
+        except HTTPException:
+            user_id = None
+    _audit_log(action="auth_logout", user_id=user_id, req=req, meta={"refresh_session_id": revoked_session_id})
     return {"ok": True}
 
 @app.get("/api/auth/me", response_model=MeOut)
 def auth_me(req: Request, db: Session = Depends(get_db)):
-    user_id = get_current_user_id(req)
+    user = _require_active_user(req, db)
+    return {
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+        "account_type": user.account_type or "listener",
+        "email_verified": _email_verified(user),
+    }
+
+
+@app.get("/api/auth/verify-email", response_model=VerifyEmailOut)
+def auth_verify_email(token: str, req: Request, db: Session = Depends(get_db)):
+    token_value = (token or "").strip()
+    if not token_value:
+        raise HTTPException(status_code=400, detail="Invalid verification token")
+    token_hash = _hash_email_verification_token(token_value)
     try:
-        user = db.query(User).filter(User.id == user_id).first()
+        user = db.query(User).filter(User.email_verification_token_hash == token_hash).first()
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.")
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    return {"id": user.id, "email": user.email, "name": user.name, "account_type": user.account_type or "listener"}
+        raise HTTPException(status_code=400, detail="Invalid verification token")
+
+    sent_at = _coerce_utc_datetime(getattr(user, "email_verification_sent_at", None))
+    if sent_at and _now_utc() - sent_at > timedelta(hours=EMAIL_VERIFICATION_TOKEN_TTL_HOURS):
+        raise HTTPException(status_code=400, detail="Verification token expired")
+
+    user.email_verified_at = _now_utc()
+    user.email_verification_token_hash = None
+    user.email_verification_sent_at = None
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not verify email. Please try again.")
+    _audit_log(action="auth_email_verified", user_id=user.id, email=user.email, req=req)
+    return {"ok": True, "email_verified": True}
+
+
+@app.post("/api/auth/resend-verification", response_model=ResendVerificationOut)
+def auth_resend_verification(req: Request, db: Session = Depends(get_db)):
+    user = _require_active_user(req, db)
+    if _email_verified(user):
+        return {"ok": True, "email_verification_url": None}
+    token = _issue_email_verification(user)
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not create verification token. Please try again.")
+    _audit_log(action="auth_email_verification_sent", user_id=user.id, email=user.email, req=req)
+    return {"ok": True, "email_verification_url": _verification_url(req, token)}
 
 
 @app.post("/api/admin/users/{user_id}/lock")
@@ -704,6 +950,7 @@ def admin_lock_user(user_id: int, payload: AdminLockIn, req: Request, db: Sessio
     locked_until = _now_utc() + timedelta(minutes=int(payload.minutes))
     user.locked_until = locked_until
     user.lock_reason = (payload.reason or "").strip() or "manual_admin_lock"
+    revoked_sessions = _revoke_user_refresh_sessions(db, user.id)
     _audit_log(
         action="admin_lock_user",
         db=db,
@@ -712,7 +959,7 @@ def admin_lock_user(user_id: int, payload: AdminLockIn, req: Request, db: Sessio
         req=req,
         reason=user.lock_reason,
         actor="admin",
-        meta={"minutes": int(payload.minutes)},
+        meta={"minutes": int(payload.minutes), "revoked_refresh_sessions": revoked_sessions},
     )
     try:
         db.commit()
@@ -848,7 +1095,7 @@ def admin_claim_upload_owner(
 
 @app.get("/api/billing/payment-methods")
 def billing_list_payment_methods(req: Request, db: Session = Depends(get_db)):
-    user_id = get_current_user_id(req)
+    user_id = int(_require_active_user(req, db).id)
     try:
         rows = (
             db.query(PaymentMethod)
@@ -878,7 +1125,7 @@ def billing_list_payment_methods(req: Request, db: Session = Depends(get_db)):
 
 @app.post("/api/billing/payment-methods")
 def billing_add_payment_method(payload: PaymentMethodIn, req: Request, db: Session = Depends(get_db)):
-    user_id = get_current_user_id(req)
+    user_id = int(_require_active_user(req, db).id)
     digits = _normalize_digits(payload.card_number)
     if len(digits) < 12:
         raise HTTPException(status_code=400, detail="Invalid card number")
@@ -941,7 +1188,7 @@ def billing_add_payment_method(payload: PaymentMethodIn, req: Request, db: Sessi
 
 @app.delete("/api/billing/payment-methods/{method_id}")
 def billing_delete_payment_method(method_id: str, req: Request, db: Session = Depends(get_db)):
-    user_id = get_current_user_id(req)
+    user_id = int(_require_active_user(req, db).id)
     mid = (method_id or "").strip()
     if not mid:
         raise HTTPException(status_code=400, detail="Invalid payment method id")
@@ -977,7 +1224,7 @@ def billing_delete_payment_method(method_id: str, req: Request, db: Session = De
 
 @app.get("/api/billing/receipts")
 def billing_list_receipts(req: Request, limit: int = 20, db: Session = Depends(get_db)):
-    user_id = get_current_user_id(req)
+    user_id = int(_require_active_user(req, db).id)
     limit = max(1, min(int(limit or 20), 100))
     try:
         rows = (
@@ -1009,7 +1256,7 @@ def billing_list_receipts(req: Request, limit: int = 20, db: Session = Depends(g
 
 @app.get("/api/billing/receipts/{receipt_id}/download")
 def billing_download_receipt(receipt_id: str, req: Request, db: Session = Depends(get_db)):
-    user_id = get_current_user_id(req)
+    user_id = int(_require_active_user(req, db).id)
     rid = (receipt_id or "").strip()
     if not rid:
         raise HTTPException(status_code=400, detail="Invalid receipt id")
@@ -1047,27 +1294,17 @@ def _startup_schema_init() -> None:
         pass
 
 
-def _require_uploader_identity(req: Request) -> Optional[int]:
+def _require_uploader_identity(req: Request, db: Session) -> Optional[int]:
     if not REQUIRE_AUTH_UPLOADS:
         return None
     try:
-        user_id = get_current_user_id(req)
+        user = _require_artist_user(req, db)
     except HTTPException:
-        raise HTTPException(status_code=401, detail="Login required to upload tracks")
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        if (getattr(user, "account_type", "listener") or "listener").strip().lower() != "artist":
-            raise HTTPException(status_code=403, detail="Artist account required to upload tracks")
-        return user_id
-    except HTTPException:
+        auth = req.headers.get("authorization") or ""
+        if not auth.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="Login required to upload tracks")
         raise
-    except SQLAlchemyError:
-        raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.")
-    finally:
-        db.close()
+    return int(user.id)
 
 
 def _parse_artist_names(raw_artist: str) -> List[str]:
@@ -1142,7 +1379,8 @@ def _managed_upload_query(db: Session, upload_id: str) -> Optional[CatalogTrack]
 
 
 def _require_upload_owner(db: Session, req: Request, upload_id: str) -> tuple[int, CatalogTrack]:
-    user_id = get_current_user_id(req)
+    user = _require_artist_user(req, db)
+    user_id = int(user.id)
     try:
         track = _managed_upload_query(db, upload_id)
     except SQLAlchemyError:
@@ -1320,26 +1558,41 @@ def spotify_search(query: str, limit: int = 10) -> List[Dict[str, Any]]:
     return results
 
 
-def itunes_cover(title: str, artist: str) -> str:
+@lru_cache(maxsize=4096)
+def itunes_track_lookup(title: str, artist: str) -> Optional[Dict[str, Any]]:
     term = quote(f"{title} {artist}".strip())
     url = f"https://itunes.apple.com/search?term={term}&entity=song&limit=1"
     try:
         r = requests.get(url, timeout=10)
         if r.status_code != 200:
-            return ""
+            return None
         results = (r.json() or {}).get("results") or []
         if not results:
-            return ""
-        art = results[0].get("artworkUrl100") or results[0].get(
-            "artworkUrl60") or ""
-        if not art:
-            return ""
-        return (
-            art.replace("100x100bb.jpg", "600x600bb.jpg")
-            .replace("60x60bb.jpg", "600x600bb.jpg")
-        )
+            return None
+        item = results[0] or {}
+        art = item.get("artworkUrl100") or item.get("artworkUrl60") or ""
+        image_url = ""
+        if art:
+            image_url = (
+                art.replace("100x100bb.jpg", "600x600bb.jpg")
+                .replace("60x60bb.jpg", "600x600bb.jpg")
+            )
+        return {
+            "imageUrl": image_url,
+            "previewUrl": item.get("previewUrl"),
+            "providerUrl": item.get("trackViewUrl"),
+            "durationMs": item.get("trackTimeMillis"),
+        }
     except Exception:
+        return None
+
+
+def itunes_cover(title: str, artist: str) -> str:
+    details = itunes_track_lookup(title, artist)
+    if not details:
         return ""
+    image_url = details.get("imageUrl")
+    return image_url if isinstance(image_url, str) else ""
 
 
 def cover_for(title: str, artist: str) -> str:
@@ -1782,6 +2035,7 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
     for r in recs:
         title = (r.get("title") or "").strip()
         artist = (r.get("artist") or "").strip()
+        details: Optional[Dict[str, Any]] = None
 
         raw_image = r.get("imageUrl", "")
         image_url = (raw_image if isinstance(raw_image, str) else "").strip()
@@ -1802,6 +2056,16 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
                 duration_ms = details.get("durationMs") or duration_ms
                 if not image_url:
                     dimg = details.get("imageUrl")
+                    if isinstance(dimg, str) and dimg.strip():
+                        image_url = dimg.strip()
+
+        if not preview_url:
+            apple_details = itunes_track_lookup(title, artist)
+            if apple_details:
+                preview_url = apple_details.get("previewUrl") or preview_url
+                duration_ms = apple_details.get("durationMs") or duration_ms
+                if not image_url:
+                    dimg = apple_details.get("imageUrl")
                     if isinstance(dimg, str) and dimg.strip():
                         image_url = dimg.strip()
 
@@ -2392,9 +2656,9 @@ async def upload_catalog_track_audio(
     Frontend can then play `/api/audio/<track_id>` instead of Spotify previews.
     """
     _enforce_rate_limit("upload", request, RATE_LIMIT_UPLOAD_PER_MIN, 60)
-    if not _check_upload_secret(request):
-        raise HTTPException(status_code=403, detail="Upload secret required")
-    _require_uploader_identity(request)
+    if not _has_valid_upload_secret(request):
+        raise HTTPException(status_code=403, detail="Admin upload secret required for catalog audio")
+    _require_uploader_identity(request, db)
 
     tid = (track_id or "").strip()
     if not tid:
@@ -2474,7 +2738,7 @@ async def upload_new_track(
     _enforce_rate_limit("upload", request, RATE_LIMIT_UPLOAD_PER_MIN, 60)
     if not _check_upload_secret(request):
         raise HTTPException(status_code=403, detail="Upload secret required")
-    owner_user_id = _require_uploader_identity(request)
+    owner_user_id = _require_uploader_identity(request, db)
 
     title = (title or "").strip()
     artist = (artist or "").strip()
@@ -2560,7 +2824,8 @@ async def upload_new_track(
 
 @app.get("/api/uploads/manage")
 def list_managed_uploads(limit: int = 100, request: Request = None, db: Session = Depends(get_db)):
-    user_id = get_current_user_id(request)
+    user = _require_artist_user(request, db)
+    user_id = int(user.id)
     limit = max(1, min(int(limit or 100), 200))
     try:
         rows = (

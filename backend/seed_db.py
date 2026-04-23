@@ -43,7 +43,14 @@ REQUIRED_MIGRATED_SCHEMA = {
         "source_page",
         "context_json",
     },
-    "users": {"id", "email", "account_type"},
+    "users": {
+        "id",
+        "email",
+        "account_type",
+        "email_verified_at",
+        "email_verification_token_hash",
+        "email_verification_sent_at",
+    },
     "catalog_tracks": {"id", "canonical_title", "is_published", "owner_user_id"},
     "audio_features": {"track_id", "feature_source"},
     "audio_assets": {
@@ -55,6 +62,7 @@ REQUIRED_MIGRATED_SCHEMA = {
         "processing_error",
     },
     "catalog_sync_runs": {"id", "provider", "status", "started_at", "finished_at"},
+    "refresh_sessions": {"id", "user_id", "token_hash", "expires_at", "revoked_at"},
 }
 
 

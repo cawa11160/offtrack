@@ -227,6 +227,9 @@ class User(Base):
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     account_type: Mapped[str] = mapped_column(String(32), default="listener", index=True)
     password_hash: Mapped[str] = mapped_column(Text)
+    email_verified_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    email_verification_token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    email_verification_sent_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
     locked_until: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     lock_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
@@ -347,6 +350,21 @@ class BillingReceipt(Base):
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
+class RefreshSession(Base):
+    __tablename__ = "refresh_sessions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    expires_at: Mapped[object] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    replaced_by_session_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    last_used_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class SecurityAuditLog(Base):
     __tablename__ = "security_audit_logs"
 
@@ -389,4 +407,5 @@ Index("ix_track_audio_track_id", TrackAudio.track_id)
 Index("ix_uploaded_tracks_title_artist", UploadedTrack.title, UploadedTrack.artist)
 Index("ix_payment_methods_user_default", PaymentMethod.user_id, PaymentMethod.is_default)
 Index("ix_billing_receipts_user_created", BillingReceipt.user_id, BillingReceipt.created_at)
+Index("ix_refresh_sessions_user_active", RefreshSession.user_id, RefreshSession.revoked_at, RefreshSession.expires_at)
 Index("ix_security_audit_action_created", SecurityAuditLog.action, SecurityAuditLog.created_at)

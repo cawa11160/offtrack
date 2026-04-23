@@ -96,11 +96,11 @@ export default function SignUp() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               type="password"
-              placeholder="Minimum 8 characters"
+              placeholder="10+ characters with a letter and number"
               className="mt-2 h-11 w-full rounded-xl border border-black/10 bg-white px-4 outline-none focus:ring-2 focus:ring-black/10"
               required
               autoComplete="new-password"
-              minLength={8}
+              minLength={10}
             />
           </div>
 

@@ -5,6 +5,7 @@ import struct
 import wave
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlparse
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -40,6 +41,7 @@ from models import (  # noqa: E402
     ExternalTrackRef,
     Genre,
     Interaction,
+    RefreshSession,
     Track,
     TrackArtist,
     TrackGenre,
@@ -53,6 +55,16 @@ def _fresh_client() -> TestClient:
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     return TestClient(app)
+
+
+def _verify_email_from_signup(client: TestClient, signup_response) -> None:
+    url = signup_response.json().get("email_verification_url")
+    assert url, signup_response.text
+    parsed = urlparse(url)
+    target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+    verified = client.get(target)
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["email_verified"] is True
 
 
 def _wav_bytes(duration_s: float = 0.25, sample_rate: int = 8000) -> bytes:
@@ -137,6 +149,7 @@ def test_auth_signup_login_and_upload_authorization():
     assert me.status_code == 200, me.text
     assert me.json()["email"] == "artist1@example.com"
     assert me.json()["account_type"] == "artist"
+    assert me.json()["email_verified"] is False
 
     # Upload should be blocked when auth is missing.
     unauth_upload = client.post(
@@ -158,6 +171,24 @@ def test_auth_signup_login_and_upload_authorization():
         files={"file": ("song.mp3", b"LISTENERAUDIO", "audio/mpeg")},
     )
     assert listener_upload.status_code == 403, listener_upload.text
+    listener_manage = client.get(
+        "/api/uploads/manage",
+        headers={"Authorization": f"Bearer {listener_signup.json()['access_token']}"},
+    )
+    assert listener_manage.status_code == 403, listener_manage.text
+
+    unverified_artist_upload = client.post(
+        "/api/uploads",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": "Unverified Song", "artist": "Artist One"},
+        files={"file": ("song.mp3", b"UNVERIFIEDAUDIO", "audio/mpeg")},
+    )
+    assert unverified_artist_upload.status_code == 403, unverified_artist_upload.text
+
+    _verify_email_from_signup(client, signup)
+    verified_me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert verified_me.status_code == 200, verified_me.text
+    assert verified_me.json()["email_verified"] is True
 
     auth_upload = client.post(
         "/api/uploads",
@@ -171,6 +202,79 @@ def test_auth_signup_login_and_upload_authorization():
     assert body["audioUrl"].startswith("/api/uploads/")
 
 
+def test_artist_can_resend_and_verify_email():
+    client = _fresh_client()
+    signup = client.post(
+        "/api/auth/signup",
+        json={"name": "Resend Artist", "email": "resend@example.com", "password": "password123", "account_type": "artist"},
+    )
+    assert signup.status_code == 200, signup.text
+    token = signup.json()["access_token"]
+
+    resend = client.post("/api/auth/resend-verification", headers={"Authorization": f"Bearer {token}"})
+    assert resend.status_code == 200, resend.text
+    assert resend.json()["email_verification_url"]
+    parsed = urlparse(resend.json()["email_verification_url"])
+    verified = client.get(parsed.path + (f"?{parsed.query}" if parsed.query else ""))
+    assert verified.status_code == 200, verified.text
+
+    resend_after = client.post("/api/auth/resend-verification", headers={"Authorization": f"Bearer {token}"})
+    assert resend_after.status_code == 200, resend_after.text
+    assert resend_after.json()["email_verification_url"] is None
+
+
+def test_refresh_sessions_rotate_and_logout_revokes_cookie():
+    client = _fresh_client()
+    signup = client.post(
+        "/api/auth/signup",
+        json={"name": "Session User", "email": "session@example.com", "password": "password123"},
+    )
+    assert signup.status_code == 200, signup.text
+    original_refresh = signup.cookies.get("offtrack_refresh")
+    assert original_refresh
+
+    first_refresh = client.post("/api/auth/refresh")
+    assert first_refresh.status_code == 200, first_refresh.text
+    rotated_refresh = first_refresh.cookies.get("offtrack_refresh")
+    assert rotated_refresh and rotated_refresh != original_refresh
+
+    db = SessionLocal()
+    try:
+        rows = db.query(RefreshSession).order_by(RefreshSession.created_at.asc()).all()
+        assert len(rows) == 2
+        assert rows[0].revoked_at is not None
+        assert rows[0].replaced_by_session_id == rows[1].id
+        assert rows[1].revoked_at is None
+    finally:
+        db.close()
+
+    replay = TestClient(app).post("/api/auth/refresh", cookies={"offtrack_refresh": original_refresh})
+    assert replay.status_code == 401, replay.text
+
+    replay_revoked_current = client.post("/api/auth/refresh")
+    assert replay_revoked_current.status_code == 401, replay_revoked_current.text
+
+    login = client.post("/api/auth/login", json={"email": "session@example.com", "password": "password123"})
+    assert login.status_code == 200, login.text
+    active_refresh = login.cookies.get("offtrack_refresh")
+    assert active_refresh
+
+    logout = client.post("/api/auth/logout")
+    assert logout.status_code == 200, logout.text
+
+    after_logout = TestClient(app).post("/api/auth/refresh", cookies={"offtrack_refresh": active_refresh})
+    assert after_logout.status_code == 401, after_logout.text
+
+
+def test_signup_rejects_weak_passwords():
+    client = _fresh_client()
+    weak = client.post(
+        "/api/auth/signup",
+        json={"name": "Weak User", "email": "weak@example.com", "password": "password", "account_type": "artist"},
+    )
+    assert weak.status_code == 422, weak.text
+
+
 def test_upload_persists_to_normalized_catalog_tables():
     client = _fresh_client()
 
@@ -179,6 +283,7 @@ def test_upload_persists_to_normalized_catalog_tables():
         json={"name": "Artist Two", "email": "artist2@example.com", "password": "password123", "account_type": "artist"},
     )
     assert signup.status_code == 200, signup.text
+    _verify_email_from_signup(client, signup)
     token = signup.json()["access_token"]
 
     upload = client.post(
@@ -232,6 +337,7 @@ def test_wav_upload_extracts_duration_and_waveform():
         },
     )
     assert signup.status_code == 200, signup.text
+    _verify_email_from_signup(client, signup)
     token = signup.json()["access_token"]
 
     upload = client.post(
@@ -266,6 +372,7 @@ def test_artist_can_manage_owned_uploads_and_unpublish():
         },
     )
     assert signup.status_code == 200, signup.text
+    _verify_email_from_signup(client, signup)
     token = signup.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -458,6 +565,7 @@ def test_search_finds_normalized_uploaded_tracks():
         },
     )
     assert signup.status_code == 200, signup.text
+    _verify_email_from_signup(client, signup)
     token = signup.json()["access_token"]
 
     upload = client.post(
@@ -716,13 +824,24 @@ def test_recommend_validation_and_success_stub():
                 }
             ]
 
-    with patch("api.get_recommender", return_value=StubRec()):
+    with (
+        patch("api.get_recommender", return_value=StubRec()),
+        patch(
+            "api.itunes_track_lookup",
+            return_value={
+                "imageUrl": "https://example.com/stub.jpg",
+                "previewUrl": "https://example.com/stub-preview.m4a",
+                "durationMs": 30000,
+            },
+        ),
+    ):
         app.state.recommender_error = ""
         ok = client.post("/api/recommend", json={"seeds": [], "n": 1, "mode": "all"})
         assert ok.status_code == 200, ok.text
         data = ok.json()
         assert isinstance(data.get("recommendations"), list)
         assert data["recommendations"][0]["title"] == "Stub Song"
+        assert data["recommendations"][0]["previewUrl"] == "https://example.com/stub-preview.m4a"
 
 
 def test_spotify_callback_error_paths():
@@ -784,6 +903,12 @@ def test_admin_lock_unlock_and_audit_logs():
         json={"email": "lockme@example.com", "password": "password123"},
     )
     assert blocked_login.status_code == 423, blocked_login.text
+
+    blocked_me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert blocked_me.status_code == 423, blocked_me.text
+
+    blocked_refresh = client.post("/api/auth/refresh")
+    assert blocked_refresh.status_code in {401, 423}, blocked_refresh.text
 
     unlock = client.post(
         f"/api/admin/users/{user_id}/unlock",

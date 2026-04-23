@@ -7,7 +7,13 @@ function makeUrl(path: string) {
   return API_BASE ? `${API_BASE}${path}` : path;
 }
 
-export type Me = { id: number; email: string; name?: string | null; account_type?: "listener" | "artist" };
+export type Me = {
+  id: number;
+  email: string;
+  name?: string | null;
+  account_type?: "listener" | "artist";
+  email_verified?: boolean;
+};
 
 export function getAccessToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -39,7 +45,7 @@ export async function apiSignup(params: { name?: string; email: string; password
     body: JSON.stringify(params),
   });
   if (!res.ok) throw new Error(await readErr(res));
-  return (await res.json()) as { access_token: string };
+  return (await res.json()) as { access_token: string; email_verification_url?: string | null; email_verified?: boolean };
 }
 
 export async function apiLogin(params: { email: string; password: string }) {
@@ -50,7 +56,7 @@ export async function apiLogin(params: { email: string; password: string }) {
     body: JSON.stringify(params),
   });
   if (!res.ok) throw new Error(await readErr(res));
-  return (await res.json()) as { access_token: string };
+  return (await res.json()) as { access_token: string; email_verified?: boolean };
 }
 
 export async function apiRefresh() {
@@ -59,7 +65,7 @@ export async function apiRefresh() {
     credentials: "include",
   });
   if (!res.ok) throw new Error(await readErr(res));
-  return (await res.json()) as { access_token: string };
+  return (await res.json()) as { access_token: string; email_verified?: boolean };
 }
 
 export async function apiLogout() {
@@ -73,6 +79,16 @@ export async function apiMe(token: string): Promise<Me> {
   });
   if (!res.ok) throw new Error(await readErr(res));
   return (await res.json()) as Me;
+}
+
+export async function apiResendEmailVerification(token: string): Promise<{ email_verification_url?: string | null }> {
+  const res = await fetch(makeUrl("/api/auth/resend-verification"), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(await readErr(res));
+  return (await res.json()) as { email_verification_url?: string | null };
 }
 
 type AuthState = {

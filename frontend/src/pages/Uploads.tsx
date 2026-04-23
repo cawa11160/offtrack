@@ -12,7 +12,7 @@ import {
   apiUrl,
   type UploadedTrackItem,
 } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
+import { apiResendEmailVerification, useAuth } from "@/lib/auth";
 import { getErrorMessage } from "@/lib/errors";
 
 type EditState = {
@@ -51,7 +51,7 @@ function editFromTrack(track: UploadedTrackItem): EditState {
 }
 
 export default function Uploads() {
-  const { user, loading: authLoading } = useAuth();
+  const { user, token, loading: authLoading, refreshMe } = useAuth();
   const navigate = useNavigate();
   const [title, setTitle] = useState("");
   const [artist, setArtist] = useState("");
@@ -64,12 +64,17 @@ export default function Uploads() {
   const [busyByTrack, setBusyByTrack] = useState<Record<string, boolean>>({});
   const [editByTrack, setEditByTrack] = useState<Record<string, EditState>>({});
   const [replaceFileByTrack, setReplaceFileByTrack] = useState<Record<string, File | null>>({});
+  const [verificationUrl, setVerificationUrl] = useState("");
+  const [verificationBusy, setVerificationBusy] = useState(false);
+  const isArtist = user?.account_type === "artist";
+  const emailVerified = Boolean(user?.email_verified);
+  const canManageUploads = isArtist && emailVerified;
 
   async function refresh() {
     setRefreshing(true);
     setError("");
     try {
-      const next = user ? await apiListManagedUploads(100) : await apiListUploads(50);
+      const next = canManageUploads ? await apiListManagedUploads(100) : await apiListUploads(50);
       setTracks(next);
       setEditByTrack(Object.fromEntries(next.map((item) => [item.id, editFromTrack(item)])));
     } catch (e: unknown) {
@@ -82,22 +87,27 @@ export default function Uploads() {
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
+  }, [user?.id, canManageUploads]);
 
   const canUpload = useMemo(() => title.trim().length > 0 && !!file && !loading, [title, file, loading]);
-  const isArtist = user?.account_type === "artist";
 
   useEffect(() => {
     if (!authLoading && !user) {
       setError("Please log in as an artist to upload songs.");
     } else if (!authLoading && user && !isArtist) {
       setError("Uploads require an artist account.");
+    } else if (!authLoading && isArtist && !emailVerified) {
+      setError("Verify your email before uploading songs.");
     }
-  }, [authLoading, user, isArtist]);
+  }, [authLoading, user, isArtist, emailVerified]);
 
   async function onUpload() {
     if (!user || !isArtist) {
       setError("Please log in as an artist to upload songs.");
+      return;
+    }
+    if (!emailVerified) {
+      setError("Verify your email before uploading songs.");
       return;
     }
     if (!file) return;
@@ -113,6 +123,21 @@ export default function Uploads() {
       setError(getErrorMessage(e, "Upload failed"));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function resendVerification() {
+    if (!token) return;
+    setVerificationBusy(true);
+    setError("");
+    try {
+      const result = await apiResendEmailVerification(token);
+      setVerificationUrl(result.email_verification_url || "");
+      await refreshMe();
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Could not send verification email"));
+    } finally {
+      setVerificationBusy(false);
     }
   }
 
@@ -241,12 +266,12 @@ export default function Uploads() {
 
         <div className="mt-4 flex items-center justify-between gap-4">
           <div className="text-xs text-muted-foreground">
-            {isArtist ? "New uploads are owned by your artist account." : "Artist accounts can upload and manage tracks."}
+            {canManageUploads ? "New uploads are owned by your artist account." : "Artist accounts can upload and manage tracks after email verification."}
           </div>
           <button
             type="button"
             onClick={() => void onUpload()}
-            disabled={!canUpload || !isArtist}
+            disabled={!canUpload || !canManageUploads}
             className="rounded-xl bg-black px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
             {loading ? "Uploading..." : "Upload"}
@@ -254,6 +279,31 @@ export default function Uploads() {
         </div>
 
         {error ? <div className="mt-3 text-sm text-red-600">{error}</div> : null}
+        {isArtist && !emailVerified ? (
+          <div className="mt-3 rounded-xl border border-black/10 bg-white p-3 text-sm text-black/70">
+            <div>Email verification is required for artist uploads.</div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void resendVerification()}
+                disabled={verificationBusy}
+                className="rounded-lg border border-black/10 px-3 py-1 font-medium hover:bg-black/5 disabled:opacity-60"
+              >
+                {verificationBusy ? "Sending..." : "Send verification link"}
+              </button>
+              {verificationUrl ? (
+                <a
+                  href={verificationUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-lg border border-black/10 px-3 py-1 font-medium underline underline-offset-4 hover:bg-black/5"
+                >
+                  Open verification link
+                </a>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         {!isArtist ? (
           <div className="mt-3 text-sm text-black/70">
             <button
@@ -270,7 +320,7 @@ export default function Uploads() {
       <div className="mt-6 grid gap-4">
         {tracks.length === 0 ? (
           <div className="rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground">
-            No uploads yet. Upload a song above.
+            {canManageUploads ? "No uploads yet. Upload a song above." : "No public uploads yet."}
           </div>
         ) : (
           tracks.map((track) => {
@@ -285,7 +335,7 @@ export default function Uploads() {
                       <Music2 className="h-5 w-5" />
                     </div>
                     <div className="min-w-0 flex-1">
-                      {user ? (
+                      {canManageUploads ? (
                         <div className="grid gap-2 md:grid-cols-3">
                           <input
                             value={edit.title}
@@ -346,7 +396,7 @@ export default function Uploads() {
                         <div className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700">{track.processingError}</div>
                       ) : null}
 
-                      {user ? (
+                      {canManageUploads ? (
                         <div className="mt-3 flex flex-wrap items-center gap-2">
                           <input
                             type="file"
@@ -370,7 +420,7 @@ export default function Uploads() {
                     </div>
                   </div>
 
-                  {user ? (
+                  {canManageUploads ? (
                     <div className="flex flex-wrap gap-2 lg:justify-end">
                       <button
                         type="button"

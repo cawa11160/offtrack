@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import { ArrowLeft, ArrowRight, Compass, Disc3, MapPin, Music2, Search, Sparkles, Tags } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
-import { albums, concerts, featuredPlaylists } from "@/data/mockData";
+import { albums, featuredPlaylists } from "@/data/mockData";
+import { useLiveConcerts } from "@/lib/liveEvents";
 
 type BrowseTile = {
   title: string;
@@ -36,7 +37,7 @@ export function SearchScreen() {
     return albums.filter((item) => `${item.title} ${item.artist}`.toLowerCase().includes(q)).slice(0, 8);
   }, [query]);
 
-  const upcomingConcerts = useMemo(() => concerts.slice(0, 4), []);
+  const { concerts: upcomingConcerts, loading: eventsLoading } = useLiveConcerts(4);
 
   return (
     <div className="min-h-screen w-full bg-white pb-32 text-black">
@@ -71,7 +72,7 @@ export function SearchScreen() {
           </div>
 
           <div className="rounded-lg border border-black/10 bg-[#f8f7f2] p-4">
-            <p className="text-sm font-semibold text-black/55">Live nearby</p>
+            <p className="text-sm font-semibold text-black/55">{eventsLoading ? "Updating live nearby" : "Live nearby"}</p>
             <div className="mt-3 space-y-2">
               {upcomingConcerts.map((concert) => (
                 <button

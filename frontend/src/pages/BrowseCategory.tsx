@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import { ArrowLeft, ArrowRight, Disc3, Music2, Search, SlidersHorizontal } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { albums, concerts, featuredPlaylists } from "@/data/mockData";
+import { albums, featuredPlaylists } from "@/data/mockData";
+import { useLiveConcerts } from "@/lib/liveEvents";
 
 function imageForTopic(topic: string) {
   const seed = encodeURIComponent(topic || "music");
@@ -15,6 +16,7 @@ export default function BrowseCategory() {
   const heading = useMemo(() => decodeURIComponent(topic ?? "Browse"), [topic]);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"match" | "newest">("match");
+  const { concerts: liveConcerts } = useLiveConcerts(4);
 
   const results = useMemo(() => {
     const q = `${heading} ${query}`.trim().toLowerCase();
@@ -123,7 +125,7 @@ export default function BrowseCategory() {
             <div className="rounded-lg border border-black/10 bg-white p-4">
               <h2 className="text-lg font-bold">Concerts</h2>
               <div className="mt-3 space-y-2">
-                {concerts.slice(0, 4).map((concert) => (
+                {liveConcerts.slice(0, 4).map((concert) => (
                   <button key={concert.id} type="button" onClick={() => navigate("/concerts")} className="flex w-full items-center justify-between gap-3 rounded-md p-2 text-left hover:bg-black/5">
                     <span className="min-w-0">
                       <span className="block truncate text-sm font-bold">{concert.artist}</span>

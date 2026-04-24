@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { concerts } from "@/data/mockData";
 import { Button } from "@/components/ui/button";
+import { useLiveConcerts } from "@/lib/liveEvents";
 
 type ConcertLike = { city?: string };
 
@@ -13,6 +13,7 @@ export default function ConcertFilters() {
   const [date, setDate] = useState(searchParams.get("date") || "any");
   const [genre, setGenre] = useState(searchParams.get("genre") || "any");
   const [price, setPrice] = useState(searchParams.get("price") || "any");
+  const { concerts } = useLiveConcerts(24);
 
   const cities = useMemo(() => {
     const set = new Set<string>();
@@ -20,7 +21,7 @@ export default function ConcertFilters() {
       if (c.city) set.add(c.city);
     });
     return ["any", ...Array.from(set).sort()];
-  }, []);
+  }, [concerts]);
 
   const apply = () => {
     const sp = new URLSearchParams();

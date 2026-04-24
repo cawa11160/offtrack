@@ -18,53 +18,19 @@ import {
 import { useNavigate } from "react-router-dom";
 
 import { useAuth } from "@/lib/auth";
+import { applyAppearance, loadPrefs, savePrefs as persistPrefs, type AppPreferences } from "@/lib/preferences";
 
 type SectionId = "account" | "general" | "audio" | "notifications" | "billing" | "security";
-type PreferenceState = {
-  appearance: "light" | "dark" | "system";
-  density: "compact" | "normal" | "comfortable";
-  autoplay: boolean;
-  releaseAlerts: boolean;
-  friendActivity: boolean;
-  concertAlerts: boolean;
-  volume: number;
-  bass: number;
-  treble: number;
-  balance: number;
-};
+type PreferenceState = AppPreferences;
 
 const ADMIN_KEY_STORAGE = "offtrack_admin_api_key";
-const PREF_KEY = "offtrack_settings_preferences";
 const ADMIN_UI_ENABLED = ["1", "true", "yes", "on"].includes(
   String(import.meta.env.VITE_ENABLE_ADMIN_SECURITY ?? "false").toLowerCase()
 );
 
-const defaultPrefs: PreferenceState = {
-  appearance: "light",
-  density: "normal",
-  autoplay: true,
-  releaseAlerts: true,
-  friendActivity: false,
-  concertAlerts: true,
-  volume: 74,
-  bass: 52,
-  treble: 48,
-  balance: 50,
-};
-
 function hasAdminKeyStored(): boolean {
   if (typeof window === "undefined") return false;
   return Boolean((window.localStorage.getItem(ADMIN_KEY_STORAGE) || "").trim());
-}
-
-function loadPrefs(): PreferenceState {
-  if (typeof window === "undefined") return defaultPrefs;
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(PREF_KEY) || "{}") as Partial<PreferenceState>;
-    return { ...defaultPrefs, ...parsed };
-  } catch {
-    return defaultPrefs;
-  }
 }
 
 function Toggle({
@@ -138,6 +104,16 @@ export default function Settings() {
     };
   }, []);
 
+  useEffect(() => {
+    applyAppearance(prefs.appearance);
+    if (prefs.appearance !== "system") return;
+    const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!media) return;
+    const onChange = () => applyAppearance("system");
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [prefs.appearance]);
+
   const sections = useMemo(
     () =>
       [
@@ -152,12 +128,20 @@ export default function Settings() {
   );
 
   function updatePrefs(next: Partial<PreferenceState>) {
-    setPrefs((prev) => ({ ...prev, ...next }));
+    setPrefs((prev) => {
+      const merged = { ...prev, ...next };
+      if (next.appearance) {
+        applyAppearance(next.appearance);
+        persistPrefs(merged);
+      }
+      return merged;
+    });
     setSaved(false);
   }
 
   function savePrefs() {
-    window.localStorage.setItem(PREF_KEY, JSON.stringify(prefs));
+    persistPrefs(prefs);
+    applyAppearance(prefs.appearance);
     setSaved(true);
     window.setTimeout(() => setSaved(false), 1800);
   }

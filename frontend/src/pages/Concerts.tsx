@@ -5,7 +5,7 @@ import mapboxgl, { Map, Marker, Popup } from "mapbox-gl";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Calendar, Clock, MapPin, Music2, Search, Ticket, X } from "lucide-react";
 
-import { concerts } from "@/data/mockData";
+import { useLiveConcerts } from "@/lib/liveEvents";
 
 type ConcertLike = {
   id: string;
@@ -75,7 +75,8 @@ const Concerts = () => {
   const markersRef = useRef<Marker[]>([]);
   const popupRef = useRef<Popup | null>(null);
 
-  const typedConcerts = concerts as unknown as ConcertLike[];
+  const { concerts: liveConcerts, loading: eventsLoading, source: eventsSource, error: eventsError, refreshedAt } = useLiveConcerts(24);
+  const typedConcerts = liveConcerts as unknown as ConcertLike[];
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -220,8 +221,13 @@ const Concerts = () => {
             <h1 className="mt-1 text-4xl font-bold leading-none sm:text-5xl">Live near you</h1>
           </div>
           <div className="rounded-md bg-[#f8f7f2] px-4 py-3 text-sm font-semibold text-black/60">
-            {filteredConcerts.length} shows
+            {eventsLoading ? "Updating..." : `${filteredConcerts.length} shows`}
           </div>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs font-bold text-black/45">
+          <span>{eventsSource === "ticketmaster" ? "Live Ticketmaster feed" : "Updated local venue feed"}</span>
+          <span>Updated {refreshedAt.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}</span>
+          {eventsError ? <span>Fallback active</span> : null}
         </div>
 
         <div className="mt-5 grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px_160px]">
@@ -257,7 +263,7 @@ const Concerts = () => {
         <div className="mt-5 grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
           <aside className="order-2 max-h-[720px] overflow-y-auto rounded-lg border border-black/10 bg-[#f8f7f2] p-3 xl:order-1">
             <div className="space-y-2">
-              {filteredConcerts.map((concert, index) => {
+              {filteredConcerts.length ? filteredConcerts.map((concert, index) => {
                 const selected = concert.id === selectedConcert?.id;
                 return (
                   <button
@@ -279,7 +285,11 @@ const Concerts = () => {
                     </span>
                   </button>
                 );
-              })}
+              }) : (
+                <div className="rounded-md bg-white p-4 text-sm font-semibold text-black/55">
+                  No upcoming live events match these filters.
+                </div>
+              )}
             </div>
           </aside>
 

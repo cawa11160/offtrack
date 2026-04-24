@@ -14,6 +14,7 @@ import {
   ShieldAlert,
   ShoppingBag,
   User,
+  X,
 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -52,7 +53,38 @@ function hasAdminKeyStored(): boolean {
   return Boolean((window.localStorage.getItem(ADMIN_KEY_STORAGE) || "").trim());
 }
 
-const defaultPlaylists = ["Playlist name 1", "Playlist name 2", "Playlist name 3", "Playlist name 4"];
+const PLAYLIST_STORAGE_KEY = "offtrack_playlists";
+
+type StoredPlaylist = {
+  id: string;
+  name: string;
+};
+
+function loadStoredPlaylists(): StoredPlaylist[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const rows = JSON.parse(window.localStorage.getItem(PLAYLIST_STORAGE_KEY) || "[]");
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .map((row) => ({
+        id: String(row?.id || ""),
+        name: String(row?.name || "").trim(),
+      }))
+      .filter((row) => row.id && row.name);
+  } catch {
+    return [];
+  }
+}
+
+function saveStoredPlaylists(playlists: StoredPlaylist[]) {
+  window.localStorage.setItem(PLAYLIST_STORAGE_KEY, JSON.stringify(playlists));
+}
+
+function nextPlaylistId(playlists: StoredPlaylist[]) {
+  let i = playlists.length + 1;
+  while (playlists.some((item) => item.id === `playlist-${i}`)) i += 1;
+  return `playlist-${i}`;
+}
 
 export const ARC_SIDEBAR_EXPANDED_WIDTH = 240;
 export const ARC_SIDEBAR_COLLAPSED_WIDTH = 64;
@@ -69,7 +101,7 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
     typeof window === "undefined" ? 900 : window.innerHeight || 900
   );
   const [activeId, setActiveId] = useState("home");
-  const [playlists, setPlaylists] = useState(defaultPlaylists);
+  const [playlists, setPlaylists] = useState<StoredPlaylist[]>(() => loadStoredPlaylists());
   const [showAdminItem, setShowAdminItem] = useState<boolean>(() => ADMIN_UI_ENABLED || hasAdminKeyStored());
 
   useEffect(() => {
@@ -95,9 +127,9 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
     () => [
       ...visiblePageItems,
       { id: "__playlists__", name: "Playlists", icon: <span />, type: "label" },
-      ...playlists.map((name, idx) => ({
-        id: `playlist-${idx + 1}`,
-        name,
+      ...playlists.map((playlist) => ({
+        id: playlist.id,
+        name: playlist.name,
         icon: <Music className="h-4 w-4" />,
         type: "playlist" as const,
       })),
@@ -119,7 +151,7 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
     if (location.pathname === "/playlists") {
       const params = new URLSearchParams(location.search);
       const selectedPlaylist = params.get("playlist");
-      setActiveId(selectedPlaylist ?? "playlist-1");
+      setActiveId(selectedPlaylist ?? "");
       return;
     }
 
@@ -260,7 +292,15 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
             <button
               key={item.id}
               type="button"
-              onClick={() => setPlaylists((prev) => [...prev, `Playlist name ${prev.length + 1}`])}
+              onClick={() => {
+                setPlaylists((prev) => {
+                  const playlist = { id: nextPlaylistId(prev), name: `Untitled playlist ${prev.length + 1}` };
+                  const next = [...prev, playlist];
+                  saveStoredPlaylists(next);
+                  navigate(`/playlists?playlist=${encodeURIComponent(playlist.id)}`);
+                  return next;
+                });
+              }}
               className="group absolute text-right"
               style={{
                 right: `${width - rightEdge}px`,
@@ -328,6 +368,36 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
                   }`}
                 />
               </span>
+              {item.type === "playlist" ? (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setPlaylists((prev) => {
+                      const next = prev.filter((playlist) => playlist.id !== item.id);
+                      saveStoredPlaylists(next);
+                      if (activeId === item.id) navigate("/playlists");
+                      return next;
+                    });
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setPlaylists((prev) => {
+                      const next = prev.filter((playlist) => playlist.id !== item.id);
+                      saveStoredPlaylists(next);
+                      if (activeId === item.id) navigate("/playlists");
+                      return next;
+                    });
+                  }}
+                  className="grid h-5 w-5 place-items-center rounded-full text-white/45 opacity-0 transition hover:bg-white/10 hover:text-white group-hover:opacity-100"
+                  aria-label={`Delete ${item.name}`}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </span>
+              ) : null}
             </span>
           </button>
         );

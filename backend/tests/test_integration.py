@@ -27,7 +27,7 @@ os.environ.setdefault("SPOTIFY_CLIENT_SECRET", "test-secret")
 os.environ.setdefault("FRONTEND_URL", "http://localhost:8080")
 os.environ["ADMIN_API_KEY"] = "test-admin-key"
 
-from api import app, db_search  # noqa: E402
+from api import app, db_search, pwd_context  # noqa: E402
 from catalog_ingest import sync_current_catalog  # noqa: E402
 from catalog_sync import ensure_catalog_backfill  # noqa: E402
 from db import SessionLocal, engine  # noqa: E402
@@ -45,6 +45,7 @@ from models import (  # noqa: E402
     Track,
     TrackArtist,
     TrackGenre,
+    User,
 )
 from providers import ProviderTrack  # noqa: E402
 from recommender import Recommender  # noqa: E402
@@ -273,6 +274,50 @@ def test_signup_rejects_weak_passwords():
         json={"name": "Weak User", "email": "weak@example.com", "password": "password", "account_type": "artist"},
     )
     assert weak.status_code == 422, weak.text
+
+
+def test_signup_sanitizes_identity_and_uses_scrypt_password_hash():
+    client = _fresh_client()
+    signup = client.post(
+        "/api/auth/signup",
+        json={"name": "  Safe\n User\t ", "email": "UPPER@example.com", "password": "password123"},
+    )
+    assert signup.status_code == 200, signup.text
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == "upper@example.com").first()
+        assert user is not None
+        assert user.name == "Safe User"
+        assert user.password_hash.startswith("scrypt$")
+        assert "password123" not in user.password_hash
+    finally:
+        db.close()
+
+
+def test_login_upgrades_legacy_pbkdf2_password_hash():
+    client = _fresh_client()
+    legacy_hash = pwd_context.hash("password123")
+
+    db = SessionLocal()
+    try:
+        user = User(email="legacy@example.com", name="Legacy User", account_type="listener", password_hash=legacy_hash)
+        db.add(user)
+        db.commit()
+    finally:
+        db.close()
+
+    login = client.post("/api/auth/login", json={"email": "legacy@example.com", "password": "password123"})
+    assert login.status_code == 200, login.text
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == "legacy@example.com").first()
+        assert user is not None
+        assert user.password_hash.startswith("scrypt$")
+        assert user.password_hash != legacy_hash
+    finally:
+        db.close()
 
 
 def test_upload_persists_to_normalized_catalog_tables():

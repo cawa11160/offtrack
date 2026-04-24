@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, createContext, useContext } from "react";
+import { normalizeAuthEmail, sanitizeDisplayName } from "./authInput";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").trim().replace(/\/$/, "");
 const TOKEN_KEY = "offtrack_access_token";
@@ -42,7 +43,11 @@ export async function apiSignup(params: { name?: string; email: string; password
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify(params),
+    body: JSON.stringify({
+      ...params,
+      name: sanitizeDisplayName(params.name ?? ""),
+      email: normalizeAuthEmail(params.email),
+    }),
   });
   if (!res.ok) throw new Error(await readErr(res));
   return (await res.json()) as { access_token: string; email_verification_url?: string | null; email_verified?: boolean };
@@ -53,7 +58,7 @@ export async function apiLogin(params: { email: string; password: string }) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify(params),
+    body: JSON.stringify({ ...params, email: normalizeAuthEmail(params.email) }),
   });
   if (!res.ok) throw new Error(await readErr(res));
   return (await res.json()) as { access_token: string; email_verified?: boolean };

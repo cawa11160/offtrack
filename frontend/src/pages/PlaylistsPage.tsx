@@ -18,12 +18,7 @@ type Track = {
   coverUrl: string;
 };
 
-const starterPlaylists: Playlist[] = [
-  { id: "playlist-1", name: "Winter szn", trackCount: 4, duration: "13 min" },
-  { id: "playlist-2", name: "Playlist name 2", trackCount: 21, duration: "1 hr 11 min" },
-  { id: "playlist-3", name: "Playlist name 3", trackCount: 9, duration: "31 min" },
-  { id: "playlist-4", name: "Playlist name 4", trackCount: 17, duration: "58 min" },
-];
+const PLAYLIST_STORAGE_KEY = "offtrack_playlists";
 
 const sampleTracks: Track[] = [
   {
@@ -68,10 +63,32 @@ function makePlaylistId(existing: Playlist[]) {
   return `playlist-${i}`;
 }
 
+function loadPlaylists(): Playlist[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const rows = JSON.parse(window.localStorage.getItem(PLAYLIST_STORAGE_KEY) || "[]");
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .map((row) => ({
+        id: String(row?.id || ""),
+        name: String(row?.name || "").trim(),
+        trackCount: Number(row?.trackCount || 0),
+        duration: String(row?.duration || "0 min"),
+      }))
+      .filter((row) => row.id && row.name);
+  } catch {
+    return [];
+  }
+}
+
+function savePlaylists(playlists: Playlist[]) {
+  window.localStorage.setItem(PLAYLIST_STORAGE_KEY, JSON.stringify(playlists));
+}
+
 export default function PlaylistsPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const [playlists, setPlaylists] = useState<Playlist[]>(starterPlaylists);
+  const [playlists, setPlaylists] = useState<Playlist[]>(() => loadPlaylists());
   const [isOpen, setIsOpen] = useState(false);
   const [name, setName] = useState("");
   const [query, setQuery] = useState("");
@@ -107,6 +124,7 @@ export default function PlaylistsPage() {
     setPlaylists((prev) => {
       const id = makePlaylistId(prev);
       const next = [{ id, name: trimmed, trackCount: 0, duration: "0 min" }, ...prev];
+      savePlaylists(next);
       navigate(`/playlists?playlist=${encodeURIComponent(id)}`);
       return next;
     });
@@ -116,10 +134,10 @@ export default function PlaylistsPage() {
   const removePlaylist = (id: string) => {
     setPlaylists((prev) => {
       const next = prev.filter((item) => item.id !== id);
-      if (!next.length) return prev;
+      savePlaylists(next);
 
       if (id === selectedId) {
-        navigate(`/playlists?playlist=${encodeURIComponent(next[0].id)}`);
+        navigate(next[0] ? `/playlists?playlist=${encodeURIComponent(next[0].id)}` : "/playlists");
       }
       return next;
     });
@@ -183,59 +201,89 @@ export default function PlaylistsPage() {
               </p>
             </div>
             <div className="mt-4 flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                className="inline-flex h-[63px] min-w-[156px] items-center justify-center rounded-[10px] bg-[#ff9494] px-8 font-['Arimo',sans-serif] text-[36px] font-bold leading-none text-black"
-              >
-                Play
-              </button>
-              <button
-                type="button"
-                className="inline-flex h-[63px] min-w-[181px] items-center justify-center rounded-[10px] bg-[#ff9494] px-8 font-['Arimo',sans-serif] text-[36px] font-bold leading-none text-black"
-              >
-                Shuffle
-              </button>
+              {selectedPlaylist ? (
+                <>
+                  <button
+                    type="button"
+                    className="inline-flex h-[63px] min-w-[156px] items-center justify-center rounded-[10px] bg-[#ff9494] px-8 font-['Arimo',sans-serif] text-[36px] font-bold leading-none text-black"
+                  >
+                    Play
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex h-[63px] min-w-[181px] items-center justify-center rounded-[10px] bg-[#ff9494] px-8 font-['Arimo',sans-serif] text-[36px] font-bold leading-none text-black"
+                  >
+                    Shuffle
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removePlaylist(selectedPlaylist.id)}
+                    className="inline-flex h-[63px] min-w-[140px] items-center justify-center rounded-[10px] bg-black px-6 font-['Arimo',sans-serif] text-[22px] font-bold leading-none text-white"
+                  >
+                    Delete
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={openModal}
+                  className="inline-flex h-[63px] min-w-[220px] items-center justify-center rounded-[10px] bg-[#ff9494] px-8 font-['Arimo',sans-serif] text-[28px] font-bold leading-none text-black"
+                >
+                  Create playlist
+                </button>
+              )}
             </div>
           </div>
         </div>
 
         <div className="relative z-10 mt-[154px] rounded-[10px] bg-[#d1d1d1] px-4 py-5 sm:mt-[130px] sm:px-8 sm:py-6 lg:mt-[42px]">
-          <div className="grid grid-cols-[minmax(0,1fr)_220px_120px] gap-3 pb-3 font-['Arimo',sans-serif] text-[34px] font-bold leading-none text-black sm:px-4">
-            <p>Song</p>
-            <p className="-ml-20">Artist</p>
-            <p>Time</p>
-          </div>
+          {selectedPlaylist ? (
+            <>
+              <div className="grid grid-cols-[minmax(0,1fr)_220px_120px] gap-3 pb-3 font-['Arimo',sans-serif] text-[34px] font-bold leading-none text-black sm:px-4">
+                <p>Song</p>
+                <p className="-ml-20">Artist</p>
+                <p>Time</p>
+              </div>
 
-          <div className="space-y-2 sm:space-y-3">
-            {displayedTracks.map((track) => (
-              <div
-                key={track.id}
-                className="grid grid-cols-[minmax(0,1fr)_220px_120px] items-center gap-3 rounded-[10px] px-1 py-1 sm:px-4"
-              >
-                <div className="flex min-w-0 items-end gap-3">
-                  <img
-                    src={track.coverUrl}
-                    alt={`${track.title} cover`}
-                    className="h-[76px] w-[76px] rounded-[2px] object-cover"
-                  />
-                  <div className="min-w-0">
-                    <p className="truncate font-['Arimo',sans-serif] text-[36px] font-bold leading-[1.15] text-black">
-                      {track.title}
+              <div className="space-y-2 sm:space-y-3">
+                {displayedTracks.map((track) => (
+                  <div
+                    key={track.id}
+                    className="grid grid-cols-[minmax(0,1fr)_220px_120px] items-center gap-3 rounded-[10px] px-1 py-1 sm:px-4"
+                  >
+                    <div className="flex min-w-0 items-end gap-3">
+                      <img
+                        src={track.coverUrl}
+                        alt={`${track.title} cover`}
+                        className="h-[76px] w-[76px] rounded-[2px] object-cover"
+                      />
+                      <div className="min-w-0">
+                        <p className="truncate font-['Arimo',sans-serif] text-[36px] font-bold leading-[1.15] text-black">
+                          {track.title}
+                        </p>
+                        <p className="truncate font-['Arimo',sans-serif] text-[30px] font-bold leading-[1.05] text-black">
+                          {track.subtitle}
+                        </p>
+                      </div>
+                    </div>
+                    <p className="-ml-20 whitespace-nowrap px-3 font-['Arimo',sans-serif] text-[42px] font-bold leading-none text-black">
+                      {track.artist}
                     </p>
-                    <p className="truncate font-['Arimo',sans-serif] text-[30px] font-bold leading-[1.05] text-black">
-                      {track.subtitle}
+                    <p className="whitespace-nowrap px-3 text-right font-['Arimo',sans-serif] text-[42px] font-bold leading-none text-black">
+                      {track.duration}
                     </p>
                   </div>
-                </div>
-                <p className="-ml-20 whitespace-nowrap px-3 font-['Arimo',sans-serif] text-[42px] font-bold leading-none text-black">
-                  {track.artist}
-                </p>
-                <p className="whitespace-nowrap px-3 text-right font-['Arimo',sans-serif] text-[42px] font-bold leading-none text-black">
-                  {track.duration}
-                </p>
+                ))}
               </div>
-            ))}
-          </div>
+            </>
+          ) : (
+            <div className="grid min-h-[220px] place-items-center text-center font-['Arimo',sans-serif] text-black">
+              <div>
+                <p className="text-[34px] font-bold leading-none">No playlists yet</p>
+                <p className="mt-2 text-[20px] font-bold text-black/60">Create one manually when you are ready.</p>
+              </div>
+            </div>
+          )}
         </div>
 
       </section>

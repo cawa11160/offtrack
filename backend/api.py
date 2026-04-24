@@ -405,10 +405,7 @@ from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
-# NOTE: We intentionally use PBKDF2 for password hashing.
-# bcrypt can fail in slim Docker images due to native dependency issues,
-# which shows up as a 500 "Internal Server Error" during signup.
-# PBKDF2 is slower than bcrypt but is pure-Python and reliable for an MVP.
+# Legacy verifier for hashes created before the scrypt migration.
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev_change_me").strip()
@@ -416,6 +413,11 @@ JWT_ALG = os.getenv("JWT_ALG", "HS256").strip() or "HS256"
 ACCESS_TTL_MIN = int(os.getenv("ACCESS_TTL_MIN", "30"))
 REFRESH_TTL_DAYS = int(os.getenv("REFRESH_TTL_DAYS", "30"))
 PASSWORD_MIN_LENGTH = int(os.getenv("PASSWORD_MIN_LENGTH", "10"))
+PASSWORD_SCRYPT_N_LOG2 = int(os.getenv("PASSWORD_SCRYPT_N_LOG2", "14"))
+PASSWORD_SCRYPT_R = int(os.getenv("PASSWORD_SCRYPT_R", "8"))
+PASSWORD_SCRYPT_P = int(os.getenv("PASSWORD_SCRYPT_P", "1"))
+PASSWORD_SCRYPT_DKLEN = int(os.getenv("PASSWORD_SCRYPT_DKLEN", "64"))
+PASSWORD_SCRYPT_MAXMEM_MB = int(os.getenv("PASSWORD_SCRYPT_MAXMEM_MB", "64"))
 EMAIL_VERIFICATION_TOKEN_TTL_HOURS = int(os.getenv("EMAIL_VERIFICATION_TOKEN_TTL_HOURS", "24"))
 EMAIL_VERIFICATION_REQUIRED_FOR_ARTIST_UPLOADS = (
     os.getenv("EMAIL_VERIFICATION_REQUIRED_FOR_ARTIST_UPLOADS", "true").strip().lower() in ("1", "true", "yes", "on")
@@ -425,14 +427,104 @@ REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "offtrack_refresh").strip
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
 COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").lower()  # lax|strict|none
 
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _scrypt_params() -> tuple[int, int, int, int, int]:
+    n_log2 = max(14, min(20, PASSWORD_SCRYPT_N_LOG2))
+    r = max(1, min(32, PASSWORD_SCRYPT_R))
+    p = max(1, min(16, PASSWORD_SCRYPT_P))
+    dklen = max(32, min(128, PASSWORD_SCRYPT_DKLEN))
+    maxmem = max(32, PASSWORD_SCRYPT_MAXMEM_MB) * 1024 * 1024
+    return n_log2, r, p, dklen, maxmem
+
+
 def _hash_password(pw: str) -> str:
-    return pwd_context.hash(pw)
+    n_log2, r, p, dklen, maxmem = _scrypt_params()
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(
+        pw.encode("utf-8"),
+        salt=salt,
+        n=2**n_log2,
+        r=r,
+        p=p,
+        dklen=dklen,
+        maxmem=maxmem,
+    )
+    return (
+        f"scrypt$ln={n_log2},r={r},p={p},dk={dklen}"
+        f"${base64.urlsafe_b64encode(salt).decode('ascii')}"
+        f"${base64.urlsafe_b64encode(digest).decode('ascii')}"
+    )
+
+
+def _verify_scrypt_password(pw: str, pw_hash: str) -> bool:
+    try:
+        scheme, params_raw, salt_raw, digest_raw = pw_hash.split("$", 3)
+        if scheme != "scrypt":
+            return False
+        params = {}
+        for pair in params_raw.split(","):
+            key, value = pair.split("=", 1)
+            params[key] = int(value)
+        n_log2 = int(params["ln"])
+        r = int(params["r"])
+        p = int(params["p"])
+        dklen = int(params["dk"])
+        salt = base64.urlsafe_b64decode(salt_raw.encode("ascii"))
+        expected = base64.urlsafe_b64decode(digest_raw.encode("ascii"))
+        _, _, _, _, maxmem = _scrypt_params()
+        actual = hashlib.scrypt(
+            pw.encode("utf-8"),
+            salt=salt,
+            n=2**n_log2,
+            r=r,
+            p=p,
+            dklen=dklen,
+            maxmem=maxmem,
+        )
+        return secrets.compare_digest(actual, expected)
+    except Exception:
+        return False
 
 def _verify_password(pw: str, pw_hash: str) -> bool:
+    if (pw_hash or "").startswith("scrypt$"):
+        return _verify_scrypt_password(pw, pw_hash)
     try:
         return pwd_context.verify(pw, pw_hash)
     except Exception:
         return False
+
+
+def _password_hash_needs_update(pw_hash: str) -> bool:
+    if not (pw_hash or "").startswith("scrypt$"):
+        return True
+    try:
+        _, params_raw, _, _ = pw_hash.split("$", 3)
+        current = _scrypt_params()
+        wanted = {
+            "ln": current[0],
+            "r": current[1],
+            "p": current[2],
+            "dk": current[3],
+        }
+        actual = {}
+        for pair in params_raw.split(","):
+            key, value = pair.split("=", 1)
+            actual[key] = int(value)
+        return any(actual.get(key) != value for key, value in wanted.items())
+    except Exception:
+        return True
+
+
+def _verify_and_upgrade_password(db: Session, user: User, password: str) -> bool:
+    if not _verify_password(password, user.password_hash):
+        return False
+    if _password_hash_needs_update(user.password_hash):
+        user.password_hash = _hash_password(password)
+        db.add(user)
+    return True
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -482,7 +574,30 @@ def _email_verified(user: User) -> bool:
     return _coerce_utc_datetime(getattr(user, "email_verified_at", None)) is not None
 
 
+def _normalize_auth_email(value: str) -> str:
+    email = (value or "").strip().lower()
+    if not email or len(email) > 254 or _CONTROL_CHARS_RE.search(email):
+        raise HTTPException(status_code=422, detail="Enter a valid email address.")
+    return email
+
+
+def _sanitize_display_name(value: str | None) -> str | None:
+    name = _CONTROL_CHARS_RE.sub("", value or "")
+    name = _WHITESPACE_RE.sub(" ", name).strip()
+    if not name:
+        return None
+    if len(name) > 120:
+        raise HTTPException(status_code=422, detail="Name must be 120 characters or fewer.")
+    return name
+
+
+def _validate_password_input(password: str) -> None:
+    if "\x00" in (password or "") or _CONTROL_CHARS_RE.search(password or ""):
+        raise HTTPException(status_code=422, detail="Password contains unsupported characters.")
+
+
 def _password_policy_error(password: str) -> str | None:
+    _validate_password_input(password)
     if len(password or "") < PASSWORD_MIN_LENGTH:
         return f"Password must be at least {PASSWORD_MIN_LENGTH} characters."
     if not any(ch.isalpha() for ch in password):
@@ -763,8 +878,8 @@ def _require_artist_user(req: Request, db: Session) -> User:
 @app.post("/api/auth/signup", response_model=AuthOut)
 def auth_signup(payload: SignupIn, req: Request, resp: Response, db: Session = Depends(get_db)):
     _enforce_rate_limit("signup", req, RATE_LIMIT_SIGNUP_PER_MIN, 60)
-    email = payload.email.lower().strip()
-    name = (payload.name or "").strip() or None
+    email = _normalize_auth_email(str(payload.email))
+    name = _sanitize_display_name(payload.name)
     account_type = (payload.account_type or "listener").strip().lower()
     if account_type not in {"listener", "artist"}:
         account_type = "listener"
@@ -805,7 +920,8 @@ def auth_signup(payload: SignupIn, req: Request, resp: Response, db: Session = D
 @app.post("/api/auth/login", response_model=AuthOut)
 def auth_login(payload: LoginIn, req: Request, resp: Response, db: Session = Depends(get_db)):
     _enforce_rate_limit("login", req, RATE_LIMIT_LOGIN_PER_MIN, 60)
-    email = payload.email.lower().strip()
+    email = _normalize_auth_email(str(payload.email))
+    _validate_password_input(payload.password)
     ip = _client_ip(req)
     _check_auth_bruteforce(email, ip)
     try:
@@ -817,7 +933,7 @@ def auth_login(payload: LoginIn, req: Request, resp: Response, db: Session = Dep
         if locked_until and locked_until > _now_utc():
             retry_after = int((locked_until - _now_utc()).total_seconds())
             raise HTTPException(status_code=423, detail=f"Account locked. Retry in {max(1, retry_after)}s.")
-    if not user or not _verify_password(payload.password, user.password_hash):
+    if not user or not _verify_and_upgrade_password(db, user, payload.password):
         _record_auth_result(email, ip, ok=False)
         _audit_log(action="auth_login_failed", user_id=(user.id if user else None), email=email, req=req, reason="invalid_credentials")
         raise HTTPException(status_code=401, detail="Invalid credentials")

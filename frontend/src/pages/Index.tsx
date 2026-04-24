@@ -17,8 +17,9 @@ import {
 } from "lucide-react";
 
 import { apiGetMusicWeb, apiRecommend, type MusicWebResponse, type RecItem, type SeedSong } from "@/lib/api";
-import { albums, concerts, featuredPlaylists, merchItems } from "@/data/mockData";
+import { albums, featuredPlaylists, merchItems } from "@/data/mockData";
 import { useAuth } from "@/lib/auth";
+import { useLiveConcerts } from "@/lib/liveEvents";
 
 type Recommendation = {
   id: string;
@@ -109,6 +110,7 @@ export default function Index() {
   const [searchQuery, setSearchQuery] = useState("");
   const [homeRecs, setHomeRecs] = useState<Recommendation[]>([]);
   const [musicWeb, setMusicWeb] = useState<MusicWebResponse | null>(null);
+  const { concerts: nearbyConcerts, loading: eventsLoading } = useLiveConcerts(8);
 
   useEffect(() => {
     let alive = true;
@@ -319,11 +321,11 @@ export default function Index() {
           <aside className="grid content-start gap-5">
             <section className="rounded-lg border border-black/10 bg-white p-4">
               <div className="flex items-center justify-between gap-3">
-                <h2 className="text-xl font-bold">Tonight nearby</h2>
+                <h2 className="text-xl font-bold">{eventsLoading ? "Updating nearby" : "Live nearby"}</h2>
                 <Calendar className="h-5 w-5 text-black/40" />
               </div>
               <div className="mt-4 space-y-2">
-                {concerts.slice(0, 4).map((concert) => (
+                {nearbyConcerts.slice(0, 4).map((concert) => (
                   <button key={concert.id} type="button" onClick={() => navigate("/concerts")} className="flex w-full gap-3 rounded-md p-2 text-left hover:bg-black/5">
                     <img src={concert.coverUrl} alt="" className="h-12 w-12 rounded object-cover" />
                     <span className="min-w-0 flex-1">

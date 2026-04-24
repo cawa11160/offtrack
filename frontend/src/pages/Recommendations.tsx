@@ -2,10 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   BadgeCheck,
+  Bookmark,
+  BookmarkCheck,
   Disc3,
   ExternalLink,
   Heart,
+  Info,
   Loader2,
+  MapPin,
   Music2,
   Pause,
   Play,
@@ -31,8 +35,17 @@ import { extractSpotifyTrackId, fetchSpotifyStatus, initSpotifyPlayer, playSpoti
 type Rec = RecItem;
 type FeedbackAction = "superlike" | "like" | "dislike";
 type SeedSlot = 0 | 1 | 2;
+type DiscoveryQueueItem = {
+  id: string;
+  title: string;
+  artist: string;
+  imageUrl?: string;
+  reasons?: string[];
+  savedAt: string;
+};
 
 const slotLabels = ["Seed 1", "Seed 2", "Seed 3"];
+const DISCOVERY_QUEUE_KEY = "offtrack_discovery_queue";
 
 function cleanArtist(v: string) {
   const s = (v || "").trim();
@@ -61,6 +74,47 @@ function fallbackCover(title: string, artist: string) {
 
 function hasPlayableSource(rec: Rec) {
   return Boolean(rec.audioUrl || rec.previewUrl || rec.spotifyUrl || rec.spotifyUri);
+}
+
+function loadDiscoveryQueue(): DiscoveryQueueItem[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const rows = JSON.parse(window.localStorage.getItem(DISCOVERY_QUEUE_KEY) || "[]");
+    return Array.isArray(rows) ? rows.slice(0, 40) : [];
+  } catch {
+    return [];
+  }
+}
+
+function reasonChips(rec: Rec, seeds: SeedSong[]) {
+  const chips = [
+    ...(rec.reasons ?? []),
+    rec.popularity ? `Popularity ${rec.popularity}` : "",
+    rec.year ? `Released ${rec.year}` : "",
+    seeds[0]?.artist ? `Anchor: ${seeds[0].artist}` : seeds[0]?.title ? `Anchor: ${seeds[0].title}` : "",
+  ]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  return Array.from(new Set(chips)).slice(0, 5);
+}
+
+function activationReasons(rec: Rec, seeds: SeedSong[]) {
+  const anchor = seeds[0];
+  const base = rec.reasons?.filter(Boolean).slice(0, 3) ?? [];
+  const fallback = [
+    anchor?.title ? `Starts from your seed "${anchor.title}".` : "Starts from your current seed mix.",
+    rec.previewUrl || rec.audioUrl ? "You can sample it before committing." : "You can inspect it before opening the full artist profile.",
+    "Your feedback will immediately reshape the next set.",
+  ];
+  return base.length ? base.map((reason) => reason.endsWith(".") ? reason : `${reason}.`) : fallback;
+}
+
+function familiarAnchor(rec: Rec, seeds: SeedSong[]) {
+  const artistSeed = seeds.find((seed) => seed.artist);
+  const titleSeed = seeds.find((seed) => seed.title);
+  if (artistSeed?.artist) return `For fans of ${artistSeed.artist}`;
+  if (titleSeed?.title) return `Seeded by ${titleSeed.title}`;
+  return rec.reasons?.[0] || "Based on your taste profile";
 }
 
 function ModeButton({
@@ -176,7 +230,10 @@ export default function Recommendations() {
   const [selectedRecId, setSelectedRecId] = useState<string>("");
   const [playingId, setPlayingId] = useState<string>("");
   const [isPlaying, setIsPlaying] = useState(false);
+  const [discoveryQueue, setDiscoveryQueue] = useState<DiscoveryQueueItem[]>(() => loadDiscoveryQueue());
+  const [expandedWhyByTrack, setExpandedWhyByTrack] = useState<Record<string, boolean>>({});
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const previewTimerRef = useRef<number | null>(null);
   const spotifySessionRef = useRef<SpotifySession | null>(null);
   const playback = usePlaybackMilestones("recommendations");
 
@@ -213,6 +270,15 @@ export default function Recommendations() {
   const canSubmit = currentSeeds.length > 0;
   const selectedRec = useMemo(() => recs.find((rec) => rec.id === selectedRecId) ?? recs[0] ?? null, [recs, selectedRecId]);
   const seedSummary = currentSeeds.map((seed) => [seed.title, seed.artist].filter(Boolean).join(" - "));
+  const queuedIds = useMemo(() => new Set(discoveryQueue.map((item) => item.id)), [discoveryQueue]);
+  const selectedReasonChips = useMemo(
+    () => (selectedRec ? reasonChips(selectedRec, currentSeeds) : []),
+    [currentSeeds, selectedRec]
+  );
+  const selectedWhy = useMemo(
+    () => (selectedRec ? activationReasons(selectedRec, currentSeeds) : []),
+    [currentSeeds, selectedRec]
+  );
 
   const quickSeeds = useMemo(
     () =>
@@ -278,7 +344,42 @@ export default function Recommendations() {
     pickSeed(slot === -1 ? 0 : slot, seed);
   }
 
+  function persistDiscoveryQueue(next: DiscoveryQueueItem[]) {
+    setDiscoveryQueue(next);
+    window.localStorage.setItem(DISCOVERY_QUEUE_KEY, JSON.stringify(next.slice(0, 40)));
+  }
+
+  function saveToDiscoveryQueue(rec: Rec) {
+    const item: DiscoveryQueueItem = {
+      id: rec.id,
+      title: rec.title,
+      artist: cleanArtist(rec.artist),
+      imageUrl: rec.imageUrl || undefined,
+      reasons: reasonChips(rec, currentSeeds),
+      savedAt: new Date().toISOString(),
+    };
+    persistDiscoveryQueue([item, ...discoveryQueue.filter((row) => row.id !== rec.id)].slice(0, 40));
+    phCapture("save_discovery_queue", { track_id: rec.id, title: rec.title, artist: rec.artist });
+    void apiFeedback(rec.id, "click_recommendation", {
+      sourcePage: "recommendations",
+      extra: { action: "save_discovery_queue", reasons: item.reasons },
+    });
+  }
+
+  function selectRecommendation(rec: Rec) {
+    setSelectedRecId(rec.id);
+    phCapture("select_recommendation", { track_id: rec.id, title: rec.title, artist: rec.artist });
+    void apiFeedback(rec.id, "click_recommendation", {
+      sourcePage: "recommendations",
+      extra: { action: "select", anchor: familiarAnchor(rec, currentSeeds) },
+    });
+  }
+
   const stopAudio = useCallback(() => {
+    if (previewTimerRef.current !== null) {
+      window.clearTimeout(previewTimerRef.current);
+      previewTimerRef.current = null;
+    }
     playback.skip();
     const a = audioRef.current;
     if (a) {
@@ -288,6 +389,19 @@ export default function Recommendations() {
     setPlayingId("");
     setIsPlaying(false);
   }, [playback]);
+
+  async function onPreview(rec: Rec) {
+    await onPlay(rec);
+    if (previewTimerRef.current !== null) window.clearTimeout(previewTimerRef.current);
+    previewTimerRef.current = window.setTimeout(() => {
+      stopAudio();
+    }, 20000);
+    phCapture("preview_20s_recommendation", { track_id: rec.id, title: rec.title, artist: rec.artist });
+    void apiFeedback(rec.id, "click_recommendation", {
+      sourcePage: "recommendations",
+      extra: { action: "preview_20s", anchor: familiarAnchor(rec, currentSeeds) },
+    });
+  }
 
   async function playViaSpotify(rec: Rec): Promise<boolean> {
     const trackId = extractSpotifyTrackId(rec.spotifyUri || rec.spotifyUrl || "");
@@ -475,6 +589,37 @@ export default function Recommendations() {
             </div>
 
             <div className="rounded-lg border border-black/10 bg-white p-4">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold text-black/55">Discovery queue</p>
+                <span className="rounded-md bg-[#f8f7f2] px-2 py-1 text-xs font-bold text-black/55">{discoveryQueue.length}</span>
+              </div>
+              <div className="mt-3 grid gap-2">
+                {discoveryQueue.length ? (
+                  discoveryQueue.slice(0, 4).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => navigate(`/track/${encodeURIComponent(item.id)}?title=${encodeURIComponent(item.title)}&artist=${encodeURIComponent(item.artist)}`)}
+                      className="flex items-center gap-3 rounded-md bg-[#f8f7f2] p-2 text-left hover:bg-black/5"
+                    >
+                      <div className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded bg-white">
+                        {item.imageUrl ? <img src={item.imageUrl} alt="" className="h-full w-full object-cover" /> : <Bookmark className="h-4 w-4 text-black/45" />}
+                      </div>
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-bold">{item.title}</span>
+                        <span className="block truncate text-xs font-semibold text-black/45">{item.artist}</span>
+                      </span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="rounded-md bg-[#f8f7f2] p-3 text-sm font-semibold text-black/45">
+                    Save unknown tracks here before deciding.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-black/10 bg-white p-4">
               <p className="text-sm font-semibold text-black/55">Popularity mode</p>
               <div className="mt-3 flex flex-wrap gap-2">
                 <ModeButton active={mode === "all"} label="All" onClick={() => setMode("all")} />
@@ -507,10 +652,36 @@ export default function Recommendations() {
                     <p className="text-sm font-semibold uppercase tracking-[0.18em] text-black/45">Selected track</p>
                     <h2 className="mt-2 text-4xl font-bold leading-none">{selectedRec.title}</h2>
                     <p className="mt-3 text-lg font-semibold text-black/55">{cleanArtist(selectedRec.artist)}</p>
+                    <div className="mt-4 rounded-md bg-white p-3">
+                      <div className="flex items-center gap-2 text-sm font-bold text-black">
+                        <Info className="h-4 w-4 text-black/45" />
+                        {familiarAnchor(selectedRec, currentSeeds)}
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {selectedReasonChips.map((chip) => (
+                          <span key={chip} className="rounded-md bg-[#f1f5f9] px-2 py-1 text-xs font-bold text-black/60">
+                            {chip}
+                          </span>
+                        ))}
+                      </div>
+                      <ul className="mt-3 space-y-1 text-sm font-semibold text-black/60">
+                        {selectedWhy.slice(0, 3).map((reason) => (
+                          <li key={reason}>- {reason}</li>
+                        ))}
+                      </ul>
+                    </div>
                     <div className="mt-5 flex flex-wrap gap-2">
-                      <button type="button" onClick={() => void onPlay(selectedRec)} disabled={!hasPlayableSource(selectedRec)} className="inline-flex h-10 items-center gap-2 rounded-md bg-black px-4 text-sm font-semibold text-white hover:bg-black/80 disabled:opacity-50">
+                      <button type="button" onClick={() => void onPreview(selectedRec)} disabled={!hasPlayableSource(selectedRec)} className="inline-flex h-10 items-center gap-2 rounded-md bg-black px-4 text-sm font-semibold text-white hover:bg-black/80 disabled:opacity-50">
                         {playingId === selectedRec.id && isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-                        {playingId === selectedRec.id && isPlaying ? "Pause" : "Play"}
+                        {playingId === selectedRec.id && isPlaying ? "Pause" : "Preview 20s"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => saveToDiscoveryQueue(selectedRec)}
+                        className="inline-flex h-10 items-center gap-2 rounded-md border border-black/10 bg-white px-4 text-sm font-semibold hover:bg-black/5"
+                      >
+                        {queuedIds.has(selectedRec.id) ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+                        {queuedIds.has(selectedRec.id) ? "Saved" : "Save"}
                       </button>
                       {selectedRec.spotifyUrl ? (
                         <a href={selectedRec.spotifyUrl} target="_blank" rel="noreferrer" className="inline-flex h-10 items-center gap-2 rounded-md border border-black/10 bg-white px-4 text-sm font-semibold hover:bg-black/5">
@@ -541,20 +712,38 @@ export default function Recommendations() {
                 <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                   {recs.map((rec) => {
                     const selected = rec.id === selectedRec?.id;
+                    const chips = reasonChips(rec, currentSeeds);
+                    const whyOpen = Boolean(expandedWhyByTrack[rec.id]);
+                    const why = activationReasons(rec, currentSeeds);
                     return (
                       <article key={rec.id} className={`rounded-lg border p-3 transition ${selected ? "border-black bg-[#f8f7f2]" : "border-black/10 bg-white hover:bg-[#f8f7f2]"}`}>
-                        <button type="button" onClick={() => setSelectedRecId(rec.id)} className="flex w-full gap-3 text-left">
+                        <button type="button" onClick={() => selectRecommendation(rec)} className="flex w-full gap-3 text-left">
                           <img src={(rec.imageUrl || "").trim() || fallbackCover(rec.title, rec.artist)} alt="" className="h-20 w-20 shrink-0 rounded-md object-cover" />
                           <span className="min-w-0">
                             <span className="block truncate text-sm font-bold">{rec.title}</span>
                             <span className="mt-1 block truncate text-xs font-semibold text-black/50">{cleanArtist(rec.artist)}</span>
-                            <span className="mt-3 block truncate text-xs font-semibold text-black/40">{(rec.reasons ?? []).slice(0, 2).join(" - ") || "Based on your seeds"}</span>
+                            <span className="mt-3 block truncate text-xs font-semibold text-black/40">{familiarAnchor(rec, currentSeeds)}</span>
                           </span>
                         </button>
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {chips.slice(0, 3).map((chip) => (
+                            <span key={chip} className="rounded bg-[#f1f5f9] px-2 py-1 text-[11px] font-bold text-black/55">
+                              {chip}
+                            </span>
+                          ))}
+                        </div>
+                        {whyOpen ? (
+                          <div className="mt-3 rounded-md bg-white p-3 text-xs font-semibold text-black/60">
+                            {why.slice(0, 3).map((reason) => (
+                              <p key={reason}>- {reason}</p>
+                            ))}
+                          </div>
+                        ) : null}
 
-                        <div className="mt-3 grid grid-cols-4 gap-2">
-                          <button type="button" onClick={() => void onPlay(rec)} disabled={!hasPlayableSource(rec)} className="grid h-9 place-items-center rounded-md bg-black text-white disabled:opacity-40" aria-label="Play recommendation">
+                        <div className="mt-3 grid grid-cols-6 gap-2">
+                          <button type="button" onClick={() => void onPreview(rec)} disabled={!hasPlayableSource(rec)} className="col-span-2 inline-flex h-9 items-center justify-center gap-1 rounded-md bg-black px-2 text-xs font-bold text-white disabled:opacity-40" aria-label="Preview recommendation">
                             {playingId === rec.id && isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                            <span className="hidden sm:inline">20s</span>
                           </button>
                           <button type="button" disabled={!!feedbackBusyByTrack[rec.id]} onClick={() => void toggleFeedback(rec, "superlike")} className={`grid h-9 place-items-center rounded-md ${isFeedbackActive(rec.id, "superlike") ? "bg-[#eef2ff] text-[#3730a3]" : "bg-[#f1f5f9] text-black/65"}`} aria-label="Superlike">
                             <Star className="h-4 w-4" />
@@ -565,7 +754,25 @@ export default function Recommendations() {
                           <button type="button" disabled={!!feedbackBusyByTrack[rec.id]} onClick={() => void toggleFeedback(rec, "dislike")} className={`grid h-9 place-items-center rounded-md ${isFeedbackActive(rec.id, "dislike") ? "bg-[#fff1f0] text-[#9f2f26]" : "bg-[#f1f5f9] text-black/65"}`} aria-label="Dislike">
                             <ThumbsDown className="h-4 w-4" />
                           </button>
+                          <button type="button" onClick={() => saveToDiscoveryQueue(rec)} className={`grid h-9 place-items-center rounded-md ${queuedIds.has(rec.id) ? "bg-[#ecfeff] text-[#0f766e]" : "bg-[#f1f5f9] text-black/65"}`} aria-label="Save to discovery queue">
+                            {queuedIds.has(rec.id) ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+                          </button>
                         </div>
+                        <button
+                          type="button"
+                          onClick={() => setExpandedWhyByTrack((prev) => ({ ...prev, [rec.id]: !prev[rec.id] }))}
+                          className="mt-2 inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-bold text-black/55 hover:bg-black/5"
+                        >
+                          <Info className="h-3.5 w-3.5" />
+                          {whyOpen ? "Hide why" : "Why this?"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => navigate(`/track/${encodeURIComponent(rec.id)}?title=${encodeURIComponent(rec.title)}&artist=${encodeURIComponent(rec.artist)}`)}
+                          className="ml-2 inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-bold text-black/55 hover:bg-black/5"
+                        >
+                          Open
+                        </button>
                       </article>
                     );
                   })}
@@ -596,12 +803,20 @@ export default function Recommendations() {
                     </div>
                   </div>
                   <p className="mt-3 truncate text-sm font-semibold text-black/60">{(m.topTracks ?? []).slice(0, 3).join(" - ")}</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {(m.reasons ?? ["Adjacent to your seed mix"]).slice(0, 3).map((reason) => (
+                      <span key={reason} className="rounded-md bg-[#f8f7f2] px-2 py-1 text-xs font-bold text-black/55">
+                        {reason}
+                      </span>
+                    ))}
+                  </div>
                   <div className="mt-4 grid grid-cols-3 gap-2">
                     <button type="button" onClick={() => navigate(`/artist/${encodeURIComponent(m.name)}`)} className="h-9 rounded-md bg-[#f1f5f9] text-sm font-bold hover:bg-black/10">
                       Profile
                     </button>
-                    <button type="button" onClick={() => window.open(m.concertsUrl || `https://www.songkick.com/search?query=${encodeURIComponent(m.name)}`, "_blank", "noopener,noreferrer")} className="h-9 rounded-md bg-[#f1f5f9] text-sm font-bold hover:bg-black/10">
-                      Concerts
+                    <button type="button" onClick={() => window.open(m.concertsUrl || `https://www.songkick.com/search?query=${encodeURIComponent(m.name)}`, "_blank", "noopener,noreferrer")} className="inline-flex h-9 items-center justify-center gap-1 rounded-md bg-[#f1f5f9] text-sm font-bold hover:bg-black/10">
+                      <MapPin className="h-3.5 w-3.5" />
+                      Live
                     </button>
                     <button type="button" disabled={!m.spotifyUrl} onClick={() => m.spotifyUrl && window.open(m.spotifyUrl, "_blank", "noopener,noreferrer")} className="h-9 rounded-md bg-[#f1f5f9] text-sm font-bold hover:bg-black/10 disabled:opacity-50">
                       Spotify

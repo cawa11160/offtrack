@@ -1,8 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronLeft, ChevronRight, Clock3, Cog, Music2, Search, User } from "lucide-react";
-import { apiRecommend, type RecItem, type SeedSong } from "@/lib/api";
-import { albums } from "@/data/mockData";
+import {
+  ArrowRight,
+  Calendar,
+  Compass,
+  Disc3,
+  MapPin,
+  Music2,
+  Radio,
+  Search,
+  Settings,
+  Share2,
+  ShoppingBag,
+  Sparkles,
+  UserRound,
+} from "lucide-react";
+
+import { apiGetMusicWeb, apiRecommend, type MusicWebResponse, type RecItem, type SeedSong } from "@/lib/api";
+import { albums, concerts, featuredPlaylists, merchItems } from "@/data/mockData";
 import { useAuth } from "@/lib/auth";
 
 type Recommendation = {
@@ -15,14 +30,12 @@ type Recommendation = {
 function cleanArtist(v: string) {
   const s = (v || "").trim();
   if (!s) return "Unknown Artist";
-  // Handle dataset-style strings like "['Artist Name']"
   if (s.startsWith("[") && s.endsWith("]")) {
     try {
-      const json = s.replace(/'/g, "\"");
-      const arr = JSON.parse(json);
+      const arr = JSON.parse(s.replace(/'/g, "\""));
       if (Array.isArray(arr) && arr.length > 0) return String(arr[0] || "Unknown Artist");
     } catch {
-      // no-op
+      // Fall back to a cleaned string below.
     }
     return s.replace(/^\[+|]+$/g, "").replace(/['"]/g, "").trim() || "Unknown Artist";
   }
@@ -45,61 +58,48 @@ function mapRecToCard(r: RecItem): Recommendation {
   };
 }
 
-function Frame12Section({
-  sectionId,
+function prettyDate(value?: string) {
+  if (!value) return "Date TBA";
+  const d = new Date(value);
+  if (!Number.isNaN(d.getTime())) return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return value;
+}
+
+function RecommendationRail({
   title,
-  recommendations,
+  items,
   onCardClick,
 }: {
-  sectionId: string;
   title: string;
-  recommendations: Recommendation[];
+  items: Recommendation[];
   onCardClick: (item: Recommendation) => void;
 }) {
   return (
-    <div>
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black">{title}</h3>
-        <div className="flex h-10 items-center gap-[10px]">
-          <ChevronLeft className="h-6 w-6 text-black/70" />
-          <ChevronRight className="h-6 w-6 text-black/70" />
-        </div>
+    <section className="rounded-lg border border-black/10 bg-white p-4">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-xl font-bold">{title}</h2>
+        <ArrowRight className="h-5 w-5 text-black/40" />
       </div>
-
-      <div className="rounded-[10px] bg-[#d0d0d0] px-[17px] pb-[12px] pt-[13px]">
-        <div className="grid grid-cols-1 gap-x-6 gap-y-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {recommendations.map((item) => (
-            <button
-              key={`${item.id}-${sectionId}`}
-              type="button"
-              onClick={() => onCardClick(item)}
-              className="flex w-full max-w-[190px] flex-col items-center justify-self-center text-center transition-transform hover:scale-[1.02]"
-            >
-              <img
-                src={item.cover}
-                alt={`${item.title} cover`}
-                className="h-[170px] w-[170px] rounded-[6px] object-cover"
-                loading="lazy"
-                referrerPolicy="no-referrer"
-                crossOrigin="anonymous"
-                onError={(e) => {
-                  const el = e.currentTarget;
-                  if (!el.src.includes("picsum.photos")) {
-                    el.src = fallbackCover(item.title, item.artist);
-                  }
-                }}
-              />
-              <h4 className="mt-[12px] h-[52px] overflow-hidden font-['Arimo',sans-serif] text-[18px] font-bold leading-tight text-black">
-                {item.title}
-              </h4>
-              <p className="h-[28px] overflow-hidden font-['Arimo',sans-serif] text-[18px] font-bold leading-tight text-black/90">
-                {item.artist}
-              </p>
-            </button>
-          ))}
-        </div>
+      <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
+        {items.map((item) => (
+          <button key={`${title}-${item.id}`} type="button" onClick={() => onCardClick(item)} className="min-w-0 text-left">
+            <img
+              src={item.cover}
+              alt={item.title}
+              className="aspect-square w-full rounded-md object-cover"
+              loading="lazy"
+              referrerPolicy="no-referrer"
+              onError={(event) => {
+                const el = event.currentTarget;
+                if (!el.src.includes("picsum.photos")) el.src = fallbackCover(item.title, item.artist);
+              }}
+            />
+            <p className="mt-2 truncate text-sm font-bold">{item.title}</p>
+            <p className="truncate text-xs font-semibold text-black/50">{item.artist}</p>
+          </button>
+        ))}
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -107,8 +107,8 @@ export default function Index() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchOpen, setSearchOpen] = useState(false);
   const [homeRecs, setHomeRecs] = useState<Recommendation[]>([]);
+  const [musicWeb, setMusicWeb] = useState<MusicWebResponse | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -116,32 +116,34 @@ export default function Index() {
       const seeds: SeedSong[] = [];
       const data = await apiRecommend(seeds, 16, "all", []).catch(() => ({ recommendations: [] as RecItem[] }));
       if (!alive) return;
-
       const mapped = (data.recommendations || []).map(mapRecToCard).filter((x) => x.title && x.artist);
-      if (mapped.length > 0) {
-        setHomeRecs(mapped);
-        return;
-      }
-
       setHomeRecs(
-        albums.slice(0, 12).map((a) => ({
-          id: a.id,
-          title: a.title,
-          artist: a.artist,
-          cover: a.coverUrl || fallbackCover(a.title, a.artist),
-        }))
+        mapped.length
+          ? mapped
+          : albums.slice(0, 12).map((a) => ({
+              id: a.id,
+              title: a.title,
+              artist: a.artist,
+              cover: a.coverUrl || fallbackCover(a.title, a.artist),
+            }))
       );
     })();
-
     return () => {
       alive = false;
     };
   }, []);
 
-  const madeForYou = useMemo(() => homeRecs.slice(0, 3), [homeRecs]);
-  const newReleases = useMemo(() => homeRecs.slice(3, 6), [homeRecs]);
-  const recentlyPlayed = useMemo(() => homeRecs.slice(6, 9), [homeRecs]);
-  const moreIndie = useMemo(() => homeRecs.slice(9, 12), [homeRecs]);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const data = await apiGetMusicWeb(80).catch(() => null);
+      if (alive) setMusicWeb(data);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   const displayName = useMemo(() => {
     const name = (user?.name || "").trim();
     if (name) return name.split(/\s+/)[0];
@@ -149,152 +151,226 @@ export default function Index() {
     return emailName || "there";
   }, [user?.email, user?.name]);
 
+  const madeForYou = useMemo(() => homeRecs.slice(0, 4), [homeRecs]);
+  const newReleases = useMemo(() => homeRecs.slice(4, 8), [homeRecs]);
+  const recentlyPlayed = useMemo(() => homeRecs.slice(8, 12), [homeRecs]);
+  const topArtists = musicWeb?.stats?.topArtists ?? [];
+  const topGenres = musicWeb?.stats?.topGenres ?? [];
+  const searchResults = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return homeRecs.slice(0, 5);
+    return homeRecs.filter((item) => `${item.title} ${item.artist}`.toLowerCase().includes(q)).slice(0, 6);
+  }, [homeRecs, searchQuery]);
+
   function openTrack(item: Recommendation) {
-    navigate(
-      `/track/${encodeURIComponent(item.id)}?title=${encodeURIComponent(item.title)}&artist=${encodeURIComponent(item.artist)}`
-    );
+    navigate(`/track/${encodeURIComponent(item.id)}?title=${encodeURIComponent(item.title)}&artist=${encodeURIComponent(item.artist)}`);
   }
 
-  function goAccount() {
-    navigate(user ? "/account" : "/login");
+  function submitSearch() {
+    const q = searchQuery.trim();
+    if (q) navigate(`/search/${encodeURIComponent(q)}`);
+    else navigate("/search");
   }
+
+  const actionCards = [
+    { label: "Taste engine", path: "/recommendations", icon: Sparkles, tone: "bg-[#eef2ff]" },
+    { label: "Listening graph", path: "/web", icon: Share2, tone: "bg-[#e8f7f5]" },
+    { label: "Concert map", path: "/concerts", icon: MapPin, tone: "bg-[#fff7ed]" },
+    { label: "Lyric AI", path: "/lyric-ai", icon: Radio, tone: "bg-[#fdf2f8]" },
+  ];
 
   return (
-    <div className="relative min-h-screen w-full bg-white">
-      <section className="w-full bg-white px-3 py-5 pb-44 sm:px-7 sm:py-7 sm:pb-44">
-        <div className="mx-auto flex w-full max-w-full flex-col gap-6 lg:flex-row lg:gap-8">
-          <div className="flex h-fit items-center gap-2">
-            <div className="grid h-[55px] w-[60px] place-items-center rounded-[10px] border border-black bg-white">
-              <Music2 className="h-7 w-7 text-black" />
+    <div className="min-h-screen w-full bg-white pb-36 text-black">
+      <section className="mx-auto w-full max-w-7xl px-4 pt-6 sm:px-6 lg:px-8">
+        <header className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="grid h-11 w-11 place-items-center rounded-md border border-black/10 bg-white">
+              <Music2 className="h-6 w-6" />
             </div>
-            <h1 className="font-['Arimo',sans-serif] text-[32px] font-bold leading-none text-black">Offtrack</h1>
-          </div>
-
-          <div className="min-w-0 flex-1">
-            <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <div className="relative flex-1">
-                <div className="h-[54px] rounded-[10px] bg-[#d0d0d0] px-4 py-[10px]">
-                  <div className="flex h-full items-center gap-3">
-                    <Search className="h-6 w-6 text-black/75" />
-                    <input
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      onFocus={() => setSearchOpen(true)}
-                      onBlur={() => setTimeout(() => setSearchOpen(false), 120)}
-                      placeholder="Search"
-                      className="h-full flex-1 bg-transparent font-['Arimo',sans-serif] text-[22px] font-bold leading-none text-black outline-none placeholder:text-black/60"
-                    />
-                    <div className="rounded-[8px] bg-white px-3 py-1 font-['Arimo',sans-serif] text-[16px] font-bold text-black/55">
-                      Ctrl + K
-                    </div>
-                  </div>
-                </div>
-
-                {searchOpen && (
-                  <div className="absolute left-0 right-0 top-[86px] z-30 overflow-hidden rounded-[10px] border border-black/10 bg-[#d0d0d0]">
-                    <div className="grid grid-cols-1 gap-0 lg:grid-cols-[1.05fr_0.95fr]">
-                      <div className="border-b border-black/10 px-4 py-4 lg:border-b-0 lg:border-r">
-                        <p className="font-['Arimo',sans-serif] text-[22px] font-bold text-black/70">Recent</p>
-                        <div className="mt-3 space-y-3">
-                          {["Neoma", "Perspective", "Neumorphism"].map((item) => (
-                            <button
-                              key={item}
-                              type="button"
-                              className="flex items-center gap-3 font-['Arimo',sans-serif] text-[28px] font-bold text-black"
-                            >
-                              <Clock3 className="h-6 w-6 text-black/50" />
-                              {item}
-                            </button>
-                          ))}
-                        </div>
-
-                        <div className="mt-5 border-t border-black/10 pt-4 font-['Arimo',sans-serif] text-[26px] font-bold leading-tight text-black">
-                          <button type="button" onClick={goAccount} className="block">
-                            Profile
-                          </button>
-                          <button type="button" onClick={() => navigate("/settings")} className="block">
-                            Settings
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="px-4 py-4 font-['Arimo',sans-serif] font-bold text-black">
-                        <div className="rounded-[10px] bg-white p-4">
-                          <p className="text-[30px] leading-none">Songs</p>
-                          <p className="mt-2 text-[24px] text-black/75">Find more</p>
-                        </div>
-                        <div className="mt-3 rounded-[10px] bg-white p-4">
-                          <p className="text-[30px] leading-none">Albums</p>
-                          <p className="mt-2 text-[24px] text-black/75">Find more...</p>
-                        </div>
-                        <div className="mt-3 rounded-[10px] bg-white p-4">
-                          <p className="text-[30px] leading-none">Playlists</p>
-                          <p className="mt-2 text-[24px] text-black/75">Find more...</p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="flex h-[54px] w-[110px] items-center justify-center gap-2 rounded-[10px] bg-[#d0d0d0] px-4 py-[7px]">
-                <button type="button" onClick={goAccount} aria-label="Go to account">
-                  <User className="h-8 w-8 text-black/80" />
-                </button>
-                <button type="button" onClick={() => navigate("/settings")} aria-label="Go to settings">
-                  <Cog className="h-8 w-8 text-black/80" />
-                </button>
-              </div>
-            </div>
-
-            <div className="mb-8 rounded-[10px] bg-[#d0d0d0] px-[9px] py-8">
-              <div className="max-w-[615px] font-['Arimo',sans-serif] font-bold text-black">
-                <h2 className="text-[36px] leading-[1.1]">Welcome back {displayName},</h2>
-                <p className="mt-1 text-[24px] leading-[1.15]">
-                  A streaming experience built for discovering new voices, new scenes, and new sounds. Explore new
-                  artists, scenes, and sounds before they break through.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => navigate("/artist")}
-                  className="mt-5 rounded-[10px] bg-black px-5 py-3 text-[18px] text-white transition-opacity hover:opacity-90"
-                >
-                  Open Artist Hub
-                </button>
-              </div>
-            </div>
-
-            <div className="mb-8 grid grid-cols-1 gap-[15px] lg:grid-cols-2">
-              <div className="min-w-0 rounded-[10px] bg-[#d0d0d0] p-[10px]">
-                <div className="font-['Arimo',sans-serif] text-black">
-                  <p className="pt-2 text-[20px] font-bold leading-tight">Your daily usage pattern</p>
-                  <p className="mt-2 text-[18px] font-bold leading-tight">On average, you have spent 1 hr on Offtrack</p>
-                  <p className="text-[18px] font-bold leading-tight">You typically use Offtrack at night</p>
-                </div>
-              </div>
-
-              <div className="min-w-0 rounded-[10px] bg-[#d0d0d0] px-[10px] py-[17px] font-['Arimo',sans-serif] font-bold text-black">
-                <p className="text-[20px] leading-tight">Most streamed genres for you are currently...</p>
-                <p className="text-[18px] leading-tight">Indie rock, Pop, Punk rock</p>
-                <p className="mt-3 text-[20px] leading-tight">Most streamed musicians for you are currently...</p>
-                <p className="text-[18px] leading-tight">
-                  {madeForYou.map((x) => x.artist).filter(Boolean).slice(0, 3).join(", ") || "Loading..."}
-                </p>
-              </div>
-            </div>
-
-            <Frame12Section sectionId="frame12-1" title="Made for you" recommendations={madeForYou} onCardClick={openTrack} />
-            <div className="mt-8">
-              <Frame12Section sectionId="frame12-2" title="New releases for you" recommendations={newReleases} onCardClick={openTrack} />
-            </div>
-            <div className="mt-8">
-              <Frame12Section sectionId="frame12-3" title="Recently played" recommendations={recentlyPlayed} onCardClick={openTrack} />
-            </div>
-            <div className="mt-8">
-              <Frame12Section sectionId="frame12-4" title="More indie rock..." recommendations={moreIndie} onCardClick={openTrack} />
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-[0.18em] text-black/45">Offtrack</p>
+              <h1 className="text-2xl font-bold leading-none">Home</h1>
             </div>
           </div>
-        </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => navigate(user ? "/profile" : "/login")}
+              className="grid h-10 w-10 place-items-center rounded-md border border-black/10 bg-white hover:bg-black/5"
+              aria-label="Profile"
+            >
+              <UserRound className="h-5 w-5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate("/settings")}
+              className="grid h-10 w-10 place-items-center rounded-md border border-black/10 bg-white hover:bg-black/5"
+              aria-label="Settings"
+            >
+              <Settings className="h-5 w-5" />
+            </button>
+          </div>
+        </header>
+
+        <section className="mt-6 grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+          <div className="rounded-lg bg-[#f8f7f2] p-5 sm:p-7">
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-black/45">Welcome back {displayName}</p>
+            <h2 className="mt-2 max-w-3xl text-4xl font-bold leading-none sm:text-6xl">
+              Find the next track, artist, or scene before it breaks.
+            </h2>
+            <div className="mt-6 flex max-w-3xl flex-col gap-3 sm:flex-row">
+              <div className="flex h-12 flex-1 items-center gap-3 rounded-md border border-black/10 bg-white px-4">
+                <Search className="h-5 w-5 text-black/45" />
+                <input
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") submitSearch();
+                  }}
+                  className="min-w-0 flex-1 bg-transparent text-base font-semibold outline-none placeholder:text-black/35"
+                  placeholder="Search tracks, artists, genres"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={submitSearch}
+                className="inline-flex h-12 items-center justify-center gap-2 rounded-md bg-black px-5 text-sm font-semibold text-white hover:bg-black/80"
+              >
+                <Compass className="h-4 w-4" />
+                Browse
+              </button>
+            </div>
+            {searchResults.length ? (
+              <div className="mt-4 grid max-w-3xl gap-2 sm:grid-cols-2">
+                {searchResults.slice(0, 4).map((item) => (
+                  <button key={`search-${item.id}`} type="button" onClick={() => openTrack(item)} className="flex items-center gap-3 rounded-md bg-white p-2 text-left hover:bg-black/5">
+                    <img src={item.cover} alt="" className="h-11 w-11 rounded object-cover" />
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-bold">{item.title}</span>
+                      <span className="block truncate text-xs font-semibold text-black/50">{item.artist}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          <aside className="grid gap-3">
+            <div className="rounded-lg border border-black/10 bg-white p-4">
+              <p className="text-sm font-semibold text-black/55">Your listening profile</p>
+              <div className="mt-4 grid grid-cols-2 gap-3">
+                <div className="rounded-md bg-[#f8f7f2] p-3">
+                  <p className="text-2xl font-bold">{musicWeb?.stats?.interactionCount ?? 0}</p>
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-black/45">Signals</p>
+                </div>
+                <div className="rounded-md bg-[#f8f7f2] p-3">
+                  <p className="text-2xl font-bold">{musicWeb?.stats?.trackCount ?? 0}</p>
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-black/45">Tracks</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate("/profile")}
+                className="mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-black text-sm font-semibold text-white hover:bg-black/80"
+              >
+                <UserRound className="h-4 w-4" />
+                Open profile
+              </button>
+            </div>
+
+            <div className="rounded-lg border border-black/10 bg-[#f8f7f2] p-4">
+              <p className="text-sm font-semibold text-black/55">Top taste signals</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {[...topArtists.map((x) => x.name), ...topGenres.map((x) => x.name)].slice(0, 8).map((name) => (
+                  <button key={name} type="button" onClick={() => navigate(`/search/${encodeURIComponent(name)}`)} className="rounded-md bg-white px-3 py-2 text-xs font-bold text-black/65 hover:bg-black/5">
+                    {name}
+                  </button>
+                ))}
+                {!topArtists.length && !topGenres.length ? <span className="text-sm font-semibold text-black/45">Start listening to build this</span> : null}
+              </div>
+            </div>
+          </aside>
+        </section>
+
+        <section className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {actionCards.map((card) => {
+            const Icon = card.icon;
+            return (
+              <button
+                key={card.path}
+                type="button"
+                onClick={() => navigate(card.path)}
+                className={`flex h-28 flex-col justify-between rounded-lg border border-black/10 p-4 text-left transition hover:-translate-y-0.5 hover:shadow-md ${card.tone}`}
+              >
+                <Icon className="h-5 w-5 text-black/55" />
+                <span className="text-lg font-bold">{card.label}</span>
+              </button>
+            );
+          })}
+        </section>
+
+        <section className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+          <div className="grid gap-5">
+            <RecommendationRail title="Made for you" items={madeForYou} onCardClick={openTrack} />
+            <RecommendationRail title="New releases for you" items={newReleases} onCardClick={openTrack} />
+            <RecommendationRail title="Recently played" items={recentlyPlayed} onCardClick={openTrack} />
+          </div>
+
+          <aside className="grid content-start gap-5">
+            <section className="rounded-lg border border-black/10 bg-white p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-xl font-bold">Tonight nearby</h2>
+                <Calendar className="h-5 w-5 text-black/40" />
+              </div>
+              <div className="mt-4 space-y-2">
+                {concerts.slice(0, 4).map((concert) => (
+                  <button key={concert.id} type="button" onClick={() => navigate("/concerts")} className="flex w-full gap-3 rounded-md p-2 text-left hover:bg-black/5">
+                    <img src={concert.coverUrl} alt="" className="h-12 w-12 rounded object-cover" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-bold">{concert.artist}</span>
+                      <span className="block truncate text-xs font-semibold text-black/50">{concert.venue}</span>
+                    </span>
+                    <span className="shrink-0 text-xs font-bold text-black/45">{prettyDate(concert.date)}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-black/10 bg-[#f8f7f2] p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-xl font-bold">Merch picks</h2>
+                <ShoppingBag className="h-5 w-5 text-black/40" />
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-3">
+                {merchItems.slice(0, 4).map((item) => (
+                  <button key={item.id} type="button" onClick={() => navigate("/merch")} className="min-w-0 text-left">
+                    <img src={item.imageUrl} alt="" className="aspect-square w-full rounded-md object-cover" />
+                    <p className="mt-2 truncate text-sm font-bold">{item.name}</p>
+                    <p className="text-xs font-semibold text-black/50">${item.price}</p>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-black/10 bg-white p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-xl font-bold">Playlists</h2>
+                <Disc3 className="h-5 w-5 text-black/40" />
+              </div>
+              <div className="mt-4 space-y-2">
+                {featuredPlaylists.slice(0, 4).map((playlist) => (
+                  <button key={playlist.id} type="button" onClick={() => navigate("/playlists")} className="flex w-full items-center gap-3 rounded-md p-2 text-left hover:bg-black/5">
+                    <img src={playlist.coverUrl} alt="" className="h-10 w-10 rounded object-cover" />
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-bold">{playlist.title}</span>
+                      <span className="block truncate text-xs font-semibold text-black/50">{playlist.artist}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          </aside>
+        </section>
       </section>
     </div>
   );

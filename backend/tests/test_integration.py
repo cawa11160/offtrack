@@ -667,6 +667,61 @@ def test_profile_music_web_returns_track_artist_genre_graph():
     assert body["stats"]["interactionCount"] == 1
 
 
+def test_profile_music_web_includes_authenticated_user_history_across_distinct_ids():
+    client = _fresh_client()
+    signup = client.post(
+        "/api/auth/signup",
+        json={"name": "Graph Listener", "email": "graph-listener@example.com", "password": "password123"},
+    )
+    assert signup.status_code == 200, signup.text
+    token = signup.json()["access_token"]
+    me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.status_code == 200, me.text
+    user_id = me.json()["id"]
+
+    db = SessionLocal()
+    try:
+        artist = Artist(name="Profile Artist")
+        genre = Genre(name="profile pop")
+        db.add_all([artist, genre])
+        db.flush()
+
+        track = CatalogTrack(
+            id="profile-graph-track",
+            canonical_title="Profile Graph Song",
+            source_type="catalog",
+            release_year=2026,
+            duration_ms=180000,
+            explicit=False,
+        )
+        db.add(track)
+        db.flush()
+        db.add(TrackArtist(track_id=track.id, artist_id=artist.id, role="primary", position=0))
+        db.add(TrackGenre(track_id=track.id, genre_id=genre.id, source="test", weight=1.0))
+        db.add(
+            Interaction(
+                distinct_id="old-browser-id",
+                user_id=user_id,
+                track_id=track.id,
+                event="play_complete",
+                source_page="test",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    res = client.get(
+        "/api/profile/music-web?distinct_id=new-browser-id",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    node_labels = {node["label"] for node in body["nodes"]}
+    assert {"Profile Graph Song", "Profile Artist", "profile pop"}.issubset(node_labels)
+    assert body["stats"]["interactionCount"] == 1
+
+
 def test_recommender_loads_from_normalized_catalog():
     _fresh_client()
     db = SessionLocal()

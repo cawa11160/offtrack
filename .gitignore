@@ -18,11 +18,17 @@
 **/htmlcov/
 pytest-cache-files-*/
 backend/pytest-cache-files-*/
+**/*.sqlite
+**/*.sqlite3
+**/*.db
 backend/*.sqlite3
 backend/tests/.tmp_media/
 backend/media/
 backend/uploads/
 backend/reels/
+
+# local logs
+**/*.log
 
 # OS
 **/.DS_Store

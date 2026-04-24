@@ -3,7 +3,7 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import mapboxgl, { Map, Marker, Popup } from "mapbox-gl";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowLeft, Music2 } from "lucide-react";
+import { ArrowLeft, Calendar, Clock, MapPin, Music2, Search, Ticket, X } from "lucide-react";
 
 import { concerts } from "@/data/mockData";
 
@@ -14,7 +14,9 @@ type ConcertLike = {
   venue?: string;
   city?: string;
   date?: string;
+  time?: string;
   ticketUrl?: string;
+  coverUrl?: string;
   lat?: number;
   lng?: number;
   genre?: string;
@@ -23,6 +25,15 @@ type ConcertLike = {
 
 const MAPBOX_TOKEN = (import.meta.env.VITE_MAPBOX_TOKEN as string | undefined)?.trim();
 
+function normalizeCityParam(value: string | null) {
+  return value && value !== "any" ? value : "all";
+}
+
+function normalizeDateParam(value: string | null): "all" | "week" | "weekend" | "month" {
+  if (value === "week" || value === "weekend" || value === "month") return value;
+  return "all";
+}
+
 async function initMapboxCspWorker() {
   try {
     // @ts-expect-error - Vite worker import
@@ -30,29 +41,12 @@ async function initMapboxCspWorker() {
     // @ts-expect-error - mapboxgl.workerClass is not typed in all versions
     mapboxgl.workerClass = mod.default;
   } catch {
-    // No-op.
+    // Optional CSP worker support.
   }
 }
 
-const cityFallbackCoords: Record<string, { lng: number; lat: number }> = {
-  "New York": { lng: -74.006, lat: 40.7128 },
-  "Los Angeles": { lng: -118.2437, lat: 34.0522 },
-  London: { lng: -0.1276, lat: 51.5072 },
-  "San Francisco": { lng: -122.4194, lat: 37.7749 },
-  Chicago: { lng: -87.6298, lat: 41.8781 },
-  Seattle: { lng: -122.3321, lat: 47.6062 },
-  Boston: { lng: -71.0589, lat: 42.3601 },
-  Denver: { lng: -104.9903, lat: 39.7392 },
-};
-
 function getConcertCoords(c: ConcertLike, index: number) {
-  if (typeof c.lng === "number" && typeof c.lat === "number") {
-    return { lng: c.lng, lat: c.lat };
-  }
-
-  const city = c.city ?? "";
-  if (cityFallbackCoords[city]) return cityFallbackCoords[city];
-
+  if (typeof c.lng === "number" && typeof c.lat === "number") return { lng: c.lng, lat: c.lat };
   const base = { lng: -74.006, lat: 40.7128 };
   const jitter = (n: number) => (n % 2 === 0 ? 1 : -1) * (0.01 + (n % 5) * 0.003);
   return { lng: base.lng + jitter(index), lat: base.lat + jitter(index + 1) };
@@ -61,62 +55,54 @@ function getConcertCoords(c: ConcertLike, index: number) {
 function prettyDate(value?: string) {
   if (!value) return "Date TBA";
   const d = new Date(value);
-  if (!Number.isNaN(d.getTime())) {
-    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-  }
+  if (!Number.isNaN(d.getTime())) return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   return value;
+}
+
+function daysUntil(value?: string) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  const diff = d.getTime() - Date.now();
+  return Math.ceil(diff / 86400000);
 }
 
 const Concerts = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const markersRef = useRef<Marker[]>([]);
   const popupRef = useRef<Popup | null>(null);
 
+  const typedConcerts = concerts as unknown as ConcertLike[];
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [cityFilter, setCityFilter] = useState(() => normalizeCityParam(searchParams.get("city")));
+  const [dateFilter, setDateFilter] = useState<"all" | "week" | "weekend" | "month">(() => normalizeDateParam(searchParams.get("date")));
 
-  const typedConcerts = concerts as unknown as ConcertLike[];
+  const cityOptions = useMemo(() => {
+    const cities = Array.from(new Set(typedConcerts.map((c) => c.city || "Unknown").filter(Boolean))).sort();
+    return ["all", ...cities];
+  }, [typedConcerts]);
 
   const filteredConcerts = useMemo(() => {
-    const city = searchParams.get("city") || "any";
-    const date = searchParams.get("date") || "any";
-    const genre = searchParams.get("genre") || "any";
-    const price = searchParams.get("price") || "any";
-
-    return typedConcerts.filter((c) => {
-      if (city !== "any") {
-        const cCity = (c.city || "").toLowerCase();
-        if (!cCity.includes(city.toLowerCase())) return false;
+    const q = query.trim().toLowerCase();
+    return typedConcerts.filter((concert) => {
+      const haystack = [concert.artist, concert.title, concert.venue, concert.city].filter(Boolean).join(" ").toLowerCase();
+      if (q && !haystack.includes(q)) return false;
+      if (cityFilter !== "all" && concert.city !== cityFilter) return false;
+      const days = daysUntil(concert.date);
+      if (dateFilter === "week" && (days === null || days < 0 || days > 7)) return false;
+      if (dateFilter === "weekend") {
+        const day = concert.date ? new Date(concert.date).getDay() : -1;
+        if ((day !== 0 && day !== 6) || days === null || days < 0 || days > 14) return false;
       }
-
-      if (date !== "any") {
-        const d = (c.date || "").toLowerCase();
-        if (date === "weekend" && !d.includes("sat") && !d.includes("sun")) return false;
-        if (date === "month" && !d) return false;
-      }
-
-      if (genre !== "any") {
-        const g = (c.genre || "").toLowerCase();
-        if (!g.includes(genre.toLowerCase())) return false;
-      }
-
-      if (price !== "any") {
-        const p = (c.price || "").toLowerCase();
-        if (price === "free" && !p.includes("free")) return false;
-
-        if (price === "under50") {
-          const num = Number(p.replace(/[^0-9]/g, ""));
-          if (Number.isFinite(num) && num > 50) return false;
-        }
-      }
-
+      if (dateFilter === "month" && (days === null || days < 0 || days > 31)) return false;
       return true;
     });
-  }, [searchParams, typedConcerts]);
+  }, [cityFilter, dateFilter, query, typedConcerts]);
 
   const selectedConcert = useMemo(() => {
     if (!selectedId) return filteredConcerts[0] ?? null;
@@ -128,10 +114,7 @@ const Concerts = () => {
       setSelectedId(null);
       return;
     }
-
-    if (!selectedId || !filteredConcerts.some((c) => c.id === selectedId)) {
-      setSelectedId(filteredConcerts[0].id);
-    }
+    if (!selectedId || !filteredConcerts.some((c) => c.id === selectedId)) setSelectedId(filteredConcerts[0].id);
   }, [filteredConcerts, selectedId]);
 
   useEffect(() => {
@@ -139,217 +122,209 @@ const Concerts = () => {
       setMapError("WebGL is not available in this browser/device.");
       return;
     }
-
     void initMapboxCspWorker();
-
     if (!MAPBOX_TOKEN) {
       setMapError("Missing Mapbox token (VITE_MAPBOX_TOKEN).");
       return;
     }
-    if (!mapContainerRef.current) {
-      setMapError("Map container not found.");
-      return;
-    }
-    if (mapRef.current) return;
+    if (!mapContainerRef.current || mapRef.current) return;
 
     try {
       mapboxgl.accessToken = MAPBOX_TOKEN;
-      setMapError(null);
-
       const first = filteredConcerts[0] ?? typedConcerts[0];
       const center = first ? getConcertCoords(first, 0) : { lng: -74.006, lat: 40.7128 };
-
       const map = new mapboxgl.Map({
         container: mapContainerRef.current,
-        style: "mapbox://styles/mapbox/streets-v12",
+        style: "mapbox://styles/mapbox/dark-v11",
         center: [center.lng, center.lat],
         zoom: 11,
         attributionControl: false,
       });
-
       map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
       mapRef.current = map;
-
       map.on("error", (e) => {
-        const msg =
-          (e?.error && (e.error as { message?: string }).message) ||
-          "Map failed to load (token/style/network).";
+        const msg = (e?.error && (e.error as { message?: string }).message) || "Map failed to load.";
         setMapError(msg);
       });
-
-      const resizeSoon = () => {
-        try {
-          map.resize();
-        } catch {
-          // ignore
-        }
-      };
-
-      map.on("load", () => {
-        resizeSoon();
-        setTimeout(resizeSoon, 0);
-        setTimeout(resizeSoon, 250);
-      });
-
-      requestAnimationFrame(resizeSoon);
-      setTimeout(resizeSoon, 300);
+      map.on("load", () => map.resize());
+      setTimeout(() => map.resize(), 250);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Map initialization failed.";
-      setMapError(message);
+      setMapError(err instanceof Error ? err.message : "Map initialization failed.");
     }
 
     return () => {
       popupRef.current?.remove();
-      popupRef.current = null;
       markersRef.current.forEach((m) => m.remove());
-      markersRef.current = [];
       mapRef.current?.remove();
+      popupRef.current = null;
+      markersRef.current = [];
       mapRef.current = null;
     };
   }, [filteredConcerts, typedConcerts]);
 
   useEffect(() => {
     if (!mapRef.current) return;
-
     markersRef.current.forEach((m) => m.remove());
-    markersRef.current = [];
-
-    markersRef.current = filteredConcerts.map((c, i) => {
-      const coords = getConcertCoords(c, i);
-      const isSelected = c.id === selectedConcert?.id;
-
+    markersRef.current = filteredConcerts.map((concert, index) => {
+      const coords = getConcertCoords(concert, index);
+      const selected = concert.id === selectedConcert?.id;
       const el = document.createElement("button");
       el.type = "button";
-      el.className = isSelected
-        ? "h-4 w-4 rounded-full bg-black shadow-[0_0_0_6px_rgba(0,0,0,0.15)]"
-        : "h-4 w-4 rounded-full bg-[#ff9494] shadow-[0_0_0_6px_rgba(0,0,0,0.08)]";
+      el.className = selected
+        ? "h-5 w-5 rounded-full bg-white shadow-[0_0_0_7px_rgba(255,255,255,0.22)]"
+        : "h-4 w-4 rounded-full bg-[#ff9494] shadow-[0_0_0_6px_rgba(255,148,148,0.22)]";
       el.setAttribute("aria-label", "Concert location");
-      el.addEventListener("click", () => setSelectedId(c.id));
-
+      el.addEventListener("click", () => setSelectedId(concert.id));
       return new mapboxgl.Marker({ element: el }).setLngLat([coords.lng, coords.lat]).addTo(mapRef.current!);
     });
   }, [filteredConcerts, selectedConcert?.id]);
 
   useEffect(() => {
     if (!mapRef.current || !selectedConcert) return;
-
     const idx = Math.max(0, filteredConcerts.findIndex((c) => c.id === selectedConcert.id));
     const { lng, lat } = getConcertCoords(selectedConcert, idx);
-
     popupRef.current?.remove();
-
-    const title = selectedConcert.artist ?? selectedConcert.title ?? "Concert";
-    const venue = selectedConcert.venue ?? "Venue TBA";
-    const city = selectedConcert.city ?? "";
-    const date = prettyDate(selectedConcert.date);
-
-    const popup = new mapboxgl.Popup({ closeButton: false, closeOnClick: false, offset: 14 })
+    const popup = new mapboxgl.Popup({ closeButton: false, closeOnClick: false, offset: 18 })
       .setLngLat([lng, lat])
       .setHTML(
-        `<div style="font-family:Arimo,sans-serif;font-weight:700;color:#000;line-height:1.25;min-width:180px">` +
-          `<div>${title}</div><div style="margin-top:2px">${venue}</div><div style="margin-top:4px">${date}</div></div>`
+        `<div style="font-family:Inter,system-ui,sans-serif;color:#111;line-height:1.25;min-width:190px">` +
+          `<div style="font-weight:800">${selectedConcert.artist ?? selectedConcert.title ?? "Concert"}</div>` +
+          `<div style="margin-top:3px;font-weight:700;color:#555">${selectedConcert.venue ?? "Venue TBA"}</div>` +
+          `<div style="margin-top:6px;font-weight:700">${prettyDate(selectedConcert.date)}</div></div>`
       )
       .addTo(mapRef.current);
-
     popupRef.current = popup;
-
-    mapRef.current.easeTo({
-      center: [lng, lat],
-      zoom: Math.max(mapRef.current.getZoom(), 11.5),
-      duration: 500,
-    });
+    mapRef.current.easeTo({ center: [lng, lat], zoom: Math.max(mapRef.current.getZoom(), 11.8), duration: 500 });
   }, [filteredConcerts, selectedConcert]);
 
   return (
-    <div className="min-h-screen w-full bg-[#FFFFFF] pb-32">
-      <section className="mx-auto w-full max-w-[1420px] px-4 pt-8 sm:px-8">
+    <div className="min-h-screen w-full bg-white pb-32 text-black">
+      <section className="mx-auto w-full max-w-7xl px-4 pt-6 sm:px-6 lg:px-8">
         <div className="flex items-center gap-3">
           <button
             type="button"
             onClick={() => navigate(-1)}
-            className="grid h-10 w-10 place-items-center rounded-[10px] text-black transition-colors hover:bg-black/5"
+            className="grid h-10 w-10 place-items-center rounded-md text-black transition-colors hover:bg-black/5"
             aria-label="Go back"
           >
-            <ArrowLeft className="h-7 w-7" />
+            <ArrowLeft className="h-6 w-6" />
           </button>
-          <div className="grid h-12 w-12 place-items-center rounded-[10px] border border-black bg-white">
-            <Music2 className="h-7 w-7 text-black" />
+          <div className="grid h-11 w-11 place-items-center rounded-md border border-black/10 bg-white">
+            <Music2 className="h-6 w-6 text-black" />
           </div>
         </div>
 
-        <div className="mt-5">
-          <h1 className="font-['Arimo',sans-serif] text-[56px] font-bold leading-none text-black sm:text-[60px]">Map</h1>
-          <p className="font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black">
-            Discover music gigs close to you
-          </p>
+        <div className="mt-7 flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-black/45">Concert Map</p>
+            <h1 className="mt-1 text-4xl font-bold leading-none sm:text-5xl">Live near you</h1>
+          </div>
+          <div className="rounded-md bg-[#f8f7f2] px-4 py-3 text-sm font-semibold text-black/60">
+            {filteredConcerts.length} shows
+          </div>
         </div>
 
-        <div className="mt-4 grid w-full gap-0 lg:grid-cols-[361px_1fr]">
-          <aside className="h-[420px] rounded-t-[10px] bg-[#d9d9d9] px-[14px] py-[23px] lg:h-[662px] lg:rounded-l-[10px] lg:rounded-r-none">
-            <div className="space-y-7 font-['Arimo',sans-serif] text-[20px] font-bold leading-tight text-black">
-              {filteredConcerts.slice(0, 8).map((concert, index) => {
-                const title = `Concert ${index + 1}`;
-                const venue = concert.venue ?? "Venue TBA";
-                const isSelected = concert.id === selectedConcert?.id;
+        <div className="mt-5 grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px_160px]">
+          <div className="flex h-12 items-center gap-3 rounded-md border border-black/10 bg-[#f8f7f2] px-4">
+            <Search className="h-5 w-5 text-black/45" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              className="min-w-0 flex-1 bg-transparent text-base font-semibold outline-none placeholder:text-black/35"
+              placeholder="Artist, venue, city"
+            />
+            {query ? (
+              <button type="button" onClick={() => setQuery("")} className="grid h-8 w-8 place-items-center rounded-md hover:bg-black/5" aria-label="Clear search">
+                <X className="h-4 w-4" />
+              </button>
+            ) : null}
+          </div>
+          <select value={cityFilter} onChange={(event) => setCityFilter(event.target.value)} className="h-12 rounded-md border border-black/10 bg-white px-3 text-sm font-semibold outline-none">
+            {cityOptions.map((city) => (
+              <option key={city} value={city}>
+                {city === "all" ? "All cities" : city}
+              </option>
+            ))}
+          </select>
+          <select value={dateFilter} onChange={(event) => setDateFilter(event.target.value as "all" | "week" | "weekend" | "month")} className="h-12 rounded-md border border-black/10 bg-white px-3 text-sm font-semibold outline-none">
+            <option value="all">Any date</option>
+            <option value="week">This week</option>
+            <option value="weekend">Weekend</option>
+            <option value="month">This month</option>
+          </select>
+        </div>
 
+        <div className="mt-5 grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
+          <aside className="order-2 max-h-[720px] overflow-y-auto rounded-lg border border-black/10 bg-[#f8f7f2] p-3 xl:order-1">
+            <div className="space-y-2">
+              {filteredConcerts.map((concert, index) => {
+                const selected = concert.id === selectedConcert?.id;
                 return (
                   <button
                     key={concert.id}
                     type="button"
                     onClick={() => setSelectedId(concert.id)}
-                    className={
-                      isSelected
-                        ? "flex w-full items-end justify-between rounded-[8px] bg-white/70 px-2 py-1 text-left"
-                        : "flex w-full items-end justify-between text-left"
-                    }
+                    className={`flex w-full gap-3 rounded-md p-2 text-left transition ${selected ? "bg-black text-white" : "bg-white hover:bg-black/5"}`}
                   >
-                    <div>
-                      <p>{title}</p>
-                      <p>{venue}</p>
-                    </div>
-                    <span className="underline underline-offset-2">Tickets</span>
+                    <img src={concert.coverUrl} alt="" className="h-20 w-20 shrink-0 rounded object-cover" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-bold">{concert.artist ?? `Concert ${index + 1}`}</span>
+                      <span className={`mt-1 block truncate text-xs font-semibold ${selected ? "text-white/65" : "text-black/55"}`}>
+                        {concert.venue ?? "Venue TBA"}
+                      </span>
+                      <span className={`mt-3 flex items-center gap-1 text-xs font-semibold ${selected ? "text-white/70" : "text-black/45"}`}>
+                        <Calendar className="h-3.5 w-3.5" />
+                        {prettyDate(concert.date)}
+                      </span>
+                    </span>
                   </button>
                 );
               })}
             </div>
           </aside>
 
-          <div className="relative h-[420px] overflow-hidden rounded-b-[10px] bg-[#e7e7e7] lg:h-[662px] lg:rounded-l-none lg:rounded-r-[10px] lg:rounded-bl-none">
-            {!MAPBOX_TOKEN ? (
-              <div className="grid h-full place-items-center p-6 text-center font-['Arimo',sans-serif] text-[22px] font-bold text-black">
-                Missing Mapbox token (`VITE_MAPBOX_TOKEN`)
-              </div>
-            ) : (
-              <>
-                <div ref={mapContainerRef} className="absolute inset-0" />
-                {mapError && (
-                  <div className="absolute inset-0 grid place-items-center bg-white/75 p-6 text-center font-['Arimo',sans-serif] text-[20px] font-bold text-black">
-                    {mapError}
-                  </div>
-                )}
-              </>
-            )}
+          <section className="order-1 overflow-hidden rounded-lg border border-black/10 bg-[#111111] xl:order-2">
+            <div className="relative h-[720px] min-h-[520px]">
+              {!MAPBOX_TOKEN ? (
+                <div className="grid h-full place-items-center p-6 text-center text-lg font-bold text-white">Missing Mapbox token: VITE_MAPBOX_TOKEN</div>
+              ) : (
+                <>
+                  <div ref={mapContainerRef} className="absolute inset-0" />
+                  {mapError ? <div className="absolute inset-0 grid place-items-center bg-black/70 p-6 text-center text-lg font-bold text-white">{mapError}</div> : null}
+                </>
+              )}
 
-            <div className="absolute bottom-6 right-6 w-[min(361px,calc(100%-2rem))] rounded-[10px] bg-[#d9d9d9] p-2">
-              <div className="font-['Arimo',sans-serif] text-[20px] font-bold leading-tight text-black">
-                <p>Concert</p>
-                <p>{selectedConcert?.artist ?? selectedConcert?.title ?? "Wetleg"}</p>
-                <p className="mt-1">{prettyDate(selectedConcert?.date)}</p>
-                <p>
-                  Location: {selectedConcert?.venue ?? "30 Bowery St"}
-                  {selectedConcert?.city ? `, ${selectedConcert.city}` : ""}
-                </p>
-                <a
-                  href={selectedConcert?.ticketUrl && selectedConcert.ticketUrl !== "#" ? selectedConcert.ticketUrl : "#"}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="underline underline-offset-2"
-                >
-                  More info
-                </a>
-              </div>
+              {selectedConcert ? (
+                <div className="absolute bottom-4 left-4 right-4 rounded-lg border border-white/15 bg-white p-4 shadow-xl md:left-auto md:w-[380px]">
+                  <img src={selectedConcert.coverUrl} alt="" className="h-32 w-full rounded-md object-cover" />
+                  <h2 className="mt-3 truncate text-xl font-bold">{selectedConcert.artist ?? selectedConcert.title ?? "Concert"}</h2>
+                  <div className="mt-3 space-y-2 text-sm font-semibold text-black/60">
+                    <p className="flex items-center gap-2">
+                      <MapPin className="h-4 w-4" />
+                      {selectedConcert.venue ?? "Venue TBA"}, {selectedConcert.city ?? "City TBA"}
+                    </p>
+                    <p className="flex items-center gap-2">
+                      <Calendar className="h-4 w-4" />
+                      {prettyDate(selectedConcert.date)}
+                    </p>
+                    <p className="flex items-center gap-2">
+                      <Clock className="h-4 w-4" />
+                      {selectedConcert.time ?? "Time TBA"}
+                    </p>
+                  </div>
+                  <a
+                    href={selectedConcert.ticketUrl && selectedConcert.ticketUrl !== "#" ? selectedConcert.ticketUrl : "#"}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-black text-sm font-semibold text-white transition hover:bg-black/80"
+                  >
+                    <Ticket className="h-4 w-4" />
+                    Tickets
+                  </a>
+                </div>
+              ) : null}
             </div>
-          </div>
+          </section>
         </div>
       </section>
     </div>

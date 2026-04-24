@@ -1,4 +1,4 @@
-import { Home, Map, ShoppingBag, Heart, User } from 'lucide-react';
+import { Home, Map, ShoppingBag, Heart, Share2, User } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 
@@ -6,6 +6,7 @@ const navItems = [
   { icon: Home, label: 'Home', path: '/' },
   { icon: Map, label: 'Concerts', path: '/concerts' },
   { icon: Heart, label: 'Library', path: '/liked' },
+  { icon: Share2, label: 'Web', path: '/web' },
   { icon: ShoppingBag, label: 'Merch', path: '/merch' },
   { icon: User, label: 'Profile', path: '/profile' },
 ];

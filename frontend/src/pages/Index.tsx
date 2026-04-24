@@ -142,6 +142,12 @@ export default function Index() {
   const newReleases = useMemo(() => homeRecs.slice(3, 6), [homeRecs]);
   const recentlyPlayed = useMemo(() => homeRecs.slice(6, 9), [homeRecs]);
   const moreIndie = useMemo(() => homeRecs.slice(9, 12), [homeRecs]);
+  const displayName = useMemo(() => {
+    const name = (user?.name || "").trim();
+    if (name) return name.split(/\s+/)[0];
+    const emailName = (user?.email || "").split("@")[0]?.trim();
+    return emailName || "there";
+  }, [user?.email, user?.name]);
 
   function openTrack(item: Recommendation) {
     navigate(
@@ -243,7 +249,7 @@ export default function Index() {
 
             <div className="mb-8 rounded-[10px] bg-[#d0d0d0] px-[9px] py-8">
               <div className="max-w-[615px] font-['Arimo',sans-serif] font-bold text-black">
-                <h2 className="text-[36px] leading-[1.1]">Welcome back Melissa,</h2>
+                <h2 className="text-[36px] leading-[1.1]">Welcome back {displayName},</h2>
                 <p className="mt-1 text-[24px] leading-[1.15]">
                   A streaming experience built for discovering new voices, new scenes, and new sounds. Explore new
                   artists, scenes, and sounds before they break through.

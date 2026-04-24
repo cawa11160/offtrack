@@ -2306,11 +2306,21 @@ def profile_music_web(
     except Exception:
         pass
 
+    user_id = None
+    try:
+        if request is not None:
+            user_id = get_current_user_id(request)
+    except Exception:
+        user_id = None
+
     limit = max(20, min(int(limit or 120), 300))
     try:
+        filters = [Interaction.distinct_id == did]
+        if user_id is not None:
+            filters.append(Interaction.user_id == user_id)
         rows = (
             db.query(Interaction)
-            .filter(Interaction.distinct_id == did)
+            .filter(or_(*filters))
             .order_by(Interaction.created_at.desc())
             .limit(limit)
             .all()

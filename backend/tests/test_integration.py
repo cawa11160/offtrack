@@ -276,11 +276,11 @@ def test_signup_rejects_weak_passwords():
     assert weak.status_code == 422, weak.text
 
 
-def test_signup_sanitizes_identity_and_uses_scrypt_password_hash():
-    client = _fresh_client()
-    signup = client.post(
-        "/api/auth/signup",
-        json={"name": "  Safe\n User\t ", "email": "UPPER@example.com", "password": "password123"},
+def test_signup_sanitizes_identity_and_uses_scrypt_password_hash(): 
+    client = _fresh_client() 
+    signup = client.post( 
+        "/api/auth/signup", 
+        json={"name": "  Safe\n User\t ", "email": "UPPER@example.com", "password": "password123"}, 
     )
     assert signup.status_code == 200, signup.text
 
@@ -291,13 +291,65 @@ def test_signup_sanitizes_identity_and_uses_scrypt_password_hash():
         assert user.name == "Safe User"
         assert user.password_hash.startswith("scrypt$")
         assert "password123" not in user.password_hash
-    finally:
-        db.close()
-
-
-def test_login_upgrades_legacy_pbkdf2_password_hash():
-    client = _fresh_client()
-    legacy_hash = pwd_context.hash("password123")
+    finally: 
+        db.close() 
+ 
+ 
+def test_user_can_update_profile_details(): 
+    client = _fresh_client() 
+    signup = client.post( 
+        "/api/auth/signup", 
+        json={"name": "Original User", "email": "profile@example.com", "password": "password123"}, 
+    ) 
+    assert signup.status_code == 200, signup.text 
+    token = signup.json()["access_token"] 
+    _verify_email_from_signup(client, signup) 
+ 
+    updated = client.patch( 
+        "/api/auth/me", 
+        headers={"Authorization": f"Bearer {token}"}, 
+        json={"name": "  Updated\n Artist\t ", "email": "NEWPROFILE@example.com", "account_type": "artist"}, 
+    ) 
+    assert updated.status_code == 200, updated.text 
+    body = updated.json() 
+    assert body["name"] == "Updated Artist" 
+    assert body["email"] == "newprofile@example.com" 
+    assert body["account_type"] == "artist" 
+    assert body["email_verified"] is False 
+    assert body["email_verification_url"] 
+ 
+    me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}) 
+    assert me.status_code == 200, me.text 
+    assert me.json()["name"] == "Updated Artist" 
+    assert me.json()["email"] == "newprofile@example.com" 
+    assert me.json()["account_type"] == "artist" 
+    assert me.json()["email_verified"] is False 
+ 
+ 
+def test_profile_update_rejects_duplicate_email(): 
+    client = _fresh_client() 
+    first = client.post( 
+        "/api/auth/signup", 
+        json={"name": "First", "email": "first@example.com", "password": "password123"}, 
+    ) 
+    assert first.status_code == 200, first.text 
+    second = client.post( 
+        "/api/auth/signup", 
+        json={"name": "Second", "email": "second@example.com", "password": "password123"}, 
+    ) 
+    assert second.status_code == 200, second.text 
+ 
+    duplicate = client.patch( 
+        "/api/auth/me", 
+        headers={"Authorization": f"Bearer {second.json()['access_token']}"}, 
+        json={"email": "FIRST@example.com"}, 
+    ) 
+    assert duplicate.status_code == 409, duplicate.text 
+ 
+ 
+def test_login_upgrades_legacy_pbkdf2_password_hash(): 
+    client = _fresh_client() 
+    legacy_hash = pwd_context.hash("password123") 
 
     db = SessionLocal()
     try:

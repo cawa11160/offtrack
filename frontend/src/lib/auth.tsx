@@ -14,6 +14,7 @@ export type Me = {
   name?: string | null;
   account_type?: "listener" | "artist";
   email_verified?: boolean;
+  email_verification_url?: string | null;
 };
 
 export function getAccessToken(): string | null {
@@ -86,6 +87,25 @@ export async function apiMe(token: string): Promise<Me> {
   return (await res.json()) as Me;
 }
 
+export async function apiUpdateMe(
+  token: string,
+  params: { name?: string | null; email?: string; account_type?: "listener" | "artist" }
+): Promise<Me> {
+  const body: Record<string, string | null> = {};
+  if ("name" in params) body.name = params.name == null ? null : sanitizeDisplayName(params.name);
+  if (params.email !== undefined) body.email = normalizeAuthEmail(params.email);
+  if (params.account_type !== undefined) body.account_type = params.account_type;
+
+  const res = await fetch(makeUrl("/api/auth/me"), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readErr(res));
+  return (await res.json()) as Me;
+}
+
 export async function apiResendEmailVerification(token: string): Promise<{ email_verification_url?: string | null }> {
   const res = await fetch(makeUrl("/api/auth/resend-verification"), {
     method: "POST",
@@ -104,6 +124,7 @@ type AuthState = {
   signup: (name: string, email: string, password: string, accountType?: "listener" | "artist") => Promise<void>;
   logout: () => Promise<void>;
   refreshMe: (nextToken?: string) => Promise<void>;
+  updateMe: (params: { name?: string | null; email?: string; account_type?: "listener" | "artist" }) => Promise<Me>;
 };
 
 const AuthCtx = createContext<AuthState | null>(null);
@@ -168,9 +189,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
   }, []);
 
+  const updateMe = useCallback(async (params: { name?: string | null; email?: string; account_type?: "listener" | "artist" }) => {
+    const t = token ?? getAccessToken();
+    if (!t) throw new Error("Log in to update your profile.");
+    const nextUser = await apiUpdateMe(t, params);
+    setUser(nextUser);
+    return nextUser;
+  }, [token]);
+
   const value = useMemo<AuthState>(
-    () => ({ user, token, loading, login, signup, logout, refreshMe }),
-    [user, token, loading, login, signup, logout, refreshMe]
+    () => ({ user, token, loading, login, signup, logout, refreshMe, updateMe }),
+    [user, token, loading, login, signup, logout, refreshMe, updateMe]
   );
 
   return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Eye, EyeOff, Music2, RefreshCcw, Save, Trash2, UploadCloud } from "lucide-react";
+import { CheckCircle2, Eye, EyeOff, Image, Music2, RefreshCcw, Save, Trash2, UploadCloud, UserRound } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 
 import {
   apiListManagedUploads,
@@ -55,6 +56,7 @@ export default function Uploads() {
   const navigate = useNavigate();
   const [title, setTitle] = useState("");
   const [artist, setArtist] = useState("");
+  const [imageUrl, setImageUrl] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>("");
@@ -89,7 +91,10 @@ export default function Uploads() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, canManageUploads]);
 
-  const canUpload = useMemo(() => title.trim().length > 0 && !!file && !loading, [title, file, loading]);
+  const canUpload = useMemo(
+    () => title.trim().length > 0 && !!file && !loading && canManageUploads,
+    [title, file, loading, canManageUploads]
+  );
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -98,6 +103,8 @@ export default function Uploads() {
       setError("Uploads require an artist account.");
     } else if (!authLoading && isArtist && !emailVerified) {
       setError("Verify your email before uploading songs.");
+    } else if (!authLoading) {
+      setError("");
     }
   }, [authLoading, user, isArtist, emailVerified]);
 
@@ -110,17 +117,28 @@ export default function Uploads() {
       setError("Verify your email before uploading songs.");
       return;
     }
-    if (!file) return;
+    if (!title.trim()) {
+      setError("Enter a song title.");
+      return;
+    }
+    if (!file) {
+      setError("Choose an audio file.");
+      return;
+    }
     setLoading(true);
     setError("");
     try {
-      await apiUploadNewTrack({ title: title.trim(), artist: artist.trim(), file });
+      await apiUploadNewTrack({ title: title.trim(), artist: artist.trim(), imageUrl: imageUrl.trim(), file });
       setTitle("");
       setArtist("");
+      setImageUrl("");
       setFile(null);
       await refresh();
+      toast.success("Song uploaded", { description: "Your track is now published in Offtrack uploads." });
     } catch (e: unknown) {
-      setError(getErrorMessage(e, "Upload failed"));
+      const message = getErrorMessage(e, "Upload failed");
+      setError(message);
+      toast.error("Upload failed", { description: message });
     } finally {
       setLoading(false);
     }
@@ -134,8 +152,13 @@ export default function Uploads() {
       const result = await apiResendEmailVerification(token);
       setVerificationUrl(result.email_verification_url || "");
       await refreshMe();
+      toast.success("Verification link ready", {
+        description: result.email_verification_url ? "Open the link, then refresh your status." : "If email delivery is configured, check your inbox.",
+      });
     } catch (e: unknown) {
-      setError(getErrorMessage(e, "Could not send verification email"));
+      const message = getErrorMessage(e, "Could not send verification email");
+      setError(message);
+      toast.error("Could not send verification email", { description: message });
     } finally {
       setVerificationBusy(false);
     }
@@ -234,51 +257,119 @@ export default function Uploads() {
       </div>
 
       <div className="mt-6 rounded-xl border border-border bg-card p-5 shadow-sm">
-        <div className="grid gap-4 md:grid-cols-3">
-          <div>
-            <label className="text-sm font-medium">Title</label>
-            <input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              className="mt-1 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm"
-              placeholder="Song title"
-            />
+        <div className="mb-4 grid gap-3 md:grid-cols-3">
+          <div className={`rounded-xl border p-4 ${user ? "border-border bg-background" : "border-amber-200 bg-amber-50"}`}>
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <UserRound className="h-4 w-4" />
+              Account
+            </div>
+            <div className="mt-2 text-sm text-muted-foreground">
+              {user ? `${user.name || user.email} (${user.account_type || "listener"})` : "Log in to upload songs."}
+            </div>
           </div>
-          <div>
-            <label className="text-sm font-medium">Artist</label>
-            <input
-              value={artist}
-              onChange={(e) => setArtist(e.target.value)}
-              className="mt-1 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm"
-              placeholder="Artist name"
-            />
+          <div className={`rounded-xl border p-4 ${isArtist ? "border-green-200 bg-green-50" : "border-border bg-background"}`}>
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <Music2 className="h-4 w-4" />
+              Artist access
+            </div>
+            <div className="mt-2 text-sm text-muted-foreground">{isArtist ? "Enabled" : "Artist account required"}</div>
           </div>
-          <div>
-            <label className="text-sm font-medium">Audio file</label>
-            <input
-              type="file"
-              accept="audio/*"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-              className="mt-1 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm"
-            />
+          <div className={`rounded-xl border p-4 ${emailVerified ? "border-green-200 bg-green-50" : "border-amber-200 bg-amber-50"}`}>
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <CheckCircle2 className="h-4 w-4" />
+              Email
+            </div>
+            <div className="mt-2 text-sm text-muted-foreground">{emailVerified ? "Verified" : "Verification required"}</div>
           </div>
         </div>
 
-        <div className="mt-4 flex items-center justify-between gap-4">
-          <div className="text-xs text-muted-foreground">
-            {canManageUploads ? "New uploads are owned by your artist account." : "Artist accounts can upload and manage tracks after email verification."}
+        {!user ? (
+          <div className="mb-4 rounded-xl border border-black/10 bg-white p-4 text-sm text-black/70">
+            <div className="font-semibold text-black">Log in with an artist account to upload songs.</div>
+            <button
+              type="button"
+              onClick={() => navigate("/login")}
+              className="mt-3 rounded-lg bg-black px-3 py-2 text-sm font-medium text-white hover:opacity-90"
+            >
+              Log in
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => void onUpload()}
-            disabled={!canUpload || !canManageUploads}
-            className="rounded-xl bg-black px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-          >
-            {loading ? "Uploading..." : "Upload"}
-          </button>
-        </div>
+        ) : null}
 
-        {error ? <div className="mt-3 text-sm text-red-600">{error}</div> : null}
+        {user && !isArtist ? (
+          <div className="mb-4 rounded-xl border border-black/10 bg-white p-4 text-sm text-black/70">
+            <div className="font-semibold text-black">Artist account required.</div>
+            <div className="mt-1">Listener accounts can play public uploads, but they cannot upload songs or manage artist tracks.</div>
+            <button
+              type="button"
+              onClick={() => navigate("/profile")}
+              className="mt-3 rounded-lg bg-black px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-60"
+            >
+              Open profile
+            </button>
+          </div>
+        ) : null}
+
+        {canManageUploads ? (
+          <>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <div>
+                <label className="text-sm font-medium">Title</label>
+                <input
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm"
+                  placeholder="Song title"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium">Artist</label>
+                <input
+                  value={artist}
+                  onChange={(e) => setArtist(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm"
+                  placeholder="Artist name"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium">Cover image URL</label>
+                <div className="mt-1 flex rounded-xl border border-border bg-background">
+                  <span className="grid w-10 place-items-center text-muted-foreground">
+                    <Image className="h-4 w-4" />
+                  </span>
+                  <input
+                    value={imageUrl}
+                    onChange={(e) => setImageUrl(e.target.value)}
+                    className="min-w-0 flex-1 rounded-r-xl bg-transparent px-3 py-2 text-sm outline-none"
+                    placeholder="https://..."
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-sm font-medium">Audio file</label>
+                <input
+                  type="file"
+                  accept="audio/*"
+                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                  className="mt-1 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="mt-4 flex items-center justify-between gap-4">
+              <div className="text-xs text-muted-foreground">New uploads are owned by your artist account.</div>
+              <button
+                type="button"
+                onClick={() => void onUpload()}
+                disabled={!canUpload}
+                className="rounded-xl bg-black px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {loading ? "Uploading..." : "Upload"}
+              </button>
+            </div>
+          </>
+        ) : null}
+
         {isArtist && !emailVerified ? (
           <div className="mt-3 rounded-xl border border-black/10 bg-white p-3 text-sm text-black/70">
             <div>Email verification is required for artist uploads.</div>
@@ -301,17 +392,26 @@ export default function Uploads() {
                   Open verification link
                 </a>
               ) : null}
+              <button
+                type="button"
+                onClick={() => void refreshMe()}
+                className="rounded-lg border border-black/10 px-3 py-1 font-medium hover:bg-black/5"
+              >
+                I verified, refresh status
+              </button>
             </div>
           </div>
         ) : null}
+
+        {error ? <div className="mt-3 text-sm text-red-600">{error}</div> : null}
         {!isArtist ? (
           <div className="mt-3 text-sm text-black/70">
             <button
               type="button"
-              onClick={() => navigate(user ? "/signup" : "/login")}
+              onClick={() => (user ? navigate("/profile") : navigate("/login"))}
               className="rounded-lg border border-black/10 px-3 py-1 font-medium hover:bg-black/5"
             >
-              {user ? "Create artist account" : "Log in to upload"}
+              {user ? "Open profile" : "Log in to upload"}
             </button>
           </div>
         ) : null}

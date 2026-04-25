@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
@@ -9,14 +9,18 @@ import {
   Music2,
   Radio,
   RefreshCw,
+  Save,
   Settings,
   Share2,
   Tags,
   UserRound,
+  X,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import { apiGetMusicWeb, type MusicWebNode, type MusicWebResponse } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { sanitizeDisplayName, validateAuthEmail } from "@/lib/authInput";
 
 type PointNode = MusicWebNode & {
   x: number;
@@ -159,10 +163,16 @@ function GraphPreview({ data }: { data: MusicWebResponse | null }) {
 
 export default function Profile() {
   const navigate = useNavigate();
-  const { user, loading: authLoading } = useAuth();
+  const { user, loading: authLoading, updateMe } = useAuth();
   const [data, setData] = useState<MusicWebResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [profileError, setProfileError] = useState("");
+  const [draftName, setDraftName] = useState("");
+  const [draftEmail, setDraftEmail] = useState("");
+  const [draftAccountType, setDraftAccountType] = useState<"listener" | "artist">("listener");
 
   async function loadMusicWeb() {
     setLoading(true);
@@ -179,6 +189,56 @@ export default function Profile() {
   useEffect(() => {
     void loadMusicWeb();
   }, []);
+
+  useEffect(() => {
+    setDraftName(user?.name ?? "");
+    setDraftEmail(user?.email ?? "");
+    setDraftAccountType(user?.account_type === "artist" ? "artist" : "listener");
+  }, [user]);
+
+  async function saveProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!user) return;
+
+    const nextName = sanitizeDisplayName(draftName);
+    const emailError = validateAuthEmail(draftEmail);
+    if (emailError) {
+      setProfileError(emailError);
+      return;
+    }
+    if (nextName.length > 120) {
+      setProfileError("Name must be 120 characters or fewer.");
+      return;
+    }
+
+    setSavingProfile(true);
+    setProfileError("");
+    try {
+      const updated = await updateMe({
+        name: nextName || null,
+        email: draftEmail,
+        account_type: draftAccountType,
+      });
+      setEditing(false);
+      toast.success("Profile updated", {
+        description: updated.email_verified ? "Your information is up to date." : "Verify your email to keep artist features active.",
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Could not update profile.";
+      setProfileError(message);
+      toast.error("Could not update profile", { description: message });
+    } finally {
+      setSavingProfile(false);
+    }
+  }
+
+  function cancelEdit() {
+    setDraftName(user?.name ?? "");
+    setDraftEmail(user?.email ?? "");
+    setDraftAccountType(user?.account_type === "artist" ? "artist" : "listener");
+    setProfileError("");
+    setEditing(false);
+  }
 
   const displayName = user?.name?.trim() || (user?.email ? user.email.split("@")[0] : "Listener");
   const handle = user?.email ? `@${user.email.split("@")[0]}` : "@offtrack";
@@ -251,6 +311,16 @@ export default function Profile() {
                     <p className="text-xs font-semibold uppercase tracking-[0.12em] text-black/50">Artists</p>
                   </div>
                 </div>
+                {user ? (
+                  <button
+                    type="button"
+                    onClick={() => setEditing(true)}
+                    className="mt-5 inline-flex h-10 items-center gap-2 rounded-md bg-black px-4 text-sm font-semibold text-white transition hover:bg-black/80"
+                  >
+                    <UserRound className="h-4 w-4" />
+                    Edit profile
+                  </button>
+                ) : null}
               </div>
             </div>
             {!user && !authLoading ? (
@@ -260,6 +330,11 @@ export default function Profile() {
               >
                 Log in
               </Link>
+            ) : null}
+            {user && !user.email_verified ? (
+              <p className="mt-4 rounded-md bg-white px-3 py-2 text-sm font-semibold text-black/60">
+                Email is unverified. Artist uploads stay locked until verification is complete.
+              </p>
             ) : null}
           </div>
 
@@ -287,6 +362,71 @@ export default function Profile() {
             {error ? <p className="mt-3 text-sm font-semibold text-[#9f2f26]">{error}</p> : null}
           </div>
         </section>
+
+        {editing && user ? (
+          <section className="rounded-lg border border-black/10 bg-white p-4 sm:p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-bold">Edit profile</h2>
+                <p className="mt-1 text-sm font-semibold text-black/55">Update your public name and account details.</p>
+              </div>
+              <button
+                type="button"
+                onClick={cancelEdit}
+                className="grid h-9 w-9 place-items-center rounded-md border border-black/10 hover:bg-black/5"
+                aria-label="Cancel profile editing"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={saveProfile} className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_220px_auto] lg:items-end">
+              <label className="grid gap-1 text-sm font-bold">
+                Display name
+                <input
+                  value={draftName}
+                  onChange={(event) => setDraftName(event.target.value)}
+                  className="h-11 rounded-md border border-black/10 bg-white px-3 font-semibold outline-none focus:border-black/35"
+                  maxLength={120}
+                  placeholder="Display name"
+                />
+              </label>
+
+              <label className="grid gap-1 text-sm font-bold">
+                Email
+                <input
+                  value={draftEmail}
+                  onChange={(event) => setDraftEmail(event.target.value)}
+                  className="h-11 rounded-md border border-black/10 bg-white px-3 font-semibold outline-none focus:border-black/35"
+                  autoComplete="email"
+                  placeholder="you@example.com"
+                />
+              </label>
+
+              <label className="grid gap-1 text-sm font-bold">
+                Account type
+                <select
+                  value={draftAccountType}
+                  onChange={(event) => setDraftAccountType(event.target.value === "artist" ? "artist" : "listener")}
+                  className="h-11 rounded-md border border-black/10 bg-white px-3 font-semibold capitalize outline-none focus:border-black/35"
+                >
+                  <option value="listener">Listener</option>
+                  <option value="artist">Artist</option>
+                </select>
+              </label>
+
+              <button
+                type="submit"
+                disabled={savingProfile}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-black px-5 text-sm font-semibold text-white transition hover:bg-black/80 disabled:cursor-wait disabled:bg-black/40"
+              >
+                <Save className="h-4 w-4" />
+                {savingProfile ? "Saving" : "Save"}
+              </button>
+            </form>
+            {profileError ? <p className="mt-3 text-sm font-semibold text-[#9f2f26]">{profileError}</p> : null}
+          </section>
+        ) : null}
 
         <section className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
           <div className="rounded-lg border border-black/10 bg-white p-4">

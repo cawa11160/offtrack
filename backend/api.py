@@ -731,12 +731,19 @@ class AuthOut(BaseModel):
     email_verification_url: str | None = None
     email_verified: bool = False
 
-class MeOut(BaseModel):
-    id: int
-    email: EmailStr
-    name: str | None = None
-    account_type: str = "listener"
-    email_verified: bool = False
+class MeOut(BaseModel): 
+    id: int 
+    email: EmailStr 
+    name: str | None = None 
+    account_type: str = "listener" 
+    email_verified: bool = False 
+    email_verification_url: str | None = None 
+ 
+ 
+class MeUpdateIn(BaseModel): 
+    name: str | None = Field(default=None, max_length=255) 
+    email: EmailStr | None = None 
+    account_type: str | None = Field(default=None, pattern="^(listener|artist)$") 
 
 
 class VerifyEmailOut(BaseModel):
@@ -997,20 +1004,78 @@ def auth_logout(req: Request, resp: Response, db: Session = Depends(get_db)):
     _audit_log(action="auth_logout", user_id=user_id, req=req, meta={"refresh_session_id": revoked_session_id})
     return {"ok": True}
 
-@app.get("/api/auth/me", response_model=MeOut)
-def auth_me(req: Request, db: Session = Depends(get_db)):
-    user = _require_active_user(req, db)
-    return {
-        "id": user.id,
+@app.get("/api/auth/me", response_model=MeOut) 
+def auth_me(req: Request, db: Session = Depends(get_db)): 
+    user = _require_active_user(req, db) 
+    return { 
+        "id": user.id, 
         "email": user.email,
         "name": user.name,
         "account_type": user.account_type or "listener",
-        "email_verified": _email_verified(user),
-    }
-
-
-@app.get("/api/auth/verify-email", response_model=VerifyEmailOut)
-def auth_verify_email(token: str, req: Request, db: Session = Depends(get_db)):
+        "email_verified": _email_verified(user), 
+    } 
+ 
+ 
+@app.patch("/api/auth/me", response_model=MeOut) 
+def auth_update_me(payload: MeUpdateIn, req: Request, db: Session = Depends(get_db)): 
+    user = _require_active_user(req, db) 
+    fields_set = payload.model_fields_set if hasattr(payload, "model_fields_set") else getattr(payload, "__fields_set__", set()) 
+    verification_token = None 
+    changed: list[str] = [] 
+ 
+    if "name" in fields_set: 
+        next_name = _sanitize_display_name(payload.name) 
+        if user.name != next_name: 
+            user.name = next_name 
+            changed.append("name") 
+ 
+    if "account_type" in fields_set and payload.account_type is not None: 
+        next_account_type = payload.account_type.strip().lower() 
+        if next_account_type not in {"listener", "artist"}: 
+            raise HTTPException(status_code=422, detail="Invalid account type") 
+        if (user.account_type or "listener") != next_account_type: 
+            user.account_type = next_account_type 
+            changed.append("account_type") 
+ 
+    if "email" in fields_set and payload.email is not None: 
+        next_email = _normalize_auth_email(str(payload.email)) 
+        if user.email != next_email: 
+            try: 
+                exists = db.query(User).filter(User.email == next_email, User.id != user.id).first() 
+            except SQLAlchemyError: 
+                raise HTTPException(status_code=503, detail="Auth service unavailable. Please try again.") 
+            if exists: 
+                raise HTTPException(status_code=409, detail="Email already exists") 
+            user.email = next_email 
+            user.email_verified_at = None 
+            verification_token = _issue_email_verification(user) 
+            changed.extend(["email", "email_verified"]) 
+ 
+    if changed: 
+        try: 
+            db.add(user) 
+            db.commit() 
+            db.refresh(user) 
+        except IntegrityError: 
+            db.rollback() 
+            raise HTTPException(status_code=409, detail="Email already exists") 
+        except SQLAlchemyError: 
+            db.rollback() 
+            raise HTTPException(status_code=503, detail="Could not update profile. Please try again.") 
+        _audit_log(action="auth_profile_updated", user_id=user.id, email=user.email, req=req, meta={"changed": sorted(set(changed))}) 
+ 
+    return { 
+        "id": user.id, 
+        "email": user.email, 
+        "name": user.name, 
+        "account_type": user.account_type or "listener", 
+        "email_verified": _email_verified(user), 
+        "email_verification_url": _verification_url(req, verification_token) if verification_token else None, 
+    } 
+ 
+ 
+@app.get("/api/auth/verify-email", response_model=VerifyEmailOut) 
+def auth_verify_email(token: str, req: Request, db: Session = Depends(get_db)): 
     token_value = (token or "").strip()
     if not token_value:
         raise HTTPException(status_code=400, detail="Invalid verification token")

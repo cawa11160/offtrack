@@ -3,6 +3,9 @@ pytest-cache-files-*/
 *.sqlite3
 __pycache__/
 tests/.tmp_media/
+media/
+uploads/
+reels/
 *.pyc
 .env
 .env.*

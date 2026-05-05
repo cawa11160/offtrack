@@ -2,25 +2,27 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   db:
     image: postgres:16
     environment:
       POSTGRES_DB: offtrack
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD-postgres}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - offtrack_pg:/var/lib/postgresql/data
 
   backend:
     build: ./backend
     environment:
+      OFFTRACK_ENV: ${OFFTRACK_ENV-development}
       # In compose, backend talks to db via service name "db"
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/offtrack
+      DATABASE_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD-postgres}@db:5432/offtrack
       ALLOW_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS-false}
       OFFTRACK_AUTO_MIGRATE: ${OFFTRACK_AUTO_MIGRATE-true}
       OFFTRACK_AUTO_SEED: ${OFFTRACK_AUTO_SEED-true}
       OFFTRACK_SEED_SKIP_IF_READY: ${OFFTRACK_SEED_SKIP_IF_READY-true}
@@ -33,7 +35,7 @@ services:
       SPOTIFY_COOKIE_SECURE: ${SPOTIFY_COOKIE_SECURE-false}
       SPOTIFY_COOKIE_SAMESITE: ${SPOTIFY_COOKIE_SAMESITE-lax}
       # Optional PostHog analytics (safe to leave unset):
-      POSTHOG_ENABLED: ${POSTHOG_ENABLED-true}
+      POSTHOG_ENABLED: ${POSTHOG_ENABLED-false}
       POSTHOG_HOST: ${POSTHOG_HOST-https://app.posthog.com}
       POSTHOG_API_KEY: ${POSTHOG_API_KEY-}
       # Optional catalog metadata sync providers

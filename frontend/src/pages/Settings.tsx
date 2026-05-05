@@ -30,7 +30,12 @@ const ADMIN_UI_ENABLED = ["1", "true", "yes", "on"].includes(
 
 function hasAdminKeyStored(): boolean {
   if (typeof window === "undefined") return false;
-  return Boolean((window.localStorage.getItem(ADMIN_KEY_STORAGE) || "").trim());
+  const legacy = window.localStorage.getItem(ADMIN_KEY_STORAGE);
+  if (legacy) {
+    window.localStorage.removeItem(ADMIN_KEY_STORAGE);
+    window.sessionStorage.setItem(ADMIN_KEY_STORAGE, legacy);
+  }
+  return Boolean((window.sessionStorage.getItem(ADMIN_KEY_STORAGE) || "").trim());
 }
 
 function Toggle({

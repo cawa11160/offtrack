@@ -10,9 +10,25 @@ SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "").strip()
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "").strip()
 SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "").strip()
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8080").strip()
-COOKIE_SECRET = os.getenv("COOKIE_SECRET", "dev_cookie_secret_change_me").encode()
+
+
+def _in_production() -> bool:
+  env = (os.getenv("OFFTRACK_ENV") or os.getenv("ENV") or "development").strip().lower()
+  return env in {"prod", "production"}
+
+
+def _read_cookie_secret() -> bytes:
+  value = os.getenv("COOKIE_SECRET", "dev_cookie_secret_change_me").strip()
+  if _in_production() and (not value or value == "dev_cookie_secret_change_me" or len(value) < 32):
+    raise RuntimeError("COOKIE_SECRET must be set to a strong value in production")
+  return value.encode()
+
+
+COOKIE_SECRET = _read_cookie_secret()
 SPOTIFY_COOKIE_SECURE = os.getenv("SPOTIFY_COOKIE_SECURE", os.getenv("COOKIE_SECURE", "false")).strip().lower() in ("1", "true", "yes")
 SPOTIFY_COOKIE_SAMESITE = os.getenv("SPOTIFY_COOKIE_SAMESITE", os.getenv("COOKIE_SAMESITE", "lax")).strip().lower() or "lax"
+if SPOTIFY_COOKIE_SAMESITE not in {"lax", "strict", "none"}:
+  SPOTIFY_COOKIE_SAMESITE = "lax"
 
 SCOPES = " ".join([
   "streaming",                 # required for Web Playback SDK :contentReference[oaicite:2]{index=2}
@@ -50,6 +66,9 @@ def _effective_redirect_uri(req: Request) -> str:
   # Prefer explicit env value, else derive from current request host.
   return SPOTIFY_REDIRECT_URI or _runtime_redirect_uri(req)
 
+def _frontend_error_redirect(error: str) -> RedirectResponse:
+  return RedirectResponse(f"{FRONTEND_URL}/recommendations?{urlencode({'spotify_error': error})}")
+
 @router.get("/login")
 async def login(req: Request):
   redirect_uri = _effective_redirect_uri(req)
@@ -74,15 +93,15 @@ async def login(req: Request):
 async def callback(req: Request, code: str = "", state: str = "", error: str = ""):
   frontend_target = f"{FRONTEND_URL}/recommendations"
   if error:
-    return RedirectResponse(f"{frontend_target}?spotify_error={error}")
+    return _frontend_error_redirect(error)
   redirect_uri = (req.cookies.get("sp_ru") or "").strip() or _effective_redirect_uri(req)
   expected_state = (req.cookies.get("sp_st") or "").strip()
   if not (SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET and redirect_uri):
     return JSONResponse({"ok": False, "error": "spotify_auth_not_configured"}, status_code=500)
   if not code:
-    return RedirectResponse(f"{frontend_target}?spotify_error=missing_code")
-  if expected_state and state != expected_state:
-    return RedirectResponse(f"{frontend_target}?spotify_error=invalid_state")
+    return _frontend_error_redirect("missing_code")
+  if not expected_state or not hmac.compare_digest(state, expected_state):
+    return _frontend_error_redirect("invalid_state")
   # Exchange code for access+refresh (Authorization Code flow) :contentReference[oaicite:5]{index=5}
   data = {
     "grant_type": "authorization_code",
@@ -101,7 +120,7 @@ async def callback(req: Request, code: str = "", state: str = "", error: str = "
       resp.raise_for_status()
       tok = resp.json()
   except Exception:
-    return RedirectResponse(f"{frontend_target}?spotify_error=token_exchange_failed")
+    return _frontend_error_redirect("token_exchange_failed")
 
   # Store refresh token in a signed HttpOnly cookie (MVP approach)
   cookie_payload = {

@@ -13,6 +13,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 RUN chmod +x /app/docker-entrypoint.sh
+RUN useradd --create-home --shell /usr/sbin/nologin offtrack \
+ && mkdir -p /app/media \
+ && chown -R offtrack:offtrack /app
+USER offtrack
 
 EXPOSE 8000
 

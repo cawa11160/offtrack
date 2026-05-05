@@ -3,6 +3,13 @@ import { normalizeAuthEmail, sanitizeDisplayName } from "./authInput";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").trim().replace(/\/$/, "");
 const TOKEN_KEY = "offtrack_access_token";
+let accessToken: string | null = null;
+
+try {
+  window.localStorage.removeItem(TOKEN_KEY);
+} catch {
+  // Ignore storage access failures; auth still works through the refresh cookie.
+}
 
 function makeUrl(path: string) {
   return API_BASE ? `${API_BASE}${path}` : path;
@@ -18,15 +25,20 @@ export type Me = {
 };
 
 export function getAccessToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+  return accessToken;
 }
 
 export function setAccessToken(token: string) {
-  localStorage.setItem(TOKEN_KEY, token);
+  accessToken = token;
 }
 
 export function clearAccessToken() {
-  localStorage.removeItem(TOKEN_KEY);
+  accessToken = null;
+  try {
+    window.localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // Ignore storage access failures.
+  }
 }
 
 async function readErr(res: Response): Promise<string> {
@@ -137,7 +149,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshMe = useCallback(async (nextToken?: string) => {
     const t = nextToken ?? token ?? getAccessToken();
     if (!t) {
-      setUser(null);
+      try {
+        const r = await apiRefresh();
+        setAccessToken(r.access_token);
+        setToken(r.access_token);
+        const me = await apiMe(r.access_token);
+        setUser(me);
+      } catch {
+        clearAccessToken();
+        setToken(null);
+        setUser(null);
+      }
       return;
     }
     try {

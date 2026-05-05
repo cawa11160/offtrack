@@ -17,6 +17,15 @@ import { getErrorMessage } from "@/lib/errors";
 
 const ADMIN_KEY_STORAGE = "offtrack_admin_api_key";
 
+function readAdminApiKey() {
+  const legacy = window.localStorage.getItem(ADMIN_KEY_STORAGE);
+  if (legacy) {
+    window.localStorage.removeItem(ADMIN_KEY_STORAGE);
+    window.sessionStorage.setItem(ADMIN_KEY_STORAGE, legacy);
+  }
+  return window.sessionStorage.getItem(ADMIN_KEY_STORAGE) || "";
+}
+
 function formatTs(v?: string) {
   if (!v) return "-";
   const d = new Date(v);
@@ -26,7 +35,7 @@ function formatTs(v?: string) {
 
 export default function AdminSecurity() {
   const navigate = useNavigate();
-  const [adminApiKey, setAdminApiKey] = useState(() => localStorage.getItem(ADMIN_KEY_STORAGE) || "");
+  const [adminApiKey, setAdminApiKey] = useState(() => readAdminApiKey());
   const [userId, setUserId] = useState("");
   const [minutes, setMinutes] = useState("30");
   const [reason, setReason] = useState("manual_admin_lock");
@@ -49,7 +58,12 @@ export default function AdminSecurity() {
   function persistKey(v: string) {
     const next = v.trim();
     setAdminApiKey(next);
-    localStorage.setItem(ADMIN_KEY_STORAGE, next);
+    if (next) {
+      window.sessionStorage.setItem(ADMIN_KEY_STORAGE, next);
+    } else {
+      window.sessionStorage.removeItem(ADMIN_KEY_STORAGE);
+    }
+    window.localStorage.removeItem(ADMIN_KEY_STORAGE);
     window.dispatchEvent(new Event("admin-key-change"));
   }
 

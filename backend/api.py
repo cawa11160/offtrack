@@ -12,7 +12,7 @@ import re
 import logging
 import threading
 from typing import List, Optional, Dict, Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from functools import lru_cache
 from pathlib import Path
 
@@ -65,6 +65,29 @@ load_dotenv()
 app = FastAPI(title="Offtrack API")
 log = logging.getLogger("offtrack.api")
 
+
+def _env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _runtime_env() -> str:
+    return (os.getenv("OFFTRACK_ENV") or os.getenv("ENV") or "development").strip().lower()
+
+
+def _in_production() -> bool:
+    return _runtime_env() in {"prod", "production"}
+
+
+def _read_secret(name: str, default: str, *, min_len: int = 32) -> str:
+    value = os.getenv(name, default).strip()
+    if _in_production() and (not value or value == default or len(value) < min_len):
+        raise RuntimeError(f"{name} must be set to a strong value in production")
+    return value
+
+
+def _constant_time_equals(left: str, right: str) -> bool:
+    return bool(left) and bool(right) and secrets.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
 try:
     from spotify_auth import router as spotify_router
     app.include_router(spotify_router)
@@ -101,6 +124,7 @@ BRUTE_FORCE_WINDOW_SEC = int(os.getenv("BRUTE_FORCE_WINDOW_SEC", "300"))
 BRUTE_FORCE_BLOCK_SEC = int(os.getenv("BRUTE_FORCE_BLOCK_SEC", "600"))
 RATE_LIMIT_BACKEND = (os.getenv("RATE_LIMIT_BACKEND", "memory").strip().lower() or "memory")
 REDIS_URL = (os.getenv("REDIS_URL", "").strip() or "redis://localhost:6379/0")
+TRUST_PROXY_HEADERS = _env_bool("TRUST_PROXY_HEADERS", "false")
 def _admin_api_key() -> str:
     return (os.getenv("ADMIN_API_KEY", "").strip())
 _rate_lock = threading.Lock()
@@ -118,7 +142,7 @@ if RATE_LIMIT_BACKEND == "redis" and redis is not None:
 
 def _client_ip(req: Request) -> str:
     xff = (req.headers.get("x-forwarded-for") or "").strip()
-    if xff:
+    if TRUST_PROXY_HEADERS and xff:
         return xff.split(",")[0].strip()
     if req.client and req.client.host:
         return req.client.host
@@ -235,7 +259,7 @@ def _record_auth_result(email: str, ip: str, ok: bool) -> None:
 
 
 def _check_upload_secret(request: Request) -> bool:
-    """If UPLOAD_SECRET is set, require it in a header or query param.
+    """If UPLOAD_SECRET is set, require it in a header.
 
     This keeps your demo instance from becoming an open file drop.
     """
@@ -246,9 +270,7 @@ def _check_upload_secret(request: Request) -> bool:
 
 def _has_valid_upload_secret(request: Request) -> bool:
     got = (request.headers.get("X-Upload-Secret") or "").strip()
-    if not got:
-        got = (request.query_params.get("secret") or "").strip()
-    return bool(got) and got == UPLOAD_SECRET
+    return _constant_time_equals(got, UPLOAD_SECRET)
 
 
 def _guess_mime_and_ext(filename: str | None, content_type: str | None) -> tuple[str, str]:
@@ -319,7 +341,12 @@ def _stream_file(path: Path | str, mime_type: str, request: Request):
     if is_remote_storage_path(path):
         return remote_redirect_response(str(path))
 
-    path = Path(path)
+    path = Path(path).resolve()
+    try:
+        path.relative_to(MEDIA_DIR)
+    except ValueError:
+        log.warning("Blocked media stream outside MEDIA_DIR", extra={"media_path": str(path)})
+        raise HTTPException(status_code=404, detail="Audio file not found")
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Audio file not found")
 
@@ -364,11 +391,12 @@ ALLOW_ORIGINS = os.getenv(
     "http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000",
 ).split(",")
 ALLOW_ORIGINS = [o.strip() for o in ALLOW_ORIGINS if o.strip()]
+ALLOW_CREDENTIALS = "*" not in ALLOW_ORIGINS
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOW_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -408,8 +436,10 @@ from passlib.context import CryptContext
 # Legacy verifier for hashes created before the scrypt migration.
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
-JWT_SECRET = os.getenv("JWT_SECRET", "dev_change_me").strip()
-JWT_ALG = os.getenv("JWT_ALG", "HS256").strip() or "HS256"
+JWT_SECRET = _read_secret("JWT_SECRET", "dev_change_me", min_len=32)
+JWT_ALG = os.getenv("JWT_ALG", "HS256").strip().upper() or "HS256"
+if JWT_ALG not in {"HS256", "HS384", "HS512"}:
+    raise RuntimeError("JWT_ALG must be one of HS256, HS384, or HS512")
 ACCESS_TTL_MIN = int(os.getenv("ACCESS_TTL_MIN", "30"))
 REFRESH_TTL_DAYS = int(os.getenv("REFRESH_TTL_DAYS", "30"))
 PASSWORD_MIN_LENGTH = int(os.getenv("PASSWORD_MIN_LENGTH", "10"))
@@ -424,8 +454,10 @@ EMAIL_VERIFICATION_REQUIRED_FOR_ARTIST_UPLOADS = (
 )
 
 REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "offtrack_refresh").strip() or "offtrack_refresh"
-COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
-COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").lower()  # lax|strict|none
+COOKIE_SECURE = _env_bool("COOKIE_SECURE", "false")
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").strip().lower()  # lax|strict|none
+if COOKIE_SAMESITE not in {"lax", "strict", "none"}:
+    COOKIE_SAMESITE = "lax"
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -579,6 +611,18 @@ def _normalize_auth_email(value: str) -> str:
     if not email or len(email) > 254 or _CONTROL_CHARS_RE.search(email):
         raise HTTPException(status_code=422, detail="Enter a valid email address.")
     return email
+
+
+def _sanitize_optional_http_url(value: str | None, field_name: str = "URL") -> str | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    if len(raw) > 2000 or _CONTROL_CHARS_RE.search(raw):
+        raise HTTPException(status_code=422, detail=f"Enter a valid {field_name}.")
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=422, detail=f"{field_name} must be an http or https URL.")
+    return raw
 
 
 def _sanitize_display_name(value: str | None) -> str | None:
@@ -793,7 +837,7 @@ def _require_admin(req: Request) -> None:
     if not admin_api_key:
         raise HTTPException(status_code=503, detail="Admin API not configured")
     supplied = (req.headers.get("X-Admin-Api-Key") or "").strip()
-    if supplied != admin_api_key:
+    if not _constant_time_equals(supplied, admin_api_key):
         raise HTTPException(status_code=403, detail="Admin access denied")
 
 
@@ -2959,7 +3003,7 @@ async def upload_new_track(
         explicit=False,
         is_published=True,
         owner_user_id=owner_user_id,
-        image_url=(image_url or "").strip() or None,
+        image_url=_sanitize_optional_http_url(image_url, "image URL"),
         legacy_uploaded_track_id=None,
     )
     db.add(canonical_track)
@@ -3046,7 +3090,7 @@ def update_managed_upload(upload_id: str, payload: UploadUpdateRequest, request:
             raise HTTPException(status_code=400, detail="title is required")
         track.canonical_title = title
     if payload.image_url is not None:
-        track.image_url = (payload.image_url or "").strip() or None
+        track.image_url = _sanitize_optional_http_url(payload.image_url, "image URL")
     if payload.is_published is not None:
         track.is_published = bool(payload.is_published)
     if payload.artist is not None:

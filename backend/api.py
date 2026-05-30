@@ -65,7 +65,7 @@ from analytics import get_analytics
 from audio_processing import process_audio_file, validate_audio_upload
 from catalog_sync import ensure_catalog_backfill, parse_artist_names as _sync_parse_artist_names
 from catalog_ingest import catalog_sync_status, sync_current_catalog
-from storage import is_remote_storage_path, remote_redirect_response, save_upload_file, storage_backend_for_path
+from storage import is_remote_storage_path, remote_redirect_response, save_upload_file, storage_backend, storage_backend_for_path
 
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.responses import PlainTextResponse
@@ -98,6 +98,38 @@ def _read_secret(name: str, default: str, *, min_len: int = 32) -> str:
 
 def _constant_time_equals(left: str, right: str) -> bool:
     return bool(left) and bool(right) and secrets.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+def _validate_production_runtime_config() -> None:
+    if not _in_production():
+        return
+
+    frontend_url = os.getenv("FRONTEND_URL", "").strip()
+    if not frontend_url.startswith("https://"):
+        raise RuntimeError("FRONTEND_URL must be an https URL in production")
+
+    origins = [origin.strip() for origin in os.getenv("ALLOW_ORIGINS", "").split(",") if origin.strip()]
+    if not origins:
+        raise RuntimeError("ALLOW_ORIGINS must be set in production")
+    if "*" in origins:
+        raise RuntimeError("ALLOW_ORIGINS cannot be '*' in production")
+    if any(origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1") for origin in origins):
+        raise RuntimeError("ALLOW_ORIGINS cannot include localhost origins in production")
+
+    backend = storage_backend()
+    if backend in {"", "local", "disk", "filesystem"} and not _env_bool("ALLOW_LOCAL_MEDIA_IN_PRODUCTION", "false"):
+        raise RuntimeError("MEDIA_STORAGE_BACKEND must be s3 or r2 in production")
+    if backend in {"s3", "r2"}:
+        required = {
+            "S3_BUCKET": os.getenv("S3_BUCKET", "").strip(),
+            "S3_ACCESS_KEY_ID/AWS_ACCESS_KEY_ID": os.getenv("S3_ACCESS_KEY_ID", "").strip()
+            or os.getenv("AWS_ACCESS_KEY_ID", "").strip(),
+            "S3_SECRET_ACCESS_KEY/AWS_SECRET_ACCESS_KEY": os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
+            or os.getenv("AWS_SECRET_ACCESS_KEY", "").strip(),
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise RuntimeError(f"Remote media storage is missing required production env vars: {', '.join(missing)}")
 
 try:
     from spotify_auth import router as spotify_router
@@ -1521,6 +1553,7 @@ def billing_download_receipt(receipt_id: str, req: Request, db: Session = Depend
 
 @app.on_event("startup")
 def _startup_schema_init() -> None:
+    _validate_production_runtime_config()
     # Make auth and upload tables available in fresh environments before first request.
     try:
         wait_for_db(timeout_s=45)
@@ -2047,6 +2080,7 @@ class AdminClaimUploadRequest(BaseModel):
 # -----------------------------
 @app.on_event("startup")
 def _startup():
+    _validate_production_runtime_config()
     app.state.recommender_error = ""
     try:
         wait_for_db(timeout_s=45)
@@ -2138,6 +2172,8 @@ def recommender_reward_artifact_endpoint(request: Request, db: Session = Depends
             "version": artifact.get("version"),
             "generatedAt": artifact.get("generatedAt"),
             "trackCount": artifact.get("trackCount", 0),
+            "artifactStore": artifact.get("artifactStore", "file"),
+            "artifactName": artifact.get("artifactName") or artifact.get("artifactPath"),
         }
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Could not build recommender reward artifact: {exc}")
@@ -2162,20 +2198,20 @@ def recommender_evaluation_endpoint(request: Request, days: int = 30, db: Sessio
 
 
 @app.get("/api/admin/recommender/artifacts")
-def recommender_artifacts_endpoint(request: Request):
+def recommender_artifacts_endpoint(request: Request, db: Session = Depends(get_db)):
     _require_admin(request)
     try:
-        return list_reward_artifacts()
+        return list_reward_artifacts(db=db)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Could not list recommender artifacts: {exc}")
 
 
 @app.post("/api/admin/recommender/rollback")
-def recommender_rollback_endpoint(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
+def recommender_rollback_endpoint(request: Request, payload: Dict[str, Any] = Body(default_factory=dict), db: Session = Depends(get_db)):
     _require_admin(request)
     try:
         name = str(payload.get("name") or "").strip() or None
-        return rollback_reward_artifact(name=name)
+        return rollback_reward_artifact(name=name, db=db)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -2206,6 +2242,8 @@ def recommender_train_ranker_endpoint(request: Request, payload: Dict[str, Any] 
                 "kind": ranker.get("kind"),
                 "generatedAt": ranker.get("generatedAt"),
                 "trackCount": ranker.get("trackCount", 0),
+                "artifactStore": ranker.get("artifactStore", "file"),
+                "artifactName": ranker.get("artifactName") or ranker.get("artifactPath"),
             },
         }
     except Exception as exc:
@@ -2829,11 +2867,11 @@ def _recommendation_engagement_scores(db: Session, distinct_id: Optional[str]) -
     }
     scores: Dict[str, float] = {}
     try:
-        scores.update(load_reward_scores())
+        scores.update(load_reward_scores(db=db))
     except Exception:
         scores = {}
     try:
-        for tid, value in load_ranker_scores().items():
+        for tid, value in load_ranker_scores(db=db).items():
             scores[tid] = max(-1.0, min(1.0, scores.get(tid, 0.0) + 0.35 * float(value)))
     except Exception:
         pass

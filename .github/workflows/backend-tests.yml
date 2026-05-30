@@ -1,13 +1,15 @@
-name: Backend Tests
+name: CI
 
 on:
   push:
     paths:
       - "backend/**"
+      - "frontend/**"
       - ".github/workflows/backend-tests.yml"
   pull_request:
     paths:
       - "backend/**"
+      - "frontend/**"
       - ".github/workflows/backend-tests.yml"
 
 jobs:
@@ -35,3 +37,28 @@ jobs:
         run: |
           mkdir -p "${MEDIA_DIR}"
           pytest -q backend/tests/test_integration.py
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: "frontend/package-lock.json"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build

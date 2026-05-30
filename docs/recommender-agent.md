@@ -27,9 +27,10 @@ The agent runs out of band, either on a schedule or through an admin endpoint.
 It reads interaction history and writes a versioned artifact that the live
 recommender can consume safely.
 
-Current artifact:
+Current artifacts:
 
-- path: `backend/artifacts/reward_scores.json`
+- local path: `backend/artifacts/reward_scores.json`
+- production store: Postgres `recommender_artifacts` with `RECOMMENDER_ARTIFACT_STORE=database`
 - builder: `backend/recommender_agent.py`
 - admin refresh: `POST /api/admin/recommender/reward-artifact`
 - metrics: `GET /api/admin/recommender/metrics?days=7`
@@ -69,7 +70,7 @@ Hourly:
 1. Read new impressions and feedback.
 2. Recompute reward scores.
 3. Apply musician-first exposure boost for published uploads.
-4. Write `reward_scores.json`.
+4. Write the current reward artifact.
 5. The live recommender blends the artifact with recent live feedback.
 
 In Docker Compose this runs as the `recommender-agent` service. It uses:
@@ -136,8 +137,24 @@ curl -X POST http://localhost:8000/api/admin/recommender/reward-artifact \
 Production scheduler:
 
 ```text
-0 * * * * cd /app/backend && python recommender_agent.py
+0 * * * * python recommender_agent.py build
 ```
+
+On Render, the committed `render.yaml` runs that command hourly and stores the
+promoted artifact in Postgres.
+
+Promotion guardrails can be enabled with:
+
+```text
+RECOMMENDER_PROMOTION_GUARDRAILS=true
+RECOMMENDER_PROMOTION_MIN_OUTCOMES=50
+RECOMMENDER_PROMOTION_MIN_PAIRWISE_ACCURACY=0.52
+RECOMMENDER_PROMOTION_MIN_POSITIVE_PRECISION=0.25
+```
+
+When enough recommendation outcomes exist, the agent evaluates the candidate
+artifact before promotion and blocks it if pairwise accuracy or positive
+precision fall below the configured thresholds.
 
 Docker Compose:
 
@@ -158,11 +175,15 @@ still need a playable uploaded audio asset, so listener trust is protected.
 
 ## Artifact Versioning And Rollback
 
-Each reward build writes:
+In local file mode, each reward build writes:
 
 - current artifact: `reward_scores.json`
 - previous artifact: `reward_scores.previous.json`
 - timestamped artifact: `reward_scores.<timestamp>.json`
+
+In production database mode, each reward or ranker build writes a row to
+`recommender_artifacts`, marks the promoted row as current, and keeps older rows
+available for rollback.
 
 The admin recommender dashboard can restore any non-current artifact. The API
 also supports rollback:

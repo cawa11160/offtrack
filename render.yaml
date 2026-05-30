@@ -1,0 +1,96 @@
+services:
+  - type: web
+    name: offtrack-backend
+    runtime: docker
+    rootDir: backend
+    plan: starter
+    healthCheckPath: /api/ping
+    envVars:
+      - key: OFFTRACK_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: offtrack-db
+          property: connectionString
+      - key: FRONTEND_URL
+        sync: false
+      - key: ALLOW_ORIGINS
+        sync: false
+      - key: TRUST_PROXY_HEADERS
+        value: "true"
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: COOKIE_SAMESITE
+        value: none
+      - key: SPOTIFY_COOKIE_SECURE
+        value: "true"
+      - key: SPOTIFY_COOKIE_SAMESITE
+        value: none
+      - key: JWT_SECRET
+        generateValue: true
+      - key: COOKIE_SECRET
+        generateValue: true
+      - key: ADMIN_API_KEY
+        generateValue: true
+      - key: REQUIRE_AUTH_UPLOADS
+        value: "true"
+      - key: EMAIL_VERIFICATION_REQUIRED_FOR_ARTIST_UPLOADS
+        value: "true"
+      - key: MEDIA_STORAGE_BACKEND
+        value: r2
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_KEY_PREFIX
+        value: offtrack
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_REGION
+        value: auto
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_PUBLIC_BASE_URL
+        sync: false
+      - key: RECOMMENDER_ARTIFACT_STORE
+        value: database
+      - key: RECOMMENDER_PROMOTION_GUARDRAILS
+        value: "true"
+      - key: RATE_LIMIT_BACKEND
+        value: memory
+      - key: POSTHOG_ENABLED
+        value: "false"
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
+      - key: SPOTIFY_REDIRECT_URI
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+
+  - type: cron
+    name: offtrack-recommender-agent
+    runtime: docker
+    rootDir: backend
+    schedule: "0 * * * *"
+    dockerCommand: python recommender_agent.py build
+    envVars:
+      - key: OFFTRACK_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: offtrack-db
+          property: connectionString
+      - key: RECOMMENDER_ARTIFACT_STORE
+        value: database
+      - key: RECOMMENDER_PROMOTION_GUARDRAILS
+        value: "true"
+      - key: OFFTRACK_AUTO_SEED
+        value: "false"
+
+databases:
+  - name: offtrack-db
+    databaseName: offtrack
+    user: offtrack
+    plan: starter

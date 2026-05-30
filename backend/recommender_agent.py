@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -12,7 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from db import SessionLocal
-from models import AudioFeatures, CatalogTrack, Interaction
+from models import AudioFeatures, CatalogTrack, Interaction, RecommenderArtifact
 
 
 HERE = Path(__file__).resolve().parent
@@ -20,6 +21,8 @@ DEFAULT_ARTIFACT_PATH = HERE / "artifacts" / "reward_scores.json"
 DEFAULT_DATASET_PATH = HERE / "artifacts" / "training_dataset.jsonl"
 DEFAULT_RANKER_PATH = HERE / "artifacts" / "ranker_scores.json"
 ARTIFACT_VERSION = 1
+REWARD_ARTIFACT_KIND = "reward_scores"
+RANKER_ARTIFACT_KIND = "ranker_scores"
 
 EVENT_WEIGHTS: Dict[str, float] = {
     "impression": 0.0,
@@ -71,6 +74,18 @@ def dataset_path() -> Path:
 
 def ranker_artifact_path() -> Path:
     return Path(os.getenv("RECOMMENDER_RANKER_ARTIFACT", str(DEFAULT_RANKER_PATH))).resolve()
+
+
+def artifact_store() -> str:
+    return (os.getenv("RECOMMENDER_ARTIFACT_STORE", "file").strip().lower() or "file")
+
+
+def _env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _database_artifacts_enabled(path: Optional[Path] = None) -> bool:
+    return path is None and artifact_store() in {"db", "database", "postgres", "postgresql"}
 
 
 def _now_iso() -> str:
@@ -159,17 +174,140 @@ def compute_reward_artifact(db: Session) -> Dict[str, Any]:
     }
 
 
-def write_reward_artifact(path: Optional[Path] = None, db: Optional[Session] = None) -> Dict[str, Any]:
-    target = path or artifact_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
+def _artifact_payload(row: RecommenderArtifact) -> Dict[str, Any]:
+    try:
+        data = json.loads(row.payload_json or "{}")
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
+
+def _current_database_artifact(db: Session, kind: str) -> Optional[RecommenderArtifact]:
+    return (
+        db.query(RecommenderArtifact)
+        .filter(RecommenderArtifact.kind == kind, RecommenderArtifact.is_current.is_(True))
+        .order_by(RecommenderArtifact.created_at.desc())
+        .first()
+    )
+
+
+def _write_database_artifact(db: Session, kind: str, stem: str, artifact: Dict[str, Any]) -> Dict[str, Any]:
+    name = f"{stem}.{_artifact_timestamp()}.{uuid.uuid4().hex[:8]}.json"
+    now = datetime.now(timezone.utc)
+    payload = dict(artifact)
+    payload["artifactStore"] = "database"
+    payload["artifactName"] = name
+    payload["artifactKind"] = kind
+
+    try:
+        db.query(RecommenderArtifact).filter(
+            RecommenderArtifact.kind == kind,
+            RecommenderArtifact.is_current.is_(True),
+        ).update({"is_current": False}, synchronize_session=False)
+        db.add(
+            RecommenderArtifact(
+                id=str(uuid.uuid4()),
+                kind=kind,
+                name=name,
+                payload_json=json.dumps(payload, ensure_ascii=True, sort_keys=True),
+                is_current=True,
+                promoted_at=now,
+            )
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return payload
+
+
+def _list_database_artifacts(db: Session, kind: str) -> Dict[str, Any]:
+    rows = (
+        db.query(RecommenderArtifact)
+        .filter(RecommenderArtifact.kind == kind)
+        .order_by(RecommenderArtifact.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    artifacts = []
+    current_name = None
+    for row in rows:
+        data = _artifact_payload(row)
+        if bool(row.is_current):
+            current_name = row.name
+        artifacts.append(
+            {
+                "id": row.id,
+                "name": row.name,
+                "path": f"database:{row.kind}:{row.name}",
+                "store": "database",
+                "current": bool(row.is_current),
+                "previous": False,
+                "generatedAt": data.get("generatedAt"),
+                "trackCount": data.get("trackCount"),
+                "sizeBytes": len(row.payload_json or ""),
+            }
+        )
+    return {"current": current_name, "store": "database", "artifacts": artifacts}
+
+
+def _rollback_database_artifact(db: Session, kind: str, name: Optional[str] = None) -> Dict[str, Any]:
+    query = db.query(RecommenderArtifact).filter(RecommenderArtifact.kind == kind)
+    if name:
+        candidate = query.filter(RecommenderArtifact.name == name).first()
+    else:
+        candidate = (
+            query.filter(RecommenderArtifact.is_current.is_(False))
+            .order_by(RecommenderArtifact.created_at.desc())
+            .first()
+        )
+    if not candidate:
+        raise FileNotFoundError(f"Reward artifact not found: {name or 'previous database artifact'}")
+
+    try:
+        db.query(RecommenderArtifact).filter(
+            RecommenderArtifact.kind == kind,
+            RecommenderArtifact.is_current.is_(True),
+        ).update({"is_current": False}, synchronize_session=False)
+        candidate.is_current = True
+        candidate.promoted_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    artifact = _artifact_payload(candidate)
+    return {
+        "ok": True,
+        "restored": candidate.name,
+        "current": f"database:{candidate.kind}:{candidate.name}",
+        "trackCount": artifact.get("trackCount", 0),
+        "store": "database",
+    }
+
+
+def _load_database_artifact(db: Optional[Session], kind: str) -> Dict[str, Any]:
+    if db is None:
+        return {}
+    row = _current_database_artifact(db, kind)
+    return _artifact_payload(row) if row else {}
+
+
+def write_reward_artifact(path: Optional[Path] = None, db: Optional[Session] = None) -> Dict[str, Any]:
     owns_session = db is None
     session = db or SessionLocal()
     try:
         artifact = compute_reward_artifact(session)
+        if _env_bool("RECOMMENDER_PROMOTION_GUARDRAILS", "false"):
+            artifact["promotionEvaluation"] = validate_reward_promotion(session, artifact)
+        if _database_artifacts_enabled(path):
+            return _write_database_artifact(session, REWARD_ARTIFACT_KIND, "reward_scores", artifact)
     finally:
         if owns_session:
             session.close()
+
+    target = path or artifact_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
 
     if target.exists():
         previous = target.with_name(f"{target.stem}.previous{target.suffix}")
@@ -194,7 +332,13 @@ def write_reward_artifact(path: Optional[Path] = None, db: Optional[Session] = N
     return artifact
 
 
-def list_reward_artifacts(path: Optional[Path] = None) -> Dict[str, Any]:
+def list_reward_artifacts(path: Optional[Path] = None, db: Optional[Session] = None) -> Dict[str, Any]:
+    if _database_artifacts_enabled(path):
+        if db is None:
+            with SessionLocal() as session:
+                return _list_database_artifacts(session, REWARD_ARTIFACT_KIND)
+        return _list_database_artifacts(db, REWARD_ARTIFACT_KIND)
+
     target = path or artifact_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     files = sorted(target.parent.glob(f"{target.stem}*{target.suffix}"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
@@ -218,7 +362,13 @@ def list_reward_artifacts(path: Optional[Path] = None) -> Dict[str, Any]:
     return {"current": str(target), "artifacts": out}
 
 
-def rollback_reward_artifact(name: Optional[str] = None, path: Optional[Path] = None) -> Dict[str, Any]:
+def rollback_reward_artifact(name: Optional[str] = None, path: Optional[Path] = None, db: Optional[Session] = None) -> Dict[str, Any]:
+    if _database_artifacts_enabled(path):
+        if db is None:
+            with SessionLocal() as session:
+                return _rollback_database_artifact(session, REWARD_ARTIFACT_KIND, name=name)
+        return _rollback_database_artifact(db, REWARD_ARTIFACT_KIND, name=name)
+
     target = path or artifact_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     source = target.with_name(name) if name else target.with_name(f"{target.stem}.previous{target.suffix}")
@@ -232,7 +382,12 @@ def rollback_reward_artifact(name: Optional[str] = None, path: Optional[Path] = 
     return {"ok": True, "restored": source.name, "current": str(target), "trackCount": artifact.get("trackCount", 0)}
 
 
-def load_reward_artifact(path: Optional[Path] = None) -> Dict[str, Any]:
+def load_reward_artifact(path: Optional[Path] = None, db: Optional[Session] = None) -> Dict[str, Any]:
+    if _database_artifacts_enabled(path):
+        data = _load_database_artifact(db, REWARD_ARTIFACT_KIND)
+        if data:
+            return data
+
     target = path or artifact_path()
     try:
         with target.open("r", encoding="utf-8") as f:
@@ -244,8 +399,7 @@ def load_reward_artifact(path: Optional[Path] = None) -> Dict[str, Any]:
         return {}
 
 
-def load_reward_scores(path: Optional[Path] = None) -> Dict[str, float]:
-    artifact = load_reward_artifact(path)
+def _scores_from_artifact(artifact: Dict[str, Any]) -> Dict[str, float]:
     tracks = artifact.get("tracks") if isinstance(artifact, dict) else None
     if not isinstance(tracks, dict):
         return {}
@@ -261,7 +415,16 @@ def load_reward_scores(path: Optional[Path] = None) -> Dict[str, float]:
     return scores
 
 
-def load_ranker_artifact(path: Optional[Path] = None) -> Dict[str, Any]:
+def load_reward_scores(path: Optional[Path] = None, db: Optional[Session] = None) -> Dict[str, float]:
+    return _scores_from_artifact(load_reward_artifact(path, db=db))
+
+
+def load_ranker_artifact(path: Optional[Path] = None, db: Optional[Session] = None) -> Dict[str, Any]:
+    if _database_artifacts_enabled(path):
+        data = _load_database_artifact(db, RANKER_ARTIFACT_KIND)
+        if data:
+            return data
+
     target = path or ranker_artifact_path()
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
@@ -270,8 +433,8 @@ def load_ranker_artifact(path: Optional[Path] = None) -> Dict[str, Any]:
         return {}
 
 
-def load_ranker_scores(path: Optional[Path] = None) -> Dict[str, float]:
-    artifact = load_ranker_artifact(path)
+def load_ranker_scores(path: Optional[Path] = None, db: Optional[Session] = None) -> Dict[str, float]:
+    artifact = load_ranker_artifact(path, db=db)
     tracks = artifact.get("tracks") if isinstance(artifact, dict) else None
     if not isinstance(tracks, dict):
         return {}
@@ -392,8 +555,7 @@ def _context_dict(raw: Optional[str]) -> Dict[str, Any]:
         return {}
 
 
-def evaluate_reward_artifact(db: Session, path: Optional[Path] = None, days: int = 30) -> Dict[str, Any]:
-    scores = load_reward_scores(path)
+def evaluate_reward_scores(db: Session, scores: Dict[str, float], days: int = 30) -> Dict[str, Any]:
     since = datetime.now(timezone.utc) - timedelta(days=max(1, int(days or 30)))
     rows = (
         db.query(Interaction)
@@ -448,6 +610,34 @@ def evaluate_reward_artifact(db: Session, path: Optional[Path] = None, days: int
         "positivePrecisionWhenScorePositive": _rate(top_scored_positive, top_scored_total),
         "pairCount": pairs,
     }
+
+
+def evaluate_reward_artifact(db: Session, path: Optional[Path] = None, days: int = 30) -> Dict[str, Any]:
+    return evaluate_reward_scores(db, load_reward_scores(path, db=db), days=days)
+
+
+def validate_reward_promotion(db: Session, artifact: Dict[str, Any]) -> Dict[str, Any]:
+    scores = _scores_from_artifact(artifact)
+    days = int(os.getenv("RECOMMENDER_PROMOTION_EVALUATION_DAYS", "30") or "30")
+    evaluation = evaluate_reward_scores(db, scores, days=days)
+    min_outcomes = int(os.getenv("RECOMMENDER_PROMOTION_MIN_OUTCOMES", "50") or "50")
+    min_pairwise = float(os.getenv("RECOMMENDER_PROMOTION_MIN_PAIRWISE_ACCURACY", "0.52") or "0.52")
+    min_precision = float(os.getenv("RECOMMENDER_PROMOTION_MIN_POSITIVE_PRECISION", "0.25") or "0.25")
+
+    enough_outcomes = int(evaluation.get("impressionsWithOutcome") or 0) >= max(1, min_outcomes)
+    if enough_outcomes and float(evaluation.get("pairwiseAccuracy") or 0.0) < min_pairwise:
+        raise RuntimeError(
+            "Reward artifact failed promotion guardrail: "
+            f"pairwiseAccuracy={evaluation.get('pairwiseAccuracy')} < {min_pairwise}"
+        )
+    if enough_outcomes and float(evaluation.get("positivePrecisionWhenScorePositive") or 0.0) < min_precision:
+        raise RuntimeError(
+            "Reward artifact failed promotion guardrail: "
+            f"positivePrecisionWhenScorePositive={evaluation.get('positivePrecisionWhenScorePositive')} < {min_precision}"
+        )
+    evaluation["promotionAllowed"] = True
+    evaluation["minOutcomes"] = min_outcomes
+    return evaluation
 
 
 def _track_feature_payload(track: Optional[CatalogTrack]) -> Dict[str, Any]:
@@ -581,8 +771,6 @@ def train_ranker_artifact(
     db: Optional[Session] = None,
     days: int = 90,
 ) -> Dict[str, Any]:
-    target = path or ranker_artifact_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
     dataset_target = dataset or dataset_path()
     if not dataset_target.exists():
         write_training_dataset(path=dataset_target, db=db, days=days)
@@ -620,6 +808,17 @@ def train_ranker_artifact(
         "trackCount": len(tracks),
         "tracks": tracks,
     }
+    if _database_artifacts_enabled(path):
+        owns_session = db is None
+        session = db or SessionLocal()
+        try:
+            return _write_database_artifact(session, RANKER_ARTIFACT_KIND, "ranker_scores", artifact)
+        finally:
+            if owns_session:
+                session.close()
+
+    target = path or ranker_artifact_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(target.parent), delete=False) as tmp:
         json.dump(artifact, tmp, ensure_ascii=True, indent=2, sort_keys=True)
         tmp.write("\n")
@@ -653,20 +852,37 @@ def main() -> None:
                     "ok": True,
                     "dataset": dataset_result,
                     "ranker": {
-                        "path": str(ranker_artifact_path()),
+                        "store": artifact.get("artifactStore", "file"),
+                        "artifact": artifact.get("artifactName") or str(ranker_artifact_path()),
                         "trackCount": artifact.get("trackCount", 0),
                         "generatedAt": artifact.get("generatedAt"),
                     },
                 }
         artifact = write_reward_artifact()
-        return {"ok": True, "path": str(artifact_path()), "trackCount": artifact["trackCount"]}
+        return {
+            "ok": True,
+            "store": artifact.get("artifactStore", "file"),
+            "artifact": artifact.get("artifactName") or artifact.get("artifactPath") or str(artifact_path()),
+            "trackCount": artifact["trackCount"],
+        }
 
     if args.command == "loop":
         interval = max(60, int(args.interval_seconds or 3600))
         while True:
             try:
                 artifact = write_reward_artifact()
-                print(json.dumps({"ok": True, "path": str(artifact_path()), "trackCount": artifact["trackCount"]}, indent=2), flush=True)
+                print(
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "store": artifact.get("artifactStore", "file"),
+                            "artifact": artifact.get("artifactName") or artifact.get("artifactPath") or str(artifact_path()),
+                            "trackCount": artifact["trackCount"],
+                        },
+                        indent=2,
+                    ),
+                    flush=True,
+                )
             except Exception as exc:
                 print(json.dumps({"ok": False, "error": str(exc)}, indent=2), flush=True)
             time.sleep(interval)

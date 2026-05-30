@@ -219,6 +219,19 @@ class CatalogSyncRun(Base):
     finished_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
+class RecommenderArtifact(Base):
+    __tablename__ = "recommender_artifacts"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    promoted_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -403,6 +416,7 @@ Index("ix_audio_assets_track_kind_primary", AudioAsset.track_id, AudioAsset.kind
 Index("ix_interactions_distinct_track", Interaction.distinct_id, Interaction.track_id)
 Index("ix_interactions_distinct_event_created", Interaction.distinct_id, Interaction.event, Interaction.created_at)
 Index("ix_catalog_sync_runs_provider_started", CatalogSyncRun.provider, CatalogSyncRun.started_at)
+Index("ix_recommender_artifacts_kind_current", RecommenderArtifact.kind, RecommenderArtifact.is_current)
 Index("ix_track_audio_track_id", TrackAudio.track_id)
 Index("ix_uploaded_tracks_title_artist", UploadedTrack.title, UploadedTrack.artist)
 Index("ix_payment_methods_user_default", PaymentMethod.user_id, PaymentMethod.is_default)

@@ -42,6 +42,7 @@ from models import (  # noqa: E402
     ExternalTrackRef,
     Genre,
     Interaction,
+    RecommenderArtifact,
     RefreshSession,
     Track,
     TrackArtist,
@@ -1343,6 +1344,77 @@ def test_recommender_agent_writes_reward_artifact(tmp_path):
         assert evaluation["impressionsWithOutcome"] == 1
     finally:
         db.close()
+
+
+def test_recommender_agent_can_store_artifacts_in_database(tmp_path):
+    previous_store = os.environ.get("RECOMMENDER_ARTIFACT_STORE")
+    previous_dataset = os.environ.get("RECOMMENDER_TRAINING_DATASET")
+    os.environ["RECOMMENDER_ARTIFACT_STORE"] = "database"
+    os.environ["RECOMMENDER_TRAINING_DATASET"] = str(tmp_path / "db_training_dataset.jsonl")
+    _fresh_client()
+    db = SessionLocal()
+    try:
+        track = CatalogTrack(
+            id="db-agent-track",
+            canonical_title="DB Agent Track",
+            source_type="upload",
+            duration_ms=180000,
+            explicit=False,
+            is_published=True,
+        )
+        db.add(track)
+        db.add(
+            Interaction(
+                distinct_id="db-agent-user",
+                track_id=track.id,
+                event="impression",
+                context_json=json.dumps({"request_id": "db-agent-request", "rank": 1}),
+            )
+        )
+        db.add(
+            Interaction(
+                distinct_id="db-agent-user",
+                track_id=track.id,
+                event="save",
+                context_json=json.dumps({"request_id": "db-agent-request", "rank": 1}),
+            )
+        )
+        db.commit()
+
+        artifact = write_reward_artifact(db=db)
+        assert artifact["artifactStore"] == "database"
+        assert artifact["trackCount"] == 1
+        assert load_reward_scores(db=db)["db-agent-track"] > 0
+
+        first_name = artifact["artifactName"]
+        db.add(Interaction(distinct_id="db-agent-user", track_id=track.id, event="skip"))
+        db.commit()
+        second = write_reward_artifact(db=db)
+        assert second["artifactName"] != first_name
+
+        artifacts = list_reward_artifacts(db=db)
+        assert artifacts["store"] == "database"
+        assert len(artifacts["artifacts"]) == 2
+        assert sum(1 for item in artifacts["artifacts"] if item["current"]) == 1
+
+        rollback = rollback_reward_artifact(db=db)
+        assert rollback["store"] == "database"
+        assert rollback["restored"] == first_name
+
+        ranker = train_ranker_artifact(db=db, days=30)
+        assert ranker["artifactStore"] == "database"
+        assert load_ranker_scores(db=db)["db-agent-track"] > 0
+        assert db.query(RecommenderArtifact).count() == 3
+    finally:
+        db.close()
+        if previous_store is None:
+            os.environ.pop("RECOMMENDER_ARTIFACT_STORE", None)
+        else:
+            os.environ["RECOMMENDER_ARTIFACT_STORE"] = previous_store
+        if previous_dataset is None:
+            os.environ.pop("RECOMMENDER_TRAINING_DATASET", None)
+        else:
+            os.environ["RECOMMENDER_TRAINING_DATASET"] = previous_dataset
 
 
 def test_admin_can_refresh_recommender_reward_artifact(tmp_path):

@@ -7,6 +7,7 @@ relationships.
 - Product principles: [docs/product-principles.md](docs/product-principles.md)
 - Execution roadmap: [docs/execution-roadmap.md](docs/execution-roadmap.md)
 - Recommender agent: [docs/recommender-agent.md](docs/recommender-agent.md)
+- Deployment: [docs/deployment.md](docs/deployment.md)
 
 ## Dev (Docker, recommended)
 

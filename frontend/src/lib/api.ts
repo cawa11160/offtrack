@@ -197,10 +197,15 @@ export type MusicWebNode = {
   label: string;
   subtitle?: string;
   imageUrl?: string | null;
+  audioUrl?: string | null;
   source?: string;
+  sourceType?: string;
   weight?: number;
   lastEvent?: string;
   lastSeenAt?: string;
+  isDiscoveryCandidate?: boolean;
+  discoveryReason?: string;
+  discoveryScore?: ArtistTrackMetrics["discoveryScore"];
 };
 
 export type MusicWebEdge = {
@@ -222,6 +227,7 @@ export type MusicWebResponse = {
     topGenres?: Array<{ name: string; score: number }>;
     trackCount?: number;
     interactionCount?: number;
+    discoveryCandidateCount?: number;
   };
 };
 

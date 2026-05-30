@@ -3221,6 +3221,7 @@ def profile_music_web(
                 .options(
                     selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
                     selectinload(CatalogTrack.genre_links).selectinload(TrackGenre.genre),
+                    selectinload(CatalogTrack.audio_assets),
                 )
                 .filter(CatalogTrack.id.in_(track_ids))
                 .all()
@@ -3276,6 +3277,8 @@ def profile_music_web(
             subtitle=artist_text,
             imageUrl=image_url,
             source=source,
+            sourceType=getattr(catalog_track, "source_type", None) if catalog_track else source,
+            audioUrl=f"/api/uploads/{tid}/stream" if catalog_track and _catalog_track_primary_asset(catalog_track, kind="full") else None,
             weight=1,
         )
         track_node["weight"] = float(track_node.get("weight", 0)) + max(0.25, abs(weight))
@@ -3314,6 +3317,104 @@ def profile_music_web(
                 _add_graph_edge(edges, track_node_id, genre_node_id, "genre", float(link.weight or 1.0))
                 _add_graph_edge(edges, user_node_id, genre_node_id, "taste", max(0.25, weight / 2))
 
+    listener_artist_scores = dict(artist_scores)
+    listener_genre_scores = dict(genre_scores)
+
+    try:
+        discovery_uploads = (
+            db.query(CatalogTrack)
+            .options(
+                selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+                selectinload(CatalogTrack.genre_links).selectinload(TrackGenre.genre),
+                selectinload(CatalogTrack.audio_assets),
+            )
+            .filter(CatalogTrack.source_type == "upload", CatalogTrack.is_published.is_(True))
+            .order_by(CatalogTrack.created_at.desc())
+            .limit(24)
+            .all()
+        )
+    except SQLAlchemyError:
+        discovery_uploads = []
+
+    def _candidate_fit(track: CatalogTrack) -> tuple[float, str]:
+        artist_names = [
+            link.artist.name
+            for link in track.artist_links
+            if link.artist and link.artist.name
+        ]
+        genre_names = [
+            link.genre.name
+            for link in track.genre_links
+            if link.genre and link.genre.name
+        ]
+        artist_fit = sum(float(listener_artist_scores.get(name, 0)) for name in artist_names)
+        genre_fit = sum(float(listener_genre_scores.get(name, 0)) for name in genre_names)
+        fit = artist_fit * 1.4 + genre_fit
+        if genre_fit > 0 and genre_names:
+            matched = max(genre_names, key=lambda name: float(listener_genre_scores.get(name, 0)))
+            return fit, f"Matches your {matched} taste and needs real listener signals."
+        if artist_fit > 0 and artist_names:
+            matched = max(artist_names, key=lambda name: float(listener_artist_scores.get(name, 0)))
+            return fit, f"Near your {matched} graph and ready for a discovery test."
+        return fit, "Under-discovered musician upload ready for a first listener test."
+
+    playable_uploads = [
+        track
+        for track in discovery_uploads
+        if track.id not in track_ids and _catalog_track_primary_asset(track, kind="full") is not None
+    ]
+    ranked_uploads = sorted(
+        playable_uploads,
+        key=lambda track: (_candidate_fit(track)[0], str(getattr(track, "created_at", ""))),
+        reverse=True,
+    )
+    upload_candidates = ranked_uploads[:12]
+    upload_metrics, _, _, _ = _artist_upload_metrics(db, [track.id for track in upload_candidates])
+    for index, track in enumerate(upload_candidates):
+        item = _attach_upload_metrics(track, _serialize_uploaded_catalog_track(track), upload_metrics.get(track.id) or {})
+        score = ((item.get("metrics") or {}).get("discoveryScore") or {})
+        fit_score, discovery_reason = _candidate_fit(track)
+        track_node_id = f"track:{track.id}"
+        artist_text = _catalog_track_artist_text(track)
+        node = _add_graph_node(
+            nodes,
+            track_node_id,
+            type="track",
+            label=track.canonical_title,
+            subtitle=artist_text,
+            imageUrl=track.image_url,
+            source="upload",
+            sourceType="upload",
+            audioUrl=item.get("audioUrl"),
+            discoveryScore=score,
+            discoveryReason=discovery_reason,
+            isDiscoveryCandidate=True,
+            weight=max(2.0, 9.0 - index * 0.35 + min(6.0, fit_score) + float(score.get("value") or 0) / 18.0),
+        )
+        node["lastEvent"] = node.get("lastEvent") or "discovery_candidate"
+        _add_graph_edge(
+            edges,
+            user_node_id,
+            track_node_id,
+            "discovery",
+            max(1.5, 1.0 + min(4.0, fit_score) + float(score.get("value") or 35) / 22.0),
+        )
+
+        for link in track.artist_links:
+            if not link.artist:
+                continue
+            artist_node_id = f"artist:{link.artist_id}"
+            artist_scores[link.artist.name] = artist_scores.get(link.artist.name, 0) + 1.25
+            _add_graph_node(nodes, artist_node_id, type="artist", label=link.artist.name, weight=artist_scores[link.artist.name])
+            _add_graph_edge(edges, track_node_id, artist_node_id, "artist", 1.0)
+        for link in track.genre_links:
+            if not link.genre:
+                continue
+            genre_node_id = f"genre:{link.genre_id}"
+            genre_scores[link.genre.name] = genre_scores.get(link.genre.name, 0) + 1.0
+            _add_graph_node(nodes, genre_node_id, type="genre", label=link.genre.name, weight=genre_scores[link.genre.name])
+            _add_graph_edge(edges, track_node_id, genre_node_id, "genre", float(link.weight or 1.0))
+
     top_artists = [
         {"name": name, "score": round(score, 2)}
         for name, score in sorted(artist_scores.items(), key=lambda item: item[1], reverse=True)[:8]
@@ -3325,7 +3426,7 @@ def profile_music_web(
 
     return {
         "distinctId": did,
-        "hasData": bool(rows),
+        "hasData": bool(rows or upload_candidates),
         "nodes": list(nodes.values()),
         "edges": list(edges.values()),
         "stats": {
@@ -3334,6 +3435,7 @@ def profile_music_web(
             "topGenres": top_genres,
             "trackCount": len(track_ids),
             "interactionCount": len(rows),
+            "discoveryCandidateCount": len(upload_candidates),
         },
     }
 

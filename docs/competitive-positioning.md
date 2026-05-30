@@ -176,8 +176,9 @@ helping musicians without harming listener trust.
 3. Add profile conversion links and track them as first-class events.
 4. Add fair exposure controls to the recommender dashboard.
 5. Add listener-facing explanation chips for musician upload recommendations.
-6. Add shareable discovery cards for artists.
-7. Add beta success dashboard around qualified musician-listener connections.
+6. Build the Discovery Graph into the listener and artist workflow.
+7. Add shareable discovery cards for artists.
+8. Add beta success dashboard around qualified musician-listener connections.
 
 ## North Star
 

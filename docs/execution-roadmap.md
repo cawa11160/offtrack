@@ -10,6 +10,7 @@ Done when:
 
 - The primary product story is musician uploads -> listener discovery -> listener action -> musician analytics.
 - Listener recommendations prioritize uploaded or claimed musician tracks when quality is comparable.
+- The Discovery Graph exposes playable musician upload candidates next to the listener's taste graph.
 - Artist profiles expose clear listener conversion actions.
 - Every play, like, save, profile open, Spotify click, merch click, and concert click is attributable to a track or artist.
 - Mock-only surfaces are clearly marked, backed by real APIs, or removed from primary navigation.

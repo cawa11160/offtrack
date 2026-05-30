@@ -952,6 +952,36 @@ def test_profile_music_web_returns_track_artist_genre_graph():
         db.add(TrackArtist(track_id=track.id, artist_id=artist.id, role="primary", position=0))
         db.add(TrackGenre(track_id=track.id, genre_id=genre.id, source="test", weight=1.0))
         db.add(Interaction(distinct_id="graph-user", track_id=track.id, event="like", source_page="test"))
+
+        upload_artist = Artist(name="Discovery Artist")
+        db.add(upload_artist)
+        db.flush()
+        upload = CatalogTrack(
+            id="graph-upload-candidate",
+            canonical_title="Graph Upload",
+            source_type="upload",
+            duration_ms=190000,
+            explicit=False,
+            is_published=True,
+        )
+        db.add(upload)
+        db.flush()
+        db.add(TrackArtist(track_id=upload.id, artist_id=upload_artist.id, role="primary", position=0))
+        db.add(TrackGenre(track_id=upload.id, genre_id=genre.id, source="test", weight=1.0))
+        db.add(
+            AudioAsset(
+                id="graph-upload-asset",
+                track_id=upload.id,
+                storage_path=str(BACKEND_DIR / "tests" / ".tmp_media" / "graph-upload.mp3"),
+                mime_type="audio/mpeg",
+                size_bytes=456,
+                duration_ms=190000,
+                kind="full",
+                is_primary=True,
+            )
+        )
+        db.add(Interaction(distinct_id="other-listener", track_id=upload.id, event="play_complete", source_page="test"))
+        db.add(Interaction(distinct_id="other-listener", track_id=upload.id, event="save", source_page="test"))
         db.commit()
     finally:
         db.close()
@@ -961,9 +991,18 @@ def test_profile_music_web_returns_track_artist_genre_graph():
     body = res.json()
     assert body["hasData"] is True
     node_labels = {node["label"] for node in body["nodes"]}
-    assert {"You", "Graph Song", "Graph Artist", "dream pop"}.issubset(node_labels)
+    assert {"You", "Graph Song", "Graph Artist", "dream pop", "Graph Upload", "Discovery Artist"}.issubset(node_labels)
+    candidate = next(node for node in body["nodes"] if node["label"] == "Graph Upload")
+    assert candidate["isDiscoveryCandidate"] is True
+    assert candidate["sourceType"] == "upload"
+    assert candidate["audioUrl"] == "/api/uploads/graph-upload-candidate/stream"
+    assert candidate["discoveryScore"]["value"] > 0
+    assert "dream pop" in candidate["discoveryReason"]
+    discovery_edges = [edge for edge in body["edges"] if edge["relation"] == "discovery"]
+    assert any(edge["target"] == "track:graph-upload-candidate" for edge in discovery_edges)
     assert body["stats"]["trackCount"] == 1
     assert body["stats"]["interactionCount"] == 1
+    assert body["stats"]["discoveryCandidateCount"] == 1
 
 
 def test_profile_music_web_includes_authenticated_user_history_across_distinct_ids():

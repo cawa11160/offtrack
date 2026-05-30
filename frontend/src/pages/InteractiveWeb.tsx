@@ -2,27 +2,35 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Activity,
+  BarChart3,
   CircleDot,
   Disc3,
   Eye,
+  Heart,
   Layers3,
   Music2,
+  Play,
   Radio,
   RefreshCw,
+  Route,
   Search,
+  Sparkles,
   Tags,
+  ThumbsUp,
   UserRound,
   X,
+  type LucideIcon,
 } from "lucide-react";
 
-import { apiGetMusicWeb, type MusicWebEdge, type MusicWebNode, type MusicWebResponse } from "@/lib/api";
+import { apiFeedback, apiGetMusicWeb, apiUrl, type MusicWebEdge, type MusicWebNode, type MusicWebResponse } from "@/lib/api";
 
 type PositionedNode = MusicWebNode & {
   x: number;
   y: number;
 };
 
-type RelationFilter = "all" | "listening" | "taste" | "catalog";
+type RelationFilter = "all" | "listening" | "taste" | "catalog" | "discovery";
+type GraphMode = "taste" | "discover" | "artist";
 
 const nodeColors: Record<MusicWebNode["type"], string> = {
   user: "#111111",
@@ -48,8 +56,15 @@ const nodeIcons: Record<MusicWebNode["type"], typeof UserRound> = {
 const relationLabels: Array<{ id: RelationFilter; label: string }> = [
   { id: "all", label: "All" },
   { id: "listening", label: "Listening" },
+  { id: "discovery", label: "Discovery" },
   { id: "taste", label: "Taste" },
   { id: "catalog", label: "Catalog" },
+];
+
+const graphModes: Array<{ id: GraphMode; label: string; icon: LucideIcon; description: string }> = [
+  { id: "taste", label: "Taste", icon: Route, description: "Your listening history and taste links" },
+  { id: "discover", label: "Discover", icon: Sparkles, description: "Under-discovered musician uploads near your graph" },
+  { id: "artist", label: "Artist", icon: BarChart3, description: "Musician uploads and growth paths" },
 ];
 
 function orbit(count: number, index: number, radiusX: number, radiusY: number, start = -90) {
@@ -63,6 +78,7 @@ function orbit(count: number, index: number, radiusX: number, radiusY: number, s
 
 function relationFamily(relation: string): RelationFilter {
   const key = relation.toLowerCase();
+  if (key === "discovery") return "discovery";
   if (key === "taste") return "taste";
   if (key === "artist" || key === "genre") return "catalog";
   return "listening";
@@ -70,6 +86,7 @@ function relationFamily(relation: string): RelationFilter {
 
 function edgeColor(edge: MusicWebEdge) {
   const family = relationFamily(edge.relation);
+  if (family === "discovery") return "#7c3aed";
   if (family === "taste") return "#e85d4f";
   if (family === "catalog") return edge.relation === "genre" ? "#d79a12" : "#4f46e5";
   if (edge.relation === "dislike" || edge.relation === "skip") return "#9f2f26";
@@ -142,7 +159,7 @@ function formatEventName(name: string) {
 
 function nodeMatches(node: MusicWebNode, query: string) {
   if (!query) return true;
-  const haystack = [node.label, node.subtitle, node.source, node.lastEvent].filter(Boolean).join(" ").toLowerCase();
+  const haystack = [node.label, node.subtitle, node.source, node.lastEvent, node.discoveryReason].filter(Boolean).join(" ").toLowerCase();
   return haystack.includes(query.toLowerCase());
 }
 
@@ -152,7 +169,7 @@ function byNodeImportance(a: MusicWebNode, b: MusicWebNode) {
   return Number(b.weight || 0) - Number(a.weight || 0);
 }
 
-function MetricCard({ label, value, icon: Icon }: { label: string; value: number | string; icon: typeof Activity }) {
+function MetricCard({ label, value, icon: Icon }: { label: string; value: number | string; icon: LucideIcon }) {
   return (
     <div className="rounded-lg border border-black/10 bg-white p-4">
       <div className="flex items-center justify-between gap-3">
@@ -164,6 +181,15 @@ function MetricCard({ label, value, icon: Icon }: { label: string; value: number
   );
 }
 
+function trackIdFromNode(node: MusicWebNode | null) {
+  if (!node || node.type !== "track" || !node.id.startsWith("track:")) return "";
+  return node.id.slice("track:".length);
+}
+
+function pct(value?: number) {
+  return `${Math.round(Number(value || 0) * 100)}%`;
+}
+
 export default function InteractiveWeb() {
   const [data, setData] = useState<MusicWebResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -171,7 +197,9 @@ export default function InteractiveWeb() {
   const [query, setQuery] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [relationFilter, setRelationFilter] = useState<RelationFilter>("all");
+  const [graphMode, setGraphMode] = useState<GraphMode>("discover");
   const [density, setDensity] = useState(84);
+  const [actionBusy, setActionBusy] = useState("");
   const [enabledTypes, setEnabledTypes] = useState<Record<MusicWebNode["type"], boolean>>({
     user: true,
     track: true,
@@ -203,9 +231,42 @@ export default function InteractiveWeb() {
     return allEdges.filter((edge) => relationFamily(edge.relation) === relationFilter);
   }, [allEdges, relationFilter]);
 
+  const modeFilteredNodes = useMemo(() => {
+    if (graphMode === "taste") return allNodes.filter((node) => !node.isDiscoveryCandidate);
+    if (graphMode === "discover") {
+      const uploadIds = new Set(
+        allNodes.filter((node) => node.isDiscoveryCandidate || node.sourceType === "upload").map((node) => node.id)
+      );
+      const neighborIds = new Set<string>();
+      allEdges.forEach((edge) => {
+        if (uploadIds.has(edge.source)) neighborIds.add(edge.target);
+        if (uploadIds.has(edge.target)) neighborIds.add(edge.source);
+      });
+      return allNodes.filter(
+        (node) => node.type === "user" || node.isDiscoveryCandidate || node.sourceType === "upload" || neighborIds.has(node.id)
+      );
+    }
+    const uploadIds = new Set(
+      allNodes.filter((node) => node.sourceType === "upload" || node.source === "upload" || node.isDiscoveryCandidate).map((node) => node.id)
+    );
+    const uploadNeighborIds = new Set<string>();
+    allEdges.forEach((edge) => {
+      if (uploadIds.has(edge.source)) uploadNeighborIds.add(edge.target);
+      if (uploadIds.has(edge.target)) uploadNeighborIds.add(edge.source);
+    });
+    return allNodes.filter(
+      (node) =>
+        node.type === "user" ||
+        uploadNeighborIds.has(node.id) ||
+        node.sourceType === "upload" ||
+        node.source === "upload" ||
+        node.isDiscoveryCandidate
+    );
+  }, [allEdges, allNodes, graphMode]);
+
   const filteredNodes = useMemo(() => {
     const selectedConnected = selectedNodeId ? connectedIds(relationEdges, selectedNodeId) : null;
-    return allNodes
+    return modeFilteredNodes
       .filter((node) => enabledTypes[node.type])
       .filter((node) => nodeMatches(node, query.trim()))
       .filter((node) => {
@@ -214,7 +275,7 @@ export default function InteractiveWeb() {
       })
       .sort(byNodeImportance)
       .slice(0, density);
-  }, [allNodes, density, enabledTypes, query, relationEdges, selectedNodeId]);
+  }, [density, enabledTypes, modeFilteredNodes, query, relationEdges, selectedNodeId]);
 
   const nodes = useMemo(() => layoutNodes(filteredNodes, relationEdges, selectedNodeId), [filteredNodes, relationEdges, selectedNodeId]);
   const nodeMap = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
@@ -240,10 +301,34 @@ export default function InteractiveWeb() {
   const topGenres = data?.stats?.topGenres ?? [];
   const eventEntries = Object.entries(data?.stats?.events ?? {}).sort((a, b) => Number(b[1]) - Number(a[1]));
   const maxEventCount = Math.max(1, ...eventEntries.map(([, count]) => Number(count)));
+  const selectedTrackId = trackIdFromNode(selectedNode);
+  const selectedAudioUrl = selectedNode?.audioUrl ? apiUrl(selectedNode.audioUrl) : "";
+  const discoveryCandidates = useMemo(() => allNodes.filter((node) => node.isDiscoveryCandidate), [allNodes]);
+  const hasGraphData = Boolean(data?.hasData || discoveryCandidates.length);
 
   function toggleType(type: MusicWebNode["type"]) {
     setEnabledTypes((prev) => ({ ...prev, [type]: !prev[type] }));
     if (selectedNode?.type === type) setSelectedNodeId(null);
+  }
+
+  async function sendTrackAction(event: "save" | "like" | "superlike" | "click_recommendation" | "upload_play") {
+    if (!selectedTrackId) return;
+    setActionBusy(event);
+    try {
+      await apiFeedback(selectedTrackId, event, {
+        sourcePage: "discovery_graph",
+        extra: { graphMode, selectedNode: selectedNode?.label },
+      });
+    } finally {
+      setActionBusy("");
+    }
+  }
+
+  function startDiscoveryWalk() {
+    setGraphMode("discover");
+    setRelationFilter("all");
+    setQuery("");
+    setSelectedNodeId(discoveryCandidates[0]?.id ?? null);
   }
 
   return (
@@ -251,10 +336,22 @@ export default function InteractiveWeb() {
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-6 sm:px-6 lg:px-8">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-[#4f46e5]">Interactive Web</p>
-            <h1 className="mt-1 text-3xl font-bold sm:text-4xl">Listening graph</h1>
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-[#4f46e5]">Offtrack Atlas</p>
+            <h1 className="mt-1 text-3xl font-bold sm:text-4xl">Discovery Graph</h1>
+            <p className="mt-2 max-w-3xl text-sm font-semibold text-black/55">
+              Map your taste, find under-discovered musician uploads, and turn graph signals into artist growth.
+            </p>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={startDiscoveryWalk}
+              disabled={!discoveryCandidates.length}
+              className="inline-flex h-10 items-center gap-2 rounded-md border border-black/10 bg-white px-4 text-sm font-semibold text-black transition hover:bg-black/5 disabled:opacity-50"
+            >
+              <Sparkles className="h-4 w-4" />
+              Discovery walk
+            </button>
             <Link
               to="/profile"
               className="inline-flex h-10 items-center gap-2 rounded-md border border-black/10 bg-white px-4 text-sm font-semibold text-black transition hover:bg-black/5"
@@ -278,10 +375,43 @@ export default function InteractiveWeb() {
           <div className="rounded-md border border-[#e85d4f]/30 bg-white px-4 py-3 text-sm font-semibold text-[#9f2f26]">{error}</div>
         ) : null}
 
+        <section className="grid gap-3 lg:grid-cols-3">
+          {graphModes.map((mode) => {
+            const Icon = mode.icon;
+            const active = graphMode === mode.id;
+            return (
+              <button
+                key={mode.id}
+                type="button"
+                onClick={() => {
+                  setGraphMode(mode.id);
+                  setSelectedNodeId(null);
+                  if (mode.id === "discover") setRelationFilter("all");
+                }}
+                className={`min-w-0 rounded-lg border p-4 text-left transition ${
+                  active ? "border-black bg-black text-white" : "border-black/10 bg-white text-black hover:bg-black/5"
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <span className={`grid h-9 w-9 place-items-center rounded-md ${active ? "bg-white text-black" : "bg-[#f8f7f2] text-black"}`}>
+                    <Icon className="h-4 w-4" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block truncate text-base font-bold">{mode.label}</span>
+                    <span className={`block truncate text-xs font-semibold ${active ? "text-white/70" : "text-black/50"}`}>
+                      {mode.description}
+                    </span>
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+        </section>
+
         <section className="grid gap-4 md:grid-cols-4">
           <MetricCard label="Signals" value={data?.stats?.interactionCount ?? 0} icon={Activity} />
           <MetricCard label="Tracks" value={data?.stats?.trackCount ?? 0} icon={Music2} />
-          <MetricCard label="Visible nodes" value={nodes.length} icon={CircleDot} />
+          <MetricCard label="Discovery uploads" value={data?.stats?.discoveryCandidateCount ?? 0} icon={Sparkles} />
           <MetricCard label="Visible links" value={visibleEdges.length} icon={Layers3} />
         </section>
 
@@ -374,7 +504,7 @@ export default function InteractiveWeb() {
           <section className="relative min-h-[680px] overflow-hidden rounded-lg border border-black/10 bg-white shadow-sm">
             {loading ? (
               <div className="absolute inset-0 grid place-items-center text-sm font-semibold text-black/60">Loading</div>
-            ) : !data?.hasData ? (
+            ) : !hasGraphData ? (
               <div className="absolute inset-0 grid place-items-center px-6 text-center">
                 <div>
                   <p className="text-lg font-semibold">No listening signals yet</p>
@@ -431,6 +561,7 @@ export default function InteractiveWeb() {
                   const Icon = nodeIcons[node.type];
                   const selected = selectedNodeId === node.id;
                   const size = nodeSize(node, selected);
+                  const discovery = Boolean(node.isDiscoveryCandidate || node.sourceType === "upload");
                   return (
                     <button
                       key={node.id}
@@ -442,7 +573,11 @@ export default function InteractiveWeb() {
                     >
                       <span
                         className={`grid place-items-center overflow-hidden rounded-full border-4 text-white shadow-lg transition ${
-                          selected ? "border-black ring-4 ring-black/10" : "border-white"
+                          selected
+                            ? "border-black ring-4 ring-black/10"
+                            : discovery
+                              ? "border-[#7c3aed] ring-4 ring-[#7c3aed]/10"
+                              : "border-white"
                         }`}
                         style={{ width: size, height: size, backgroundColor: nodeColors[node.type] }}
                       >
@@ -454,7 +589,9 @@ export default function InteractiveWeb() {
                       </span>
                       <span className="max-w-[142px] rounded bg-white/95 px-2 py-1 text-center shadow-sm">
                         <span className="block truncate text-xs font-semibold">{node.label}</span>
-                        {node.subtitle ? <span className="block truncate text-[11px] font-medium text-black/55">{node.subtitle}</span> : null}
+                        <span className="block truncate text-[11px] font-medium text-black/55">
+                          {discovery ? "Musician upload" : node.subtitle || nodeLabels[node.type]}
+                        </span>
                       </span>
                     </button>
                   );
@@ -505,6 +642,75 @@ export default function InteractiveWeb() {
                     <div className="mt-3 rounded-md bg-[#f8f7f2] p-3">
                       <p className="text-xs font-semibold text-black/50">Last event</p>
                       <p className="mt-1 text-sm font-bold">{formatEventName(selectedNode.lastEvent)}</p>
+                    </div>
+                  ) : null}
+                  {selectedNode.discoveryScore ? (
+                    <div className="mt-3 rounded-md bg-[#f8f7f2] p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-xs font-semibold text-black/50">Discovery score</p>
+                        <span className="rounded bg-white px-2 py-1 text-xs font-bold text-black/60">{selectedNode.discoveryScore.label}</span>
+                      </div>
+                      <p className="mt-1 text-2xl font-bold">{selectedNode.discoveryScore.value}</p>
+                      <p className="mt-2 text-sm font-semibold text-black/60">{selectedNode.discoveryScore.nextAction}</p>
+                      <div className="mt-2 grid grid-cols-2 gap-2 text-xs font-bold text-black/50">
+                        <span>Completion {pct(selectedNode.discoveryScore.rates.completion)}</span>
+                        <span>Save {pct(selectedNode.discoveryScore.rates.save)}</span>
+                        <span>Conversion {pct(selectedNode.discoveryScore.rates.conversion)}</span>
+                        <span>Skip {pct(selectedNode.discoveryScore.rates.skip)}</span>
+                      </div>
+                    </div>
+                  ) : selectedNode.discoveryReason ? (
+                    <div className="mt-3 rounded-md bg-[#f8f7f2] p-3 text-sm font-semibold text-black/60">
+                      {selectedNode.discoveryReason}
+                    </div>
+                  ) : null}
+                  {selectedTrackId ? (
+                    <div className="mt-3 rounded-md border border-black/10 bg-white p-3">
+                      <p className="text-xs font-semibold text-black/50">Actions</p>
+                      {selectedAudioUrl ? (
+                        <audio
+                          controls
+                          preload="none"
+                          src={selectedAudioUrl}
+                          className="mt-2 w-full"
+                          onPlay={() => void sendTrackAction("upload_play")}
+                        />
+                      ) : null}
+                      <div className="mt-3 grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void sendTrackAction("click_recommendation")}
+                          disabled={Boolean(actionBusy)}
+                          className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-black px-3 text-xs font-bold text-white disabled:opacity-50"
+                        >
+                          <Play className="h-3.5 w-3.5" />
+                          Interested
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void sendTrackAction("save")}
+                          disabled={Boolean(actionBusy)}
+                          className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-black/10 px-3 text-xs font-bold hover:bg-black/5 disabled:opacity-50"
+                        >
+                          <Heart className="h-3.5 w-3.5" />
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void sendTrackAction("like")}
+                          disabled={Boolean(actionBusy)}
+                          className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-black/10 px-3 text-xs font-bold hover:bg-black/5 disabled:opacity-50"
+                        >
+                          <ThumbsUp className="h-3.5 w-3.5" />
+                          Like
+                        </button>
+                        <Link
+                          to={`/track/${encodeURIComponent(selectedTrackId)}`}
+                          className="inline-flex h-9 items-center justify-center rounded-md border border-black/10 px-3 text-xs font-bold hover:bg-black/5"
+                        >
+                          Details
+                        </Link>
+                      </div>
                     </div>
                   ) : null}
                 </div>

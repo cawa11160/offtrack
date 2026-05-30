@@ -15,6 +15,7 @@ import {
 } from "@/lib/api";
 import { apiResendEmailVerification, useAuth } from "@/lib/auth";
 import { getErrorMessage } from "@/lib/errors";
+import { ProfileHubNav } from "@/components/profile/ProfileHubNav";
 
 type EditState = {
   title: string;
@@ -41,6 +42,14 @@ function formatDuration(ms?: number | null) {
   const mins = Math.floor(total / 60);
   const secs = total % 60;
   return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
+function scoreTone(value?: number) {
+  const n = Number(value || 0);
+  if (n >= 72) return "border-[#a7f3d0] bg-[#ecfdf5] text-[#047857]";
+  if (n >= 52) return "border-[#bfdbfe] bg-[#eff6ff] text-[#1d4ed8]";
+  if (n >= 35) return "border-[#fde68a] bg-[#fffbeb] text-[#92400e]";
+  return "border-[#fecaca] bg-[#fef2f2] text-[#b91c1c]";
 }
 
 function editFromTrack(track: UploadedTrackItem): EditState {
@@ -231,15 +240,18 @@ export default function Uploads() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-4 py-8">
-      <div className="flex items-start justify-between gap-4">
+    <div className="mx-auto w-full max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
+      <ProfileHubNav active="uploads" />
+
+      <div className="mt-6 flex flex-col gap-4 border-b border-black/10 pb-6 lg:flex-row lg:items-end lg:justify-between">
         <div className="flex items-center gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-xl bg-black text-white">
+          <div className="grid h-11 w-11 shrink-0 place-items-center rounded-md bg-black text-white">
             <UploadCloud className="h-5 w-5" />
           </div>
-          <div>
-            <div className="text-sm text-muted-foreground">Uploads</div>
-            <div className="text-base text-muted-foreground">
+          <div className="min-w-0">
+            <div className="text-sm font-bold uppercase tracking-[0.12em] text-black/45">Profile hub</div>
+            <h1 className="mt-1 text-3xl font-bold leading-none text-black sm:text-4xl">Uploads</h1>
+            <div className="mt-2 max-w-3xl text-base font-semibold text-black/55">
               Upload full songs, manage metadata, replace audio, and control public playback.
             </div>
           </div>
@@ -248,7 +260,7 @@ export default function Uploads() {
         <button
           type="button"
           onClick={() => void refresh()}
-          className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-sm font-medium"
+          className="inline-flex h-10 w-fit items-center gap-2 rounded-md border border-black/10 bg-white px-3 text-sm font-bold hover:bg-black/5"
           disabled={refreshing}
         >
           <RefreshCcw className="h-4 w-4" />
@@ -256,30 +268,30 @@ export default function Uploads() {
         </button>
       </div>
 
-      <div className="mt-6 rounded-xl border border-border bg-card p-5 shadow-sm">
-        <div className="mb-4 grid gap-3 md:grid-cols-3">
-          <div className={`rounded-xl border p-4 ${user ? "border-border bg-background" : "border-amber-200 bg-amber-50"}`}>
+      <div className="mt-6 overflow-hidden rounded-lg border border-black/10 bg-white p-4 shadow-sm sm:p-5">
+        <div className="mb-4 grid gap-3 lg:grid-cols-3">
+          <div className={`min-w-0 rounded-md border p-4 ${user ? "border-black/10 bg-white" : "border-amber-200 bg-amber-50"}`}>
             <div className="flex items-center gap-2 text-sm font-semibold">
               <UserRound className="h-4 w-4" />
               Account
             </div>
-            <div className="mt-2 text-sm text-muted-foreground">
+            <div className="mt-2 break-words text-sm font-semibold text-black/55">
               {user ? `${user.name || user.email} (${user.account_type || "listener"})` : "Log in to upload songs."}
             </div>
           </div>
-          <div className={`rounded-xl border p-4 ${isArtist ? "border-green-200 bg-green-50" : "border-border bg-background"}`}>
+          <div className={`min-w-0 rounded-md border p-4 ${isArtist ? "border-green-200 bg-green-50" : "border-black/10 bg-white"}`}>
             <div className="flex items-center gap-2 text-sm font-semibold">
               <Music2 className="h-4 w-4" />
               Artist access
             </div>
-            <div className="mt-2 text-sm text-muted-foreground">{isArtist ? "Enabled" : "Artist account required"}</div>
+            <div className="mt-2 text-sm font-semibold text-black/55">{isArtist ? "Enabled" : "Artist account required"}</div>
           </div>
-          <div className={`rounded-xl border p-4 ${emailVerified ? "border-green-200 bg-green-50" : "border-amber-200 bg-amber-50"}`}>
+          <div className={`min-w-0 rounded-md border p-4 ${emailVerified ? "border-green-200 bg-green-50" : "border-amber-200 bg-amber-50"}`}>
             <div className="flex items-center gap-2 text-sm font-semibold">
               <CheckCircle2 className="h-4 w-4" />
               Email
             </div>
-            <div className="mt-2 text-sm text-muted-foreground">{emailVerified ? "Verified" : "Verification required"}</div>
+            <div className="mt-2 text-sm font-semibold text-black/55">{emailVerified ? "Verified" : "Verification required"}</div>
           </div>
         </div>
 
@@ -312,57 +324,57 @@ export default function Uploads() {
 
         {canManageUploads ? (
           <>
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              <div>
+            <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-4">
+              <div className="min-w-0">
                 <label className="text-sm font-medium">Title</label>
                 <input
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm"
+                  className="mt-1 h-11 w-full rounded-md border border-black/10 bg-white px-3 text-sm font-semibold outline-none focus:border-black/35"
                   placeholder="Song title"
                 />
               </div>
-              <div>
+              <div className="min-w-0">
                 <label className="text-sm font-medium">Artist</label>
                 <input
                   value={artist}
                   onChange={(e) => setArtist(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm"
+                  className="mt-1 h-11 w-full rounded-md border border-black/10 bg-white px-3 text-sm font-semibold outline-none focus:border-black/35"
                   placeholder="Artist name"
                 />
               </div>
-              <div>
+              <div className="min-w-0">
                 <label className="text-sm font-medium">Cover image URL</label>
-                <div className="mt-1 flex rounded-xl border border-border bg-background">
+                <div className="mt-1 flex h-11 rounded-md border border-black/10 bg-white focus-within:border-black/35">
                   <span className="grid w-10 place-items-center text-muted-foreground">
                     <Image className="h-4 w-4" />
                   </span>
                   <input
                     value={imageUrl}
                     onChange={(e) => setImageUrl(e.target.value)}
-                    className="min-w-0 flex-1 rounded-r-xl bg-transparent px-3 py-2 text-sm outline-none"
+                    className="min-w-0 flex-1 rounded-r-md bg-transparent px-3 text-sm font-semibold outline-none"
                     placeholder="https://..."
                   />
                 </div>
               </div>
-              <div>
+              <div className="min-w-0">
                 <label className="text-sm font-medium">Audio file</label>
                 <input
                   type="file"
                   accept="audio/*"
                   onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                  className="mt-1 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm"
+                  className="mt-1 h-11 w-full rounded-md border border-black/10 bg-white px-3 py-2 text-sm"
                 />
               </div>
             </div>
 
-            <div className="mt-4 flex items-center justify-between gap-4">
+            <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="text-xs text-muted-foreground">New uploads are owned by your artist account.</div>
               <button
                 type="button"
                 onClick={() => void onUpload()}
                 disabled={!canUpload}
-                className="rounded-xl bg-black px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                className="inline-flex h-10 w-fit items-center rounded-md bg-black px-4 text-sm font-bold text-white disabled:opacity-50"
               >
                 {loading ? "Uploading..." : "Upload"}
               </button>
@@ -419,7 +431,7 @@ export default function Uploads() {
 
       <div className="mt-6 grid gap-4">
         {tracks.length === 0 ? (
-          <div className="rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground">
+          <div className="rounded-lg border border-dashed border-black/20 bg-[#f8f7f2] p-6 text-sm font-semibold text-black/55">
             {canManageUploads ? "No uploads yet. Upload a song above." : "No public uploads yet."}
           </div>
         ) : (
@@ -428,21 +440,21 @@ export default function Uploads() {
             const busy = Boolean(busyByTrack[track.id]);
             const replacement = replaceFileByTrack[track.id];
             return (
-              <div key={track.id} className="rounded-xl border border-border bg-card p-5 shadow-sm">
+              <div key={track.id} className="overflow-hidden rounded-lg border border-black/10 bg-white p-4 shadow-sm sm:p-5">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                   <div className="flex min-w-0 flex-1 gap-3">
-                    <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-black/5">
+                    <div className="grid h-11 w-11 shrink-0 place-items-center rounded-md bg-black/5">
                       <Music2 className="h-5 w-5" />
                     </div>
                     <div className="min-w-0 flex-1">
                       {canManageUploads ? (
-                        <div className="grid gap-2 md:grid-cols-3">
+                        <div className="grid min-w-0 gap-2 xl:grid-cols-3">
                           <input
                             value={edit.title}
                             onChange={(e) =>
                               setEditByTrack((prev) => ({ ...prev, [track.id]: { ...edit, title: e.target.value } }))
                             }
-                            className="rounded-xl border border-border bg-background px-3 py-2 text-sm font-semibold"
+                            className="min-w-0 rounded-md border border-black/10 bg-white px-3 py-2 text-sm font-semibold outline-none focus:border-black/35"
                             placeholder="Title"
                           />
                           <input
@@ -450,7 +462,7 @@ export default function Uploads() {
                             onChange={(e) =>
                               setEditByTrack((prev) => ({ ...prev, [track.id]: { ...edit, artist: e.target.value } }))
                             }
-                            className="rounded-xl border border-border bg-background px-3 py-2 text-sm"
+                            className="min-w-0 rounded-md border border-black/10 bg-white px-3 py-2 text-sm outline-none focus:border-black/35"
                             placeholder="Artist"
                           />
                           <input
@@ -458,7 +470,7 @@ export default function Uploads() {
                             onChange={(e) =>
                               setEditByTrack((prev) => ({ ...prev, [track.id]: { ...edit, imageUrl: e.target.value } }))
                             }
-                            className="rounded-xl border border-border bg-background px-3 py-2 text-sm"
+                            className="min-w-0 rounded-md border border-black/10 bg-white px-3 py-2 text-sm outline-none focus:border-black/35"
                             placeholder="Image URL"
                           />
                         </div>
@@ -469,19 +481,30 @@ export default function Uploads() {
                         </>
                       )}
 
-                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                        <span className="rounded-lg bg-black/5 px-2 py-1">{track.storageBackend || "unknown"}</span>
-                        <span className="rounded-lg bg-black/5 px-2 py-1">{track.mimeType || "audio"}</span>
-                        <span className="rounded-lg bg-black/5 px-2 py-1">{formatBytes(track.sizeBytes)}</span>
-                        <span className="rounded-lg bg-black/5 px-2 py-1">{formatDuration(track.durationMs)}</span>
-                        <span className="rounded-lg bg-black/5 px-2 py-1">{track.processingStatus || "ready"}</span>
-                        <span className="rounded-lg bg-black/5 px-2 py-1">
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold text-black/55">
+                        <span className="rounded-md bg-black/5 px-2 py-1">{track.storageBackend || "unknown"}</span>
+                        <span className="rounded-md bg-black/5 px-2 py-1">{track.mimeType || "audio"}</span>
+                        <span className="rounded-md bg-black/5 px-2 py-1">{formatBytes(track.sizeBytes)}</span>
+                        <span className="rounded-md bg-black/5 px-2 py-1">{formatDuration(track.durationMs)}</span>
+                        <span className="rounded-md bg-black/5 px-2 py-1">{track.processingStatus || "ready"}</span>
+                        <span className="rounded-md bg-black/5 px-2 py-1">
                           {track.isPublished === false ? "Unpublished" : "Published"}
                         </span>
+                        {track.metrics?.discoveryScore ? (
+                          <span className={`rounded-md border px-2 py-1 ${scoreTone(track.metrics.discoveryScore.value)}`}>
+                            Discovery {track.metrics.discoveryScore.value} - {track.metrics.discoveryScore.label}
+                          </span>
+                        ) : null}
                       </div>
 
+                      {canManageUploads && track.metrics?.discoveryScore ? (
+                        <div className="mt-3 rounded-md bg-[#f8f7f2] px-3 py-2 text-sm font-semibold text-black/60">
+                          {track.metrics.discoveryScore.nextAction}
+                        </div>
+                      ) : null}
+
                       {track.waveformPeaks && track.waveformPeaks.length > 0 ? (
-                        <div className="mt-3 flex h-10 items-center gap-[2px] rounded-xl bg-black/5 px-2">
+                        <div className="mt-3 flex h-10 min-w-0 items-center gap-[2px] rounded-md bg-black/5 px-2">
                           {track.waveformPeaks.slice(0, 64).map((peak, idx) => (
                             <span
                               key={`${track.id}-peak-${idx}`}
@@ -493,7 +516,7 @@ export default function Uploads() {
                       ) : null}
 
                       {track.processingError ? (
-                        <div className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700">{track.processingError}</div>
+                        <div className="mt-2 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{track.processingError}</div>
                       ) : null}
 
                       {canManageUploads ? (
@@ -504,13 +527,13 @@ export default function Uploads() {
                             onChange={(e) =>
                               setReplaceFileByTrack((prev) => ({ ...prev, [track.id]: e.target.files?.[0] ?? null }))
                             }
-                            className="max-w-[260px] rounded-xl border border-border bg-background px-3 py-2 text-xs"
+                            className="max-w-full rounded-md border border-black/10 bg-white px-3 py-2 text-xs sm:max-w-[260px]"
                           />
                           <button
                             type="button"
                             onClick={() => void replaceAudio(track)}
                             disabled={busy || !replacement}
-                            className="inline-flex items-center gap-2 rounded-xl border border-border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50"
+                            className="inline-flex items-center gap-2 rounded-md border border-black/10 px-3 py-2 text-xs font-bold hover:bg-black/5 disabled:opacity-50"
                           >
                             <RefreshCcw className="h-3.5 w-3.5" />
                             Replace audio
@@ -521,12 +544,12 @@ export default function Uploads() {
                   </div>
 
                   {canManageUploads ? (
-                    <div className="flex flex-wrap gap-2 lg:justify-end">
+                    <div className="flex flex-wrap gap-2 lg:w-44 lg:justify-end">
                       <button
                         type="button"
                         onClick={() => void saveTrack(track)}
                         disabled={busy}
-                        className="inline-flex items-center gap-2 rounded-xl bg-black px-3 py-2 text-xs font-medium text-white disabled:opacity-50"
+                        className="inline-flex items-center gap-2 rounded-md bg-black px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
                       >
                         <Save className="h-3.5 w-3.5" />
                         Save
@@ -535,7 +558,7 @@ export default function Uploads() {
                         type="button"
                         onClick={() => void setPublished(track, track.isPublished === false)}
                         disabled={busy}
-                        className="inline-flex items-center gap-2 rounded-xl border border-border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50"
+                        className="inline-flex items-center gap-2 rounded-md border border-black/10 px-3 py-2 text-xs font-bold hover:bg-black/5 disabled:opacity-50"
                       >
                         {track.isPublished === false ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
                         {track.isPublished === false ? "Publish" : "Hide"}
@@ -544,7 +567,7 @@ export default function Uploads() {
                         type="button"
                         onClick={() => void unpublishTrack(track)}
                         disabled={busy || track.isPublished === false}
-                        className="inline-flex items-center gap-2 rounded-xl border border-red-200 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                        className="inline-flex items-center gap-2 rounded-md border border-red-200 px-3 py-2 text-xs font-bold text-red-700 hover:bg-red-50 disabled:opacity-50"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                         Unpublish
@@ -556,7 +579,7 @@ export default function Uploads() {
                 {track.audioUrl ? (
                   <audio controls preload="none" src={apiUrl(track.audioUrl)} className="mt-4 w-full" />
                 ) : (
-                  <div className="mt-4 rounded-xl bg-black/5 px-3 py-2 text-sm text-muted-foreground">No playable audio asset.</div>
+                  <div className="mt-4 rounded-md bg-black/5 px-3 py-2 text-sm text-muted-foreground">No playable audio asset.</div>
                 )}
               </div>
             );

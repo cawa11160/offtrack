@@ -12,7 +12,6 @@ import {
   ListMusic,
   Search,
   Share2,
-  UploadCloud,
 } from "lucide-react";
 
 type SidebarItem = { to: string; label: string; icon: React.ReactNode };
@@ -44,7 +43,7 @@ function inferRoute(label: string): string {
   if (key === "profile") return "/profile";
   if (key === "account") return "/account";
   if (key === "settings") return "/settings";
-  if (key === "uploads") return "/uploads";
+  if (key === "uploads") return "/profile/uploads";
   if (key === "log in" || key === "login") return "/login";
   if (key === "sign up" || key === "signup") return "/signup";
   return `/${key.replace(/\s+/g, "-")}`;
@@ -80,11 +79,6 @@ const fallbackNav: SidebarItem[] = [
     to: "/web",
     label: "Interactive Web",
     icon: <Share2 className="text-black" size={22} strokeWidth={1.8} />,
-  },
-  {
-    to: "/uploads",
-    label: "Uploads",
-    icon: <UploadCloud className="text-black" size={22} strokeWidth={1.8} />,
   },
   {
     to: "/merch",

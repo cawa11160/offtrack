@@ -16,7 +16,7 @@ interface LayoutProps {
 
 export const Layout = ({ children }: LayoutProps) => {
   const location = useLocation();
-  const isProfilePage = location.pathname === "/profile";
+  const isProfilePage = location.pathname === "/profile" || location.pathname.startsWith("/profile/");
   const isAuthRoute = ["/login", "/signin", "/signup", "/sign-up", "/register", "/account"].includes(location.pathname);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const sidebarVisualWidth = sidebarCollapsed ? ARC_SIDEBAR_COLLAPSED_WIDTH : ARC_SIDEBAR_EXPANDED_VISUAL_WIDTH;

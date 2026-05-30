@@ -60,7 +60,7 @@ export default function ArtistLanding() {
 
           <button
             type="button"
-            onClick={() => navigate("/artist/analytics")}
+            onClick={() => navigate("/profile/dashboard")}
             className="rounded-[10px] bg-[#d0d0d0] p-5 text-left transition-colors hover:bg-[#c5c5c5]"
           >
             <div className="mb-3 inline-flex h-10 w-10 items-center justify-center rounded-[10px] bg-white">

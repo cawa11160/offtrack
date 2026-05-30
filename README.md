@@ -5,6 +5,7 @@ understand their audience, and convert listener attention into durable fan
 relationships.
 
 - Product principles: [docs/product-principles.md](docs/product-principles.md)
+- Competitive positioning: [docs/competitive-positioning.md](docs/competitive-positioning.md)
 - Execution roadmap: [docs/execution-roadmap.md](docs/execution-roadmap.md)
 - Recommender agent: [docs/recommender-agent.md](docs/recommender-agent.md)
 - Deployment: [docs/deployment.md](docs/deployment.md)

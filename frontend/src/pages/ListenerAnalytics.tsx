@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { apiGetArtistDashboard, type ArtistDashboard, type UploadedTrackItem } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { getErrorMessage } from "@/lib/errors";
+import { ProfileHubNav } from "@/components/profile/ProfileHubNav";
 
 function formatNumber(value?: number | null) {
   return new Intl.NumberFormat().format(Number(value || 0));
@@ -15,6 +16,18 @@ function formatDate(value?: string | null) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "No activity yet";
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function pct(value?: number) {
+  return `${Math.round(Number(value || 0) * 100)}%`;
+}
+
+function scoreTone(value?: number) {
+  const n = Number(value || 0);
+  if (n >= 72) return "bg-[#ecfdf5] text-[#047857] border-[#a7f3d0]";
+  if (n >= 52) return "bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]";
+  if (n >= 35) return "bg-[#fffbeb] text-[#92400e] border-[#fde68a]";
+  return "bg-[#fef2f2] text-[#b91c1c] border-[#fecaca]";
 }
 
 function topEvents(track: UploadedTrackItem) {
@@ -65,8 +78,9 @@ export default function ListenerAnalytics() {
   if (!authLoading && !isArtist) {
     return (
       <div className="min-h-[calc(100vh-var(--player-height))] w-full bg-white pb-44">
-        <section className="mx-auto w-full max-w-5xl px-4 py-8">
-          <div className="rounded-lg border border-black/10 bg-[#f8f7f2] p-6">
+        <section className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6">
+          <ProfileHubNav active="dashboard" />
+          <div className="mt-6 rounded-lg border border-black/10 bg-[#f8f7f2] p-6">
             <p className="text-sm font-bold uppercase text-black/50">Artist analytics</p>
             <h1 className="mt-2 text-3xl font-bold text-black">Artist account required</h1>
             <p className="mt-2 max-w-2xl text-sm font-semibold text-black/60">
@@ -88,17 +102,19 @@ export default function ListenerAnalytics() {
 
   return (
     <div className="min-h-[calc(100vh-var(--player-height))] w-full bg-white pb-44 text-black">
-      <section className="mx-auto w-full max-w-7xl px-4 py-7 sm:px-6">
-        <div className="flex flex-col gap-4 border-b border-black/10 pb-6 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <p className="text-sm font-bold uppercase text-black/45">Artist hub</p>
+      <section className="mx-auto w-full max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
+        <ProfileHubNav active="dashboard" />
+
+        <div className="mt-6 flex flex-col gap-4 border-b border-black/10 pb-6 lg:flex-row lg:items-end lg:justify-between">
+          <div className="min-w-0">
+            <p className="text-sm font-bold uppercase tracking-[0.12em] text-black/45">Profile hub</p>
             <h1 className="mt-2 text-4xl font-bold leading-none sm:text-5xl">Musician dashboard</h1>
             <p className="mt-3 max-w-3xl text-base font-semibold text-black/55">
               Track the listener actions that prove discovery is turning into musician value.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={() => navigate("/uploads")} className="inline-flex h-10 items-center gap-2 rounded-md bg-black px-4 text-sm font-bold text-white">
+            <button type="button" onClick={() => navigate("/profile/uploads")} className="inline-flex h-10 items-center gap-2 rounded-md bg-black px-4 text-sm font-bold text-white">
               <UploadCloud className="h-4 w-4" />
               Upload
             </button>
@@ -118,39 +134,46 @@ export default function ListenerAnalytics() {
 
         {error ? <div className="mt-6 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">{error}</div> : null}
 
-        <div className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-lg border border-black/10 bg-[#f8f7f2] p-4">
+        <div className="mt-6 grid gap-3 md:grid-cols-2 2xl:grid-cols-5">
+          <div className="min-w-0 rounded-lg border border-black/10 bg-[#f8f7f2] p-4">
             <div className="flex items-center gap-2 text-sm font-bold text-black/55">
               <Music2 className="h-4 w-4" />
               Published tracks
             </div>
             <p className="mt-3 text-3xl font-bold">{formatNumber(summary?.publishedTracks)}</p>
           </div>
-          <div className="rounded-lg border border-black/10 bg-white p-4">
+          <div className="min-w-0 rounded-lg border border-black/10 bg-white p-4">
             <div className="flex items-center gap-2 text-sm font-bold text-black/55">
               <Users className="h-4 w-4" />
               Unique listeners
             </div>
             <p className="mt-3 text-3xl font-bold">{formatNumber(summary?.uniqueListeners)}</p>
           </div>
-          <div className="rounded-lg border border-black/10 bg-white p-4">
+          <div className="min-w-0 rounded-lg border border-black/10 bg-white p-4">
             <div className="flex items-center gap-2 text-sm font-bold text-black/55">
               <Heart className="h-4 w-4" />
               Qualified connections
             </div>
             <p className="mt-3 text-3xl font-bold">{formatNumber(summary?.qualifiedConnections)}</p>
           </div>
-          <div className="rounded-lg border border-black/10 bg-white p-4">
+          <div className="min-w-0 rounded-lg border border-black/10 bg-white p-4">
             <div className="flex items-center gap-2 text-sm font-bold text-black/55">
               <MousePointerClick className="h-4 w-4" />
               Conversion clicks
             </div>
             <p className="mt-3 text-3xl font-bold">{formatNumber(summary?.conversionClicks)}</p>
           </div>
+          <div className={`min-w-0 rounded-lg border p-4 ${scoreTone(summary?.averageDiscoveryScore)}`}>
+            <div className="flex items-center gap-2 text-sm font-bold">
+              <BarChart3 className="h-4 w-4" />
+              Discovery score
+            </div>
+            <p className="mt-3 text-3xl font-bold">{formatNumber(summary?.averageDiscoveryScore)}</p>
+          </div>
         </div>
 
-        <div className="mt-6 grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <section>
+        <div className="mt-6 grid gap-5 2xl:grid-cols-[minmax(0,1fr)_360px]">
+          <section className="min-w-0">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-2xl font-bold">Track performance</h2>
               <span className="text-sm font-semibold text-black/45">{formatNumber(summary?.totalInteractions)} total actions</span>
@@ -160,20 +183,23 @@ export default function ListenerAnalytics() {
                 rankedTracks.map((track) => {
                   const events = topEvents(track);
                   return (
-                    <article key={track.id} className="rounded-lg border border-black/10 bg-white p-4">
+                    <article key={track.id} className="min-w-0 rounded-lg border border-black/10 bg-white p-4">
                       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                         <div className="min-w-0">
                           <p className="truncate text-lg font-bold">{track.title}</p>
                           <p className="mt-1 truncate text-sm font-semibold text-black/50">{track.artist || dashboard?.artist.name || "Artist upload"}</p>
                         </div>
-                        <div className="flex flex-wrap gap-2 text-xs font-bold text-black/55">
+                        <div className="flex min-w-0 flex-wrap gap-2 text-xs font-bold text-black/55">
                           <span className="rounded bg-[#f1f5f9] px-2 py-1">{formatNumber(track.metrics?.uniqueListeners)} listeners</span>
                           <span className="rounded bg-[#ecfeff] px-2 py-1">{formatNumber(track.metrics?.qualifiedListeners)} qualified</span>
                           <span className="rounded bg-[#f8f7f2] px-2 py-1">{track.isPublished === false ? "Hidden" : "Published"}</span>
+                          <span className={`rounded border px-2 py-1 ${scoreTone(track.metrics?.discoveryScore?.value)}`}>
+                            Score {formatNumber(track.metrics?.discoveryScore?.value)} - {track.metrics?.discoveryScore?.label || "New"}
+                          </span>
                         </div>
                       </div>
                       <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
-                        <div className="flex flex-wrap gap-2">
+                        <div className="flex min-w-0 flex-wrap gap-2">
                           {events.length ? (
                             events.map(([event, count]) => (
                               <span key={`${track.id}-${event}`} className="rounded-md border border-black/10 px-3 py-2 text-sm font-semibold">
@@ -186,6 +212,24 @@ export default function ListenerAnalytics() {
                         </div>
                         <div className="text-sm font-semibold text-black/45">{formatDate(track.metrics?.lastInteractionAt)}</div>
                       </div>
+                      {track.metrics?.discoveryScore ? (
+                        <div className="mt-4 rounded-md bg-[#f8f7f2] p-3">
+                          <p className="text-sm font-bold text-black">{track.metrics.discoveryScore.nextAction}</p>
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs font-bold text-black/55">
+                            <span>Completion {pct(track.metrics.discoveryScore.rates.completion)}</span>
+                            <span>Save {pct(track.metrics.discoveryScore.rates.save)}</span>
+                            <span>Conversion {pct(track.metrics.discoveryScore.rates.conversion)}</span>
+                            <span>Skip {pct(track.metrics.discoveryScore.rates.skip)}</span>
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {track.metrics.discoveryScore.reasons.map((reason) => (
+                              <span key={`${track.id}-${reason}`} className="rounded bg-white px-2 py-1 text-xs font-semibold text-black/55">
+                                {reason}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
                     </article>
                   );
                 })
@@ -193,7 +237,7 @@ export default function ListenerAnalytics() {
                 <div className="rounded-lg border border-dashed border-black/20 bg-[#f8f7f2] p-6">
                   <p className="text-lg font-bold">No musician uploads yet</p>
                   <p className="mt-1 text-sm font-semibold text-black/55">Upload a track to start measuring listener discovery.</p>
-                  <button type="button" onClick={() => navigate("/uploads")} className="mt-4 rounded-md bg-black px-4 py-2 text-sm font-bold text-white">
+                  <button type="button" onClick={() => navigate("/profile/uploads")} className="mt-4 rounded-md bg-black px-4 py-2 text-sm font-bold text-white">
                     Upload first track
                   </button>
                 </div>
@@ -201,7 +245,7 @@ export default function ListenerAnalytics() {
             </div>
           </section>
 
-          <aside className="grid content-start gap-5">
+          <aside className="grid min-w-0 content-start gap-5">
             <section className="rounded-lg border border-black/10 bg-[#f8f7f2] p-4">
               <div className="flex items-center gap-2">
                 <BarChart3 className="h-5 w-5 text-black/55" />

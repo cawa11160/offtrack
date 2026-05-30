@@ -64,6 +64,7 @@ Goal: give musicians enough insight to improve their music and promotion.
 
 Done when:
 
+- Every uploaded track has a Discovery Score with reasons and a next action.
 - Musicians can view plays, listeners, likes, saves, and conversion clicks by track.
 - Musicians can compare discovery sources: recommendations, search, profile, direct, and external links.
 - Musicians can see recent listener activity without exposing private listener data.
@@ -75,6 +76,8 @@ Implementation notes:
 - Prefer actionable metrics over vanity totals.
 - Start with aggregated analytics already captured by feedback and playback events.
 - Do not expose individual listener identity unless the listener opted in.
+- Treat the dashboard as coaching, not reporting: every metric should imply what
+  the musician should do next.
 
 ## Phase 5: Closed Beta
 
@@ -123,4 +126,3 @@ Avoid:
 - Primary bet: independent musicians need a focused discovery and analytics loop more than another social profile page.
 - Secondary bet: listeners will engage if recommendations surface tracks that feel personal and fresh.
 - Business bet: musicians will pay when Offtrack proves it can create qualified listener connections.
-

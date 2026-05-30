@@ -1,12 +1,11 @@
-import { BarChart3, Compass, Home, UploadCloud, User } from 'lucide-react';
+import { Compass, Home, Search, User } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 
 const navItems = [
   { icon: Home, label: 'Home', path: '/' },
   { icon: Compass, label: 'Discover', path: '/recommendations' },
-  { icon: UploadCloud, label: 'Upload', path: '/uploads' },
-  { icon: BarChart3, label: 'Stats', path: '/artist/analytics' },
+  { icon: Search, label: 'Search', path: '/search' },
   { icon: User, label: 'Profile', path: '/profile' },
 ];
 

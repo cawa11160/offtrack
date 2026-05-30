@@ -753,7 +753,14 @@ def test_artist_dashboard_reports_owned_upload_interactions():
     assert body["tracks"][0]["id"] == uploaded_id
     assert body["tracks"][0]["metrics"]["eventCounts"]["play"] == 1
     assert body["tracks"][0]["metrics"]["qualifiedListeners"] == 2
+    assert body["tracks"][0]["metrics"]["discoveryScore"]["value"] > 0
+    assert body["tracks"][0]["metrics"]["discoveryScore"]["nextAction"]
+    assert body["summary"]["averageDiscoveryScore"] > 0
     assert body["recentInteractions"][0]["listenerKey"].startswith("listener-")
+
+    managed = client.get("/api/uploads/manage", headers={"Authorization": f"Bearer {token}"})
+    assert managed.status_code == 200, managed.text
+    assert managed.json()["tracks"][0]["metrics"]["discoveryScore"]["label"]
 
 
 def test_recommend_includes_published_artist_uploads():

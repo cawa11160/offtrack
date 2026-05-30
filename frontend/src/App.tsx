@@ -69,6 +69,7 @@ const App = () => (
               <Route path="/concerts/filters" element={<ConcertFilters />} />
               <Route path="/web" element={<InteractiveWeb />} />
               <Route path="/uploads" element={<Uploads />} />
+              <Route path="/profile/uploads" element={<Uploads />} />
               <Route path="/merch" element={<Merchandise />} />
               <Route path="/liked" element={<Liked />} />
               <Route path="/recent" element={<Index />} />
@@ -92,6 +93,7 @@ const App = () => (
               <Route path="/artist" element={<ArtistLanding />} />
               <Route path="/artist/profile" element={<MusicianProfile />} />
               <Route path="/artist/analytics" element={<ListenerAnalytics />} />
+              <Route path="/profile/dashboard" element={<ListenerAnalytics />} />
               <Route path="/artist/:name" element={<Artist />} />
               <Route path="*" element={<NotFound />} />
             </Routes>

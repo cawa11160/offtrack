@@ -1309,7 +1309,14 @@ def admin_unowned_uploads(req: Request, limit: int = 100, db: Session = Depends(
         )
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
-    return {"tracks": [_serialize_uploaded_catalog_track(row) for row in rows]}
+    track_ids = [row.id for row in rows]
+    track_metrics, _, _, _ = _artist_upload_metrics(db, track_ids)
+    return {
+        "tracks": [
+            _attach_upload_metrics(row, _serialize_uploaded_catalog_track(row), track_metrics.get(row.id) or {})
+            for row in rows
+        ]
+    }
 
 
 @app.post("/api/admin/uploads/{upload_id}/claim")
@@ -1633,6 +1640,169 @@ def _serialize_uploaded_catalog_track(track: CatalogTrack) -> Dict[str, Any]:
         "isPublished": bool(getattr(track, "is_published", True)),
         "createdAt": getattr(track, "created_at", None),
     }
+
+
+QUALIFIED_ARTIST_EVENTS = {
+    "play",
+    "play_start",
+    "play_30s",
+    "play_complete",
+    "upload_play",
+    "like",
+    "superlike",
+    "save",
+    "open_spotify",
+    "click_recommendation",
+    "artist_click",
+    "follow_artist",
+    "share",
+}
+
+
+def _safe_rate(numerator: float, denominator: float) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(float(numerator) / float(denominator), 4)
+
+
+def _discovery_score_from_metrics(metrics: Dict[str, Any], *, is_published: bool, has_audio: bool) -> Dict[str, Any]:
+    events = metrics.get("eventCounts") or {}
+    impressions = int(events.get("impression", 0) or 0)
+    starts = int(events.get("play_start", 0) or 0) + int(events.get("play", 0) or 0) + int(events.get("upload_play", 0) or 0)
+    completions = int(events.get("play_complete", 0) or 0)
+    saves = int(events.get("save", 0) or 0) + int(events.get("like", 0) or 0) + int(events.get("superlike", 0) or 0)
+    conversions = int(events.get("artist_click", 0) or 0) + int(events.get("follow_artist", 0) or 0) + int(events.get("open_spotify", 0) or 0)
+    skips = int(events.get("skip", 0) or 0) + int(events.get("dislike", 0) or 0) + int(events.get("not_interested", 0) or 0)
+    qualified = len(metrics.get("qualifiedListeners") or set())
+    unique = len(metrics.get("uniqueListeners") or set())
+
+    exposure_base = max(1, impressions or starts or unique)
+    completion_rate = _safe_rate(completions, max(1, starts))
+    save_rate = _safe_rate(saves, exposure_base)
+    conversion_rate = _safe_rate(conversions, exposure_base)
+    skip_rate = _safe_rate(skips, exposure_base)
+    qualified_rate = _safe_rate(qualified, max(1, unique))
+
+    readiness = 16 if is_published else 4
+    readiness += 14 if has_audio else 0
+    evidence = min(18, impressions * 0.35 + starts * 0.55 + unique * 0.9)
+    quality = 26 * qualified_rate + 18 * completion_rate + 18 * save_rate + 16 * conversion_rate
+    penalty = 24 * skip_rate
+    value = int(round(max(0, min(100, readiness + evidence + quality - penalty))))
+
+    if not has_audio:
+        label = "Needs audio"
+        next_action = "Add playable audio so listeners can complete the track."
+    elif not is_published:
+        label = "Hidden"
+        next_action = "Publish the track when you are ready to test discovery."
+    elif impressions < 20:
+        label = "Needs exposure"
+        next_action = "Send this track through recommendations and share it to collect first listener signals."
+    elif skip_rate >= 0.35:
+        label = "At risk"
+        next_action = "Review the opening seconds, artwork, and listener fit before pushing more discovery."
+    elif value >= 72:
+        label = "Strong"
+        next_action = "Keep this track in discovery and route listeners to follow, merch, tickets, or Spotify."
+    elif value >= 52:
+        label = "Promising"
+        next_action = "Push another discovery round and watch saves, completions, and artist clicks."
+    else:
+        label = "Needs tuning"
+        next_action = "Improve metadata, cover, or targeting before expanding exposure."
+
+    reasons: List[str] = []
+    if completion_rate >= 0.35:
+        reasons.append("Listeners are finishing the track.")
+    if save_rate >= 0.12:
+        reasons.append("Saves and likes are above early benchmark.")
+    if conversion_rate >= 0.08:
+        reasons.append("Listeners are clicking through to the artist.")
+    if skip_rate >= 0.25:
+        reasons.append("Skip or negative feedback is high.")
+    if impressions < 20 and is_published and has_audio:
+        reasons.append("More listener data is needed.")
+    if not reasons:
+        reasons.append("Discovery score is based on early listener actions.")
+
+    return {
+        "value": value,
+        "label": label,
+        "nextAction": next_action,
+        "reasons": reasons[:3],
+        "rates": {
+            "completion": completion_rate,
+            "save": save_rate,
+            "conversion": conversion_rate,
+            "skip": skip_rate,
+            "qualified": qualified_rate,
+        },
+    }
+
+
+def _artist_upload_metrics(db: Session, track_ids: List[str]) -> tuple[Dict[str, Dict[str, Any]], Dict[str, int], Dict[str, int], List[Interaction]]:
+    track_metrics: Dict[str, Dict[str, Any]] = {
+        track_id: {
+            "eventCounts": {},
+            "sourceCounts": {},
+            "uniqueListeners": set(),
+            "qualifiedListeners": set(),
+            "lastInteractionAt": None,
+        }
+        for track_id in track_ids
+    }
+    event_counts: Dict[str, int] = {}
+    source_counts: Dict[str, int] = {}
+    recent_rows: List[Interaction] = []
+
+    if not track_ids:
+        return track_metrics, event_counts, source_counts, recent_rows
+
+    try:
+        recent_rows = (
+            db.query(Interaction)
+            .filter(Interaction.track_id.in_(track_ids))
+            .order_by(Interaction.created_at.desc())
+            .limit(1000)
+            .all()
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+
+    for row in recent_rows:
+        tid = (row.track_id or "").strip()
+        if tid not in track_metrics:
+            continue
+        event = (row.event or "interaction").strip().lower()
+        source_page = (row.source_page or "unknown").strip() or "unknown"
+        distinct_id = (row.distinct_id or "anonymous").strip() or "anonymous"
+        metrics = track_metrics[tid]
+        metrics["eventCounts"][event] = int(metrics["eventCounts"].get(event, 0)) + 1
+        metrics["sourceCounts"][source_page] = int(metrics["sourceCounts"].get(source_page, 0)) + 1
+        metrics["uniqueListeners"].add(distinct_id)
+        event_counts[event] = int(event_counts.get(event, 0)) + 1
+        source_counts[source_page] = int(source_counts.get(source_page, 0)) + 1
+        if event in QUALIFIED_ARTIST_EVENTS:
+            metrics["qualifiedListeners"].add(distinct_id)
+        if not metrics["lastInteractionAt"]:
+            metrics["lastInteractionAt"] = row.created_at
+
+    return track_metrics, event_counts, source_counts, recent_rows
+
+
+def _attach_upload_metrics(track: CatalogTrack, item: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    has_audio = bool(item.get("audioUrl"))
+    is_published = bool(getattr(track, "is_published", True))
+    item["metrics"] = {
+        "eventCounts": metrics.get("eventCounts") or {},
+        "sourceCounts": metrics.get("sourceCounts") or {},
+        "uniqueListeners": len(metrics.get("uniqueListeners") or set()),
+        "qualifiedListeners": len(metrics.get("qualifiedListeners") or set()),
+        "lastInteractionAt": metrics.get("lastInteractionAt"),
+        "discoveryScore": _discovery_score_from_metrics(metrics, is_published=is_published, has_audio=has_audio),
+    }
+    return item
 
 
 def _uploaded_track_recommendation(track: CatalogTrack) -> Dict[str, Any]:
@@ -3559,7 +3729,14 @@ def list_managed_uploads(limit: int = 100, request: Request = None, db: Session 
         )
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
-    return {"tracks": [_serialize_uploaded_catalog_track(row) for row in rows]}
+    track_ids = [row.id for row in rows]
+    track_metrics, _, _, _ = _artist_upload_metrics(db, track_ids)
+    return {
+        "tracks": [
+            _attach_upload_metrics(row, _serialize_uploaded_catalog_track(row), track_metrics.get(row.id) or {})
+            for row in rows
+        ]
+    }
 
 
 @app.get("/api/artist/dashboard")
@@ -3581,66 +3758,12 @@ def artist_dashboard(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
 
     track_ids = [track.id for track in tracks]
-    track_metrics: Dict[str, Dict[str, Any]] = {
-        track.id: {
-            "eventCounts": {},
-            "sourceCounts": {},
-            "uniqueListeners": set(),
-            "qualifiedListeners": set(),
-            "lastInteractionAt": None,
-        }
-        for track in tracks
-    }
-    event_counts: Dict[str, int] = {}
-    source_counts: Dict[str, int] = {}
-    recent_rows: List[Interaction] = []
-
-    meaningful_events = {
-        "play",
-        "play_start",
-        "play_30s",
-        "play_complete",
-        "upload_play",
-        "like",
-        "superlike",
-        "open_spotify",
-        "click_recommendation",
-        "artist_click",
-    }
-
-    if track_ids:
-        try:
-            recent_rows = (
-                db.query(Interaction)
-                .filter(Interaction.track_id.in_(track_ids))
-                .order_by(Interaction.created_at.desc())
-                .limit(1000)
-                .all()
-            )
-        except SQLAlchemyError:
-            raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
-
+    track_metrics, event_counts, source_counts, recent_rows = _artist_upload_metrics(db, track_ids)
     total_unique_listeners: set[str] = set()
     qualified_connections = 0
-    for row in recent_rows:
-        tid = (row.track_id or "").strip()
-        if tid not in track_metrics:
-            continue
-        event = (row.event or "interaction").strip().lower()
-        source_page = (row.source_page or "unknown").strip() or "unknown"
-        distinct_id = (row.distinct_id or "anonymous").strip() or "anonymous"
-        metrics = track_metrics[tid]
-        metrics["eventCounts"][event] = int(metrics["eventCounts"].get(event, 0)) + 1
-        metrics["sourceCounts"][source_page] = int(metrics["sourceCounts"].get(source_page, 0)) + 1
-        metrics["uniqueListeners"].add(distinct_id)
-        total_unique_listeners.add(distinct_id)
-        event_counts[event] = int(event_counts.get(event, 0)) + 1
-        source_counts[source_page] = int(source_counts.get(source_page, 0)) + 1
-        if event in meaningful_events:
-            metrics["qualifiedListeners"].add(distinct_id)
-            qualified_connections += 1
-        if not metrics["lastInteractionAt"]:
-            metrics["lastInteractionAt"] = row.created_at
+    for metrics in track_metrics.values():
+        total_unique_listeners.update(metrics.get("uniqueListeners") or set())
+        qualified_connections += len(metrics.get("qualifiedListeners") or set())
 
     def _count_events(events: set[str]) -> int:
         return sum(int(event_counts.get(event, 0)) for event in events)
@@ -3648,15 +3771,14 @@ def artist_dashboard(request: Request, db: Session = Depends(get_db)):
     serialized_tracks = []
     for track in tracks:
         item = _serialize_uploaded_catalog_track(track)
-        metrics = track_metrics.get(track.id) or {}
-        item["metrics"] = {
-            "eventCounts": metrics.get("eventCounts") or {},
-            "sourceCounts": metrics.get("sourceCounts") or {},
-            "uniqueListeners": len(metrics.get("uniqueListeners") or set()),
-            "qualifiedListeners": len(metrics.get("qualifiedListeners") or set()),
-            "lastInteractionAt": metrics.get("lastInteractionAt"),
-        }
-        serialized_tracks.append(item)
+        serialized_tracks.append(_attach_upload_metrics(track, item, track_metrics.get(track.id) or {}))
+
+    score_values = [
+        int(((item.get("metrics") or {}).get("discoveryScore") or {}).get("value") or 0)
+        for item in serialized_tracks
+        if bool(item.get("isPublished"))
+    ]
+    average_discovery_score = round(sum(score_values) / len(score_values), 1) if score_values else 0
 
     recent = []
     track_title_by_id = {track.id: track.canonical_title for track in tracks}
@@ -3691,6 +3813,7 @@ def artist_dashboard(request: Request, db: Session = Depends(get_db)):
             "likes": _count_events({"like", "superlike"}),
             "recommendationClicks": _count_events({"click_recommendation"}),
             "conversionClicks": _count_events({"open_spotify", "artist_click"}),
+            "averageDiscoveryScore": average_discovery_score,
         },
         "eventCounts": event_counts,
         "sourceCounts": source_counts,

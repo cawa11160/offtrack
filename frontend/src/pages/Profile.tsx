@@ -21,6 +21,7 @@ import { toast } from "sonner";
 import { apiGetMusicWeb, type MusicWebNode, type MusicWebResponse } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { sanitizeDisplayName, validateAuthEmail } from "@/lib/authInput";
+import { ProfileHubNav } from "@/components/profile/ProfileHubNav";
 
 type PointNode = MusicWebNode & {
   x: number;
@@ -56,9 +57,9 @@ function laneY(count: number, index: number) {
 
 function layoutPreview(nodes: MusicWebNode[]): PointNode[] {
   const user = nodes.find((node) => node.type === "user");
-  const tracks = nodes.filter((node) => node.type === "track").slice(0, 6);
-  const artists = nodes.filter((node) => node.type === "artist").slice(0, 4);
-  const genres = nodes.filter((node) => node.type === "genre").slice(0, 4);
+  const tracks = nodes.filter((node) => node.type === "track").slice(0, 5);
+  const artists = nodes.filter((node) => node.type === "artist").slice(0, 3);
+  const genres = nodes.filter((node) => node.type === "genre").slice(0, 3);
 
   const positioned: PointNode[] = [];
   if (user) positioned.push({ ...user, x: 50, y: 50, lane: "center" });
@@ -111,8 +112,8 @@ function GraphPreview({ data }: { data: MusicWebResponse | null }) {
   }
 
   return (
-    <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-black/10 bg-[#f8f7f2]">
-      <div className="relative isolate h-[320px] overflow-hidden sm:h-[360px] lg:h-[400px] xl:h-[420px]">
+    <div className="min-w-0 max-w-full flex-1 overflow-hidden rounded-lg border border-black/10 bg-[#f8f7f2]">
+      <div className="relative isolate h-[340px] overflow-hidden sm:h-[380px] lg:h-[420px]">
         <div className="absolute left-3 top-3 z-10 rounded bg-white/85 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-black/45">
           Artists
         </div>
@@ -141,6 +142,7 @@ function GraphPreview({ data }: { data: MusicWebResponse | null }) {
         {nodes.map((node) => {
           const size = nodeSize(node.type, node.weight);
           const showLabel = node.lane === "center" || node.lane === "track";
+          const labelClass = node.lane === "track" ? "hidden md:block" : "block";
           return (
             <div
               key={node.id}
@@ -165,7 +167,7 @@ function GraphPreview({ data }: { data: MusicWebResponse | null }) {
                 )}
               </div>
               {showLabel ? (
-                <span className="max-w-full truncate rounded bg-white/95 px-2 py-0.5 text-[11px] font-semibold text-black shadow-sm">
+                <span className={`max-w-full truncate rounded bg-white/95 px-2 py-0.5 text-[11px] font-semibold text-black shadow-sm ${labelClass}`}>
                   {node.label}
                 </span>
               ) : null}
@@ -310,8 +312,10 @@ export default function Profile() {
           </div>
         </div>
 
-        <section className="grid min-w-0 items-start gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.25fr)]">
-          <div className="min-w-0 rounded-lg bg-[#efebe1] p-5 sm:p-6">
+        <ProfileHubNav active="profile" />
+
+        <section className="grid min-w-0 items-stretch gap-5 xl:grid-cols-[minmax(320px,0.85fr)_minmax(0,1.35fr)]">
+          <div className="flex min-w-0 flex-col justify-between rounded-lg border border-black/10 bg-[#efebe1] p-5 sm:p-6">
             <div className="flex flex-col gap-5 sm:flex-row sm:items-end">
               <div className="grid h-28 w-28 shrink-0 place-items-center rounded-full bg-black text-3xl font-bold text-white sm:h-36 sm:w-36">
                 {initials(displayName)}
@@ -324,15 +328,15 @@ export default function Profile() {
                 <h1 className="mt-4 truncate text-4xl font-bold leading-none sm:text-5xl">{displayName}</h1>
                 <p className="mt-2 truncate text-lg font-semibold text-black/60">{handle}</p>
                 <div className="mt-5 grid grid-cols-3 gap-3">
-                  <div>
+                  <div className="min-w-0">
                     <p className="text-2xl font-bold">{data?.stats?.interactionCount ?? 0}</p>
                     <p className="text-xs font-semibold uppercase tracking-[0.12em] text-black/50">Signals</p>
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <p className="text-2xl font-bold">{data?.stats?.trackCount ?? 0}</p>
                     <p className="text-xs font-semibold uppercase tracking-[0.12em] text-black/50">Tracks</p>
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <p className="text-2xl font-bold">{topArtists.length}</p>
                     <p className="text-xs font-semibold uppercase tracking-[0.12em] text-black/50">Artists</p>
                   </div>
@@ -364,7 +368,7 @@ export default function Profile() {
             ) : null}
           </div>
 
-          <div className="min-w-0 overflow-hidden rounded-lg border border-black/10 bg-white p-4">
+          <div className="flex min-w-0 flex-col overflow-hidden rounded-lg border border-black/10 bg-white p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <div className="min-w-0">
                 <h2 className="text-xl font-bold">Listening graph</h2>
@@ -379,7 +383,7 @@ export default function Profile() {
               </Link>
             </div>
             {loading ? (
-              <div className="grid h-[360px] place-items-center rounded-lg bg-[#f8f7f2] text-sm font-semibold text-black/55">
+              <div className="grid min-h-[340px] flex-1 place-items-center rounded-lg bg-[#f8f7f2] text-sm font-semibold text-black/55 sm:min-h-[380px] lg:min-h-[420px]">
                 Loading
               </div>
             ) : (
@@ -454,8 +458,33 @@ export default function Profile() {
           </section>
         ) : null}
 
-        <section className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
-          <div className="rounded-lg border border-black/10 bg-white p-4">
+        {user?.account_type === "artist" ? (
+          <section className="grid gap-3 lg:grid-cols-2">
+            <Link
+              to="/profile/uploads"
+              className="min-w-0 rounded-lg border border-black/10 bg-white p-4 transition hover:bg-black/5"
+            >
+              <p className="text-sm font-bold uppercase tracking-[0.12em] text-black/45">Musician tools</p>
+              <h2 className="mt-2 text-xl font-bold">Manage uploads from your profile</h2>
+              <p className="mt-1 text-sm font-semibold text-black/55">
+                Publish songs, edit metadata, replace audio, and control what listeners can play.
+              </p>
+            </Link>
+            <Link
+              to="/profile/dashboard"
+              className="min-w-0 rounded-lg border border-black/10 bg-[#f8f7f2] p-4 transition hover:bg-black/5"
+            >
+              <p className="text-sm font-bold uppercase tracking-[0.12em] text-black/45">Artist dashboard</p>
+              <h2 className="mt-2 text-xl font-bold">See listener impact</h2>
+              <p className="mt-1 text-sm font-semibold text-black/55">
+                Track qualified listeners, discovery sources, and conversion actions for your uploads.
+              </p>
+            </Link>
+          </section>
+        ) : null}
+
+        <section className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+          <div className="min-w-0 rounded-lg border border-black/10 bg-white p-4">
             <div className="mb-4 flex items-center justify-between gap-3">
               <h2 className="text-xl font-bold">Top tracks from you</h2>
               <Link to="/web" className="inline-flex items-center gap-1 text-sm font-bold text-black/60 hover:text-black">
@@ -486,8 +515,8 @@ export default function Profile() {
             )}
           </div>
 
-          <div className="grid gap-5">
-            <div className="rounded-lg border border-black/10 bg-white p-4">
+          <div className="grid min-w-0 gap-5">
+            <div className="min-w-0 rounded-lg border border-black/10 bg-white p-4">
               <div className="mb-3 flex items-center gap-2">
                 <Radio className="h-5 w-5 text-[#4f46e5]" />
                 <h2 className="text-lg font-bold">Artists</h2>
@@ -505,7 +534,7 @@ export default function Profile() {
               </div>
             </div>
 
-            <div className="rounded-lg border border-black/10 bg-white p-4">
+            <div className="min-w-0 rounded-lg border border-black/10 bg-white p-4">
               <div className="mb-3 flex items-center gap-2">
                 <Tags className="h-5 w-5 text-[#d79a12]" />
                 <h2 className="text-lg font-bold">Genres</h2>

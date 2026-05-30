@@ -272,6 +272,19 @@ export type ArtistTrackMetrics = {
   uniqueListeners: number;
   qualifiedListeners: number;
   lastInteractionAt?: string | null;
+  discoveryScore?: {
+    value: number;
+    label: string;
+    nextAction: string;
+    reasons: string[];
+    rates: {
+      completion: number;
+      save: number;
+      conversion: number;
+      skip: number;
+      qualified: number;
+    };
+  };
 };
 
 export type ArtistDashboard = {
@@ -291,6 +304,7 @@ export type ArtistDashboard = {
     likes: number;
     recommendationClicks: number;
     conversionClicks: number;
+    averageDiscoveryScore?: number;
   };
   eventCounts: Record<string, number>;
   sourceCounts: Record<string, number>;

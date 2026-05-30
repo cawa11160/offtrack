@@ -45,7 +45,7 @@ export default function SignUp() {
     setLoading(true);
     try {
       await signup(cleanName, normalizeAuthEmail(email), password, accountType);
-      navigate(accountType === "artist" ? "/uploads" : "/");
+      navigate(accountType === "artist" ? "/profile/uploads" : "/");
     } catch (e: unknown) {
       setErr(getErrorMessage(e, "Signup failed"));
     } finally {

@@ -1,78 +1,250 @@
-const topCities = [
-  { city: "New York", listeners: "18,420", growth: "+8.2%" },
-  { city: "Los Angeles", listeners: "12,104", growth: "+5.6%" },
-  { city: "Chicago", listeners: "9,278", growth: "+4.1%" },
-  { city: "Seattle", listeners: "7,503", growth: "+6.8%" },
-];
+import { useEffect, useMemo, useState } from "react";
+import { BarChart3, ExternalLink, Heart, Loader2, MousePointerClick, Music2, Radio, UploadCloud, Users } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
-const topTracks = [
-  { title: "Midnight Echoes", streams: "93,228", saves: "18,402" },
-  { title: "Neon Lullaby", streams: "67,455", saves: "12,381" },
-  { title: "Signals", streams: "51,991", saves: "9,744" },
-];
+import { apiGetArtistDashboard, type ArtistDashboard, type UploadedTrackItem } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
+import { getErrorMessage } from "@/lib/errors";
+
+function formatNumber(value?: number | null) {
+  return new Intl.NumberFormat().format(Number(value || 0));
+}
+
+function formatDate(value?: string | null) {
+  if (!value) return "No activity yet";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "No activity yet";
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function topEvents(track: UploadedTrackItem) {
+  const events = Object.entries(track.metrics?.eventCounts ?? {}).sort((a, b) => b[1] - a[1]);
+  return events.slice(0, 3);
+}
 
 export default function ListenerAnalytics() {
-  return (
-    <div className="min-h-[calc(100vh-var(--player-height))] w-full bg-white pb-44">
-      <section className="mx-auto w-full max-w-[1303px] px-3 py-5 sm:px-7 sm:py-7">
-        <div className="rounded-[10px] bg-[#d0d0d0] p-4 sm:p-6">
-          <p className="font-['Arimo',sans-serif] text-[16px] font-bold uppercase tracking-[0.08em] text-black/70">
-            Artist Hub
-          </p>
-          <h1 className="mt-2 font-['Arimo',sans-serif] text-[40px] font-bold leading-none text-black sm:text-[54px]">
-            Listener Analytics
-          </h1>
-          <p className="mt-3 max-w-[760px] font-['Arimo',sans-serif] text-[18px] font-bold leading-tight text-black/85">
-            A quick view of audience momentum, streaming trends, and engagement performance.
-          </p>
+  const navigate = useNavigate();
+  const { user, loading: authLoading } = useAuth();
+  const [dashboard, setDashboard] = useState<ArtistDashboard | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-          <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div className="rounded-[10px] bg-white p-4">
-              <p className="font-['Arimo',sans-serif] text-[14px] font-bold uppercase tracking-[0.08em] text-black/60">Total streams (30 days)</p>
-              <p className="mt-2 font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black">521,884</p>
+  const isArtist = user?.account_type === "artist";
+  const summary = dashboard?.summary;
+  const rankedTracks = useMemo(() => {
+    return [...(dashboard?.tracks ?? [])].sort((a, b) => {
+      const aq = a.metrics?.qualifiedListeners ?? 0;
+      const bq = b.metrics?.qualifiedListeners ?? 0;
+      const ap = a.metrics?.eventCounts?.play ?? 0;
+      const bp = b.metrics?.eventCounts?.play ?? 0;
+      return bq - aq || bp - ap || String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? ""));
+    });
+  }, [dashboard?.tracks]);
+
+  useEffect(() => {
+    if (authLoading) return;
+    if (!isArtist) return;
+    let mounted = true;
+    setLoading(true);
+    setError("");
+    apiGetArtistDashboard()
+      .then((data) => {
+        if (mounted) setDashboard(data);
+      })
+      .catch((e: unknown) => {
+        if (mounted) setError(getErrorMessage(e, "Failed to load artist analytics"));
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [authLoading, isArtist]);
+
+  if (!authLoading && !isArtist) {
+    return (
+      <div className="min-h-[calc(100vh-var(--player-height))] w-full bg-white pb-44">
+        <section className="mx-auto w-full max-w-5xl px-4 py-8">
+          <div className="rounded-lg border border-black/10 bg-[#f8f7f2] p-6">
+            <p className="text-sm font-bold uppercase text-black/50">Artist analytics</p>
+            <h1 className="mt-2 text-3xl font-bold text-black">Artist account required</h1>
+            <p className="mt-2 max-w-2xl text-sm font-semibold text-black/60">
+              Analytics are built around musician-owned uploads, listener discovery, and conversion actions.
+            </p>
+            <div className="mt-5 flex flex-wrap gap-2">
+              <button type="button" onClick={() => navigate("/signup")} className="rounded-md bg-black px-4 py-2 text-sm font-bold text-white">
+                Create artist account
+              </button>
+              <button type="button" onClick={() => navigate("/profile")} className="rounded-md border border-black/10 px-4 py-2 text-sm font-bold">
+                Open profile
+              </button>
             </div>
-            <div className="rounded-[10px] bg-white p-4">
-              <p className="font-['Arimo',sans-serif] text-[14px] font-bold uppercase tracking-[0.08em] text-black/60">Monthly listeners</p>
-              <p className="mt-2 font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black">128,430</p>
-            </div>
-            <div className="rounded-[10px] bg-white p-4">
-              <p className="font-['Arimo',sans-serif] text-[14px] font-bold uppercase tracking-[0.08em] text-black/60">Save rate</p>
-              <p className="mt-2 font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black">21.5%</p>
-            </div>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-[calc(100vh-var(--player-height))] w-full bg-white pb-44 text-black">
+      <section className="mx-auto w-full max-w-7xl px-4 py-7 sm:px-6">
+        <div className="flex flex-col gap-4 border-b border-black/10 pb-6 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-sm font-bold uppercase text-black/45">Artist hub</p>
+            <h1 className="mt-2 text-4xl font-bold leading-none sm:text-5xl">Musician dashboard</h1>
+            <p className="mt-3 max-w-3xl text-base font-semibold text-black/55">
+              Track the listener actions that prove discovery is turning into musician value.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => navigate("/uploads")} className="inline-flex h-10 items-center gap-2 rounded-md bg-black px-4 text-sm font-bold text-white">
+              <UploadCloud className="h-4 w-4" />
+              Upload
+            </button>
+            <button type="button" onClick={() => navigate("/recommendations")} className="inline-flex h-10 items-center gap-2 rounded-md border border-black/10 px-4 text-sm font-bold hover:bg-black/5">
+              <Radio className="h-4 w-4" />
+              Test discovery
+            </button>
           </div>
         </div>
 
-        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr]">
-          <article className="rounded-[10px] bg-[#d0d0d0] p-4 sm:p-5">
-            <h2 className="font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black">Top Cities</h2>
-            <div className="mt-4 space-y-2">
-              {topCities.map((city) => (
-                <div
-                  key={city.city}
-                  className="grid grid-cols-[1fr_auto_auto] items-center gap-3 rounded-[10px] bg-white px-4 py-3"
-                >
-                  <p className="font-['Arimo',sans-serif] text-[18px] font-bold text-black">{city.city}</p>
-                  <p className="font-['Arimo',sans-serif] text-[17px] font-bold text-black/75">{city.listeners}</p>
-                  <p className="font-['Arimo',sans-serif] text-[16px] font-bold text-black/65">{city.growth}</p>
-                </div>
-              ))}
-            </div>
-          </article>
+        {loading ? (
+          <div className="mt-8 flex items-center gap-2 text-sm font-semibold text-black/55">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading artist metrics
+          </div>
+        ) : null}
 
-          <article className="rounded-[10px] bg-[#d0d0d0] p-4 sm:p-5">
-            <h2 className="font-['Arimo',sans-serif] text-[30px] font-bold leading-none text-black">Top Tracks</h2>
-            <div className="mt-4 space-y-2">
-              {topTracks.map((track) => (
-                <div key={track.title} className="rounded-[10px] bg-white px-4 py-3">
-                  <p className="font-['Arimo',sans-serif] text-[20px] font-bold leading-tight text-black">{track.title}</p>
-                  <div className="mt-2 flex items-center justify-between gap-3">
-                    <p className="font-['Arimo',sans-serif] text-[16px] font-bold text-black/70">Streams: {track.streams}</p>
-                    <p className="font-['Arimo',sans-serif] text-[16px] font-bold text-black/70">Saves: {track.saves}</p>
-                  </div>
-                </div>
-              ))}
+        {error ? <div className="mt-6 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">{error}</div> : null}
+
+        <div className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-lg border border-black/10 bg-[#f8f7f2] p-4">
+            <div className="flex items-center gap-2 text-sm font-bold text-black/55">
+              <Music2 className="h-4 w-4" />
+              Published tracks
             </div>
-          </article>
+            <p className="mt-3 text-3xl font-bold">{formatNumber(summary?.publishedTracks)}</p>
+          </div>
+          <div className="rounded-lg border border-black/10 bg-white p-4">
+            <div className="flex items-center gap-2 text-sm font-bold text-black/55">
+              <Users className="h-4 w-4" />
+              Unique listeners
+            </div>
+            <p className="mt-3 text-3xl font-bold">{formatNumber(summary?.uniqueListeners)}</p>
+          </div>
+          <div className="rounded-lg border border-black/10 bg-white p-4">
+            <div className="flex items-center gap-2 text-sm font-bold text-black/55">
+              <Heart className="h-4 w-4" />
+              Qualified connections
+            </div>
+            <p className="mt-3 text-3xl font-bold">{formatNumber(summary?.qualifiedConnections)}</p>
+          </div>
+          <div className="rounded-lg border border-black/10 bg-white p-4">
+            <div className="flex items-center gap-2 text-sm font-bold text-black/55">
+              <MousePointerClick className="h-4 w-4" />
+              Conversion clicks
+            </div>
+            <p className="mt-3 text-3xl font-bold">{formatNumber(summary?.conversionClicks)}</p>
+          </div>
+        </div>
+
+        <div className="mt-6 grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+          <section>
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-2xl font-bold">Track performance</h2>
+              <span className="text-sm font-semibold text-black/45">{formatNumber(summary?.totalInteractions)} total actions</span>
+            </div>
+            <div className="mt-3 grid gap-3">
+              {rankedTracks.length ? (
+                rankedTracks.map((track) => {
+                  const events = topEvents(track);
+                  return (
+                    <article key={track.id} className="rounded-lg border border-black/10 bg-white p-4">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div className="min-w-0">
+                          <p className="truncate text-lg font-bold">{track.title}</p>
+                          <p className="mt-1 truncate text-sm font-semibold text-black/50">{track.artist || dashboard?.artist.name || "Artist upload"}</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2 text-xs font-bold text-black/55">
+                          <span className="rounded bg-[#f1f5f9] px-2 py-1">{formatNumber(track.metrics?.uniqueListeners)} listeners</span>
+                          <span className="rounded bg-[#ecfeff] px-2 py-1">{formatNumber(track.metrics?.qualifiedListeners)} qualified</span>
+                          <span className="rounded bg-[#f8f7f2] px-2 py-1">{track.isPublished === false ? "Hidden" : "Published"}</span>
+                        </div>
+                      </div>
+                      <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+                        <div className="flex flex-wrap gap-2">
+                          {events.length ? (
+                            events.map(([event, count]) => (
+                              <span key={`${track.id}-${event}`} className="rounded-md border border-black/10 px-3 py-2 text-sm font-semibold">
+                                {event}: {formatNumber(count)}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-sm font-semibold text-black/45">No listener actions yet</span>
+                          )}
+                        </div>
+                        <div className="text-sm font-semibold text-black/45">{formatDate(track.metrics?.lastInteractionAt)}</div>
+                      </div>
+                    </article>
+                  );
+                })
+              ) : (
+                <div className="rounded-lg border border-dashed border-black/20 bg-[#f8f7f2] p-6">
+                  <p className="text-lg font-bold">No musician uploads yet</p>
+                  <p className="mt-1 text-sm font-semibold text-black/55">Upload a track to start measuring listener discovery.</p>
+                  <button type="button" onClick={() => navigate("/uploads")} className="mt-4 rounded-md bg-black px-4 py-2 text-sm font-bold text-white">
+                    Upload first track
+                  </button>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <aside className="grid content-start gap-5">
+            <section className="rounded-lg border border-black/10 bg-[#f8f7f2] p-4">
+              <div className="flex items-center gap-2">
+                <BarChart3 className="h-5 w-5 text-black/55" />
+                <h2 className="text-xl font-bold">Discovery sources</h2>
+              </div>
+              <div className="mt-3 grid gap-2">
+                {Object.entries(dashboard?.sourceCounts ?? {}).length ? (
+                  Object.entries(dashboard?.sourceCounts ?? {})
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 6)
+                    .map(([source, count]) => (
+                      <div key={source} className="flex items-center justify-between gap-3 rounded-md bg-white px-3 py-2 text-sm font-semibold">
+                        <span className="truncate">{source}</span>
+                        <span>{formatNumber(count)}</span>
+                      </div>
+                    ))
+                ) : (
+                  <p className="rounded-md bg-white p-3 text-sm font-semibold text-black/45">No source data yet</p>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-black/10 bg-white p-4">
+              <div className="flex items-center gap-2">
+                <ExternalLink className="h-5 w-5 text-black/55" />
+                <h2 className="text-xl font-bold">Recent activity</h2>
+              </div>
+              <div className="mt-3 grid gap-2">
+                {(dashboard?.recentInteractions ?? []).length ? (
+                  dashboard?.recentInteractions.slice(0, 8).map((row) => (
+                    <div key={row.id} className="rounded-md bg-[#f8f7f2] p-3">
+                      <p className="truncate text-sm font-bold">{row.trackTitle}</p>
+                      <p className="mt-1 text-xs font-semibold text-black/50">
+                        {row.event} by {row.listenerKey}
+                      </p>
+                    </div>
+                  ))
+                ) : (
+                  <p className="rounded-md bg-[#f8f7f2] p-3 text-sm font-semibold text-black/45">No listener activity yet</p>
+                )}
+              </div>
+            </section>
+          </aside>
         </div>
       </section>
     </div>

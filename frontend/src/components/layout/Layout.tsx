@@ -1,4 +1,4 @@
-import { ReactNode, useState } from "react";
+import { CSSProperties, ReactNode, useMemo, useState } from "react";
 import PinkPlayerBar from "@/components/PinkPlayerBar";
 import { MobileNav } from "./MobileNav";
 import { useLocation } from "react-router-dom";
@@ -21,29 +21,35 @@ export const Layout = ({ children }: LayoutProps) => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const sidebarVisualWidth = sidebarCollapsed ? ARC_SIDEBAR_COLLAPSED_WIDTH : ARC_SIDEBAR_EXPANDED_VISUAL_WIDTH;
   const contentLeftInset = ARC_SIDEBAR_LEFT_OFFSET + sidebarVisualWidth + 12;
-  const [minStr = "0", secStr = "0"] = currentTrack.duration.split(":");
-  const durationSeconds = Number(minStr) * 60 + Number(secStr);
-  const pinkPlayerSong = {
-    title: currentTrack.title,
-    artist: currentTrack.artist,
-    coverUrl: currentTrack.coverUrl,
-    duration: Number.isFinite(durationSeconds) ? durationSeconds : 0,
-  };
+  const pinkPlayerSong = useMemo(() => {
+    const [minStr = "0", secStr = "0"] = currentTrack.duration.split(":");
+    const durationSeconds = Number(minStr) * 60 + Number(secStr);
+    return {
+      title: currentTrack.title,
+      artist: currentTrack.artist,
+      coverUrl: currentTrack.coverUrl,
+      duration: Number.isFinite(durationSeconds) ? durationSeconds : 0,
+    };
+  }, []);
 
   return (
     <div className={isProfilePage ? "min-h-screen bg-[#FFFFFF]" : "min-h-screen bg-background"}>
-      {!isAuthRoute ? <ArcSidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((prev) => !prev)} /> : null}
+      {!isAuthRoute ? (
+        <div className="hidden md:block">
+          <ArcSidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((prev) => !prev)} />
+        </div>
+      ) : null}
       <div className={isProfilePage ? "min-h-screen bg-[#FFFFFF]" : "min-h-screen"}>
         <main
           className={
             isProfilePage
-              ? "pb-[calc(var(--player-height)+60px)] bg-[#FFFFFF]"
-              : "pb-[calc(var(--player-height)+60px)]"
+              ? "bg-[#FFFFFF] pb-[calc(var(--player-height)+92px)] md:pb-[calc(var(--player-height)+60px)] md:pl-[var(--content-left-inset)]"
+              : "pb-[calc(var(--player-height)+92px)] md:pb-[calc(var(--player-height)+60px)] md:pl-[var(--content-left-inset)]"
           }
           style={{
-            paddingLeft: isAuthRoute ? "0px" : `${contentLeftInset}px`,
+            "--content-left-inset": isAuthRoute ? "0px" : `${contentLeftInset}px`,
             transition: "padding-left 220ms ease",
-          }}
+          } as CSSProperties & Record<string, string>}
         >
           {children}
         </main>

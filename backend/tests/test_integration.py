@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import math
 import struct
 import wave
@@ -49,6 +50,18 @@ from models import (  # noqa: E402
 )
 from providers import ProviderTrack  # noqa: E402
 from recommender import Recommender  # noqa: E402
+from recommender_agent import (  # noqa: E402
+    compute_recommender_metrics,
+    compute_reward_artifact,
+    evaluate_reward_artifact,
+    list_reward_artifacts,
+    load_ranker_scores,
+    load_reward_scores,
+    rollback_reward_artifact,
+    train_ranker_artifact,
+    write_reward_artifact,
+    write_training_dataset,
+)
 from storage import is_remote_storage_path, remote_media_url  # noqa: E402
 
 
@@ -681,6 +694,187 @@ def test_search_finds_normalized_uploaded_tracks():
     assert any(item.get("id") == uploaded_id and item.get("title") == "Searchable Upload" for item in results)
 
 
+def test_artist_dashboard_reports_owned_upload_interactions():
+    client = _fresh_client()
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Dashboard Artist",
+            "email": "dashboard-artist@example.com",
+            "password": "password123",
+            "account_type": "artist",
+        },
+    )
+    assert signup.status_code == 200, signup.text
+    _verify_email_from_signup(client, signup)
+    token = signup.json()["access_token"]
+
+    upload = client.post(
+        "/api/uploads",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": "Dashboard Song", "artist": "Dashboard Artist"},
+        files={"file": ("song.wav", _wav_bytes(), "audio/wav")},
+    )
+    assert upload.status_code == 200, upload.text
+    uploaded_id = upload.json()["id"]
+
+    play = client.post(
+        "/api/feedback",
+        json={
+            "track_id": uploaded_id,
+            "event": "play",
+            "distinct_id": "listener-one",
+            "source_page": "recommendations",
+        },
+    )
+    assert play.status_code == 200, play.text
+    like = client.post(
+        "/api/feedback",
+        json={
+            "track_id": uploaded_id,
+            "event": "like",
+            "distinct_id": "listener-two",
+            "source_page": "track_detail",
+        },
+    )
+    assert like.status_code == 200, like.text
+
+    res = client.get("/api/artist/dashboard", headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["summary"]["totalTracks"] == 1
+    assert body["summary"]["publishedTracks"] == 1
+    assert body["summary"]["plays"] == 1
+    assert body["summary"]["likes"] == 1
+    assert body["summary"]["uniqueListeners"] == 2
+    assert body["summary"]["qualifiedConnections"] == 2
+    assert body["tracks"][0]["id"] == uploaded_id
+    assert body["tracks"][0]["metrics"]["eventCounts"]["play"] == 1
+    assert body["tracks"][0]["metrics"]["qualifiedListeners"] == 2
+    assert body["recentInteractions"][0]["listenerKey"].startswith("listener-")
+
+
+def test_recommend_includes_published_artist_uploads():
+    client = _fresh_client()
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "name": "Recommended Upload Artist",
+            "email": "recommended-upload@example.com",
+            "password": "password123",
+            "account_type": "artist",
+        },
+    )
+    assert signup.status_code == 200, signup.text
+    _verify_email_from_signup(client, signup)
+    token = signup.json()["access_token"]
+
+    upload = client.post(
+        "/api/uploads",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": "Musician First Upload", "artist": "Recommended Upload Artist"},
+        files={"file": ("song.wav", _wav_bytes(), "audio/wav")},
+    )
+    assert upload.status_code == 200, upload.text
+    uploaded_id = upload.json()["id"]
+
+    class StubRec:
+        def recommend(self, *args, **kwargs):
+            return [
+                {
+                    "id": "stub-track-1",
+                    "title": "Catalog Match",
+                    "artist": "Catalog Artist",
+                    "year": 2024,
+                    "reasons": ["test"],
+                }
+            ]
+
+    with (
+        patch("api.get_recommender", return_value=StubRec()),
+        patch("api.spotify_enabled", return_value=False),
+        patch("api.itunes_track_lookup", return_value=None),
+    ):
+        app.state.recommender_error = ""
+        res = client.post("/api/recommend", json={"seeds": [{"title": "seed"}], "n": 3, "mode": "all"})
+    assert res.status_code == 200, res.text
+    recommendations = res.json().get("recommendations") or []
+    uploaded = [row for row in recommendations if row.get("id") == uploaded_id]
+    assert uploaded
+    assert uploaded[0]["source"] == "upload"
+    assert uploaded[0]["audioUrl"] == f"/api/uploads/{uploaded_id}/stream"
+    assert "Independent musician on Offtrack" in uploaded[0]["reasons"]
+
+
+def test_recommend_reserves_underexposed_upload_exploration_slot():
+    client = _fresh_client()
+    db = SessionLocal()
+    try:
+        user = User(email="explore-artist@example.com", name="Explore Artist", account_type="artist", password_hash="x")
+        artist = Artist(name="Explore Artist")
+        db.add_all([user, artist])
+        db.flush()
+        for idx in range(3):
+            track = CatalogTrack(
+                id=f"explore-upload-{idx}",
+                canonical_title=f"Explore Upload {idx}",
+                source_type="upload",
+                release_year=2026,
+                duration_ms=180000,
+                explicit=False,
+                is_published=True,
+                owner_user_id=user.id,
+            )
+            db.add(track)
+            db.add(TrackArtist(track_id=track.id, artist_id=artist.id, role="primary", position=0))
+            db.add(
+                AudioAsset(
+                    id=f"asset-explore-upload-{idx}",
+                    track_id=track.id,
+                    storage_path=f"uploads/explore-upload-{idx}.mp3",
+                    mime_type="audio/mpeg",
+                    size_bytes=123,
+                    kind="full",
+                    is_primary=True,
+                )
+            )
+        db.add(Interaction(distinct_id="prior-listener", track_id="explore-upload-0", event="impression"))
+        db.add(Interaction(distinct_id="prior-listener", track_id="explore-upload-1", event="impression"))
+        db.commit()
+    finally:
+        db.close()
+
+    class StubRec:
+        def recommend(self, *args, **kwargs):
+            return [
+                {
+                    "id": f"catalog-{idx}",
+                    "title": f"Catalog {idx}",
+                    "artist": "Catalog Artist",
+                    "year": 2024,
+                    "imageUrl": "",
+                    "reasons": ["catalog"],
+                }
+                for idx in range(4)
+            ]
+
+    with (
+        patch("api.get_recommender", return_value=StubRec()),
+        patch("api.spotify_enabled", return_value=False),
+        patch("api.itunes_track_lookup", return_value=None),
+    ):
+        app.state.recommender_error = ""
+        res = client.post("/api/recommend", json={"seeds": [{"title": "seed"}], "n": 4, "mode": "all"})
+
+    assert res.status_code == 200, res.text
+    recommendations = res.json().get("recommendations") or []
+    exploration = [row for row in recommendations if row.get("exploration")]
+    assert exploration
+    assert "Exploration slot for new listener feedback" in exploration[0]["reasons"]
+
+
 def test_catalog_sync_ingests_seed_provider_tracks():
     _fresh_client()
     db = SessionLocal()
@@ -994,6 +1188,247 @@ def test_recommend_validation_and_success_stub():
         assert isinstance(data.get("recommendations"), list)
         assert data["recommendations"][0]["title"] == "Stub Song"
         assert data["recommendations"][0]["previewUrl"] == "https://example.com/stub-preview.m4a"
+
+
+def test_recommend_records_impressions_and_passes_engagement_scores():
+    client = _fresh_client()
+
+    feedback = client.post(
+        "/api/feedback",
+        json={
+            "track_id": "rewarded-track",
+            "event": "play_complete",
+            "distinct_id": "listener-prod",
+            "source_page": "recommendations",
+        },
+    )
+    assert feedback.status_code == 200, feedback.text
+
+    class StubRec:
+        def __init__(self):
+            self.kwargs = {}
+
+        def recommend(self, *args, **kwargs):
+            self.kwargs = kwargs
+            return [
+                {
+                    "id": "candidate-track",
+                    "title": "Candidate Song",
+                    "artist": "Candidate Artist",
+                    "year": 2024,
+                    "imageUrl": "",
+                    "reasons": ["test"],
+                }
+            ]
+
+    stub = StubRec()
+    with (
+        patch("api.get_recommender", return_value=stub),
+        patch("api.spotify_enabled", return_value=False),
+        patch("api.itunes_track_lookup", return_value=None),
+    ):
+        app.state.recommender_error = ""
+        res = client.post(
+            "/api/recommend",
+            headers={"X-Posthog-Distinct-Id": "listener-prod"},
+            json={"seeds": [{"title": "seed"}], "n": 1, "mode": "all", "distinct_id": "listener-prod"},
+        )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    request_id = body.get("recommendationRequestId")
+    assert request_id
+    assert body["recommendations"][0]["recommendationRequestId"] == request_id
+    assert body["recommendations"][0]["recommendationRank"] == 1
+    assert "engagement_scores" in stub.kwargs
+    assert stub.kwargs["engagement_scores"].get("rewarded-track", 0) > 0
+
+    db = SessionLocal()
+    try:
+        impression = (
+            db.query(Interaction)
+            .filter(
+                Interaction.distinct_id == "listener-prod",
+                Interaction.track_id == "candidate-track",
+                Interaction.event == "impression",
+            )
+            .first()
+        )
+        assert impression is not None
+        context = json.loads(impression.context_json or "{}")
+        assert context["request_id"] == request_id
+        assert context["rank"] == 1
+    finally:
+        db.close()
+
+
+def test_recommender_agent_writes_reward_artifact(tmp_path):
+    _fresh_client()
+    db = SessionLocal()
+    try:
+        artist = Artist(name="Agent Artist")
+        db.add(artist)
+        db.flush()
+        track = CatalogTrack(
+            id="agent-upload-track",
+            canonical_title="Agent Upload",
+            source_type="upload",
+            release_year=2025,
+            duration_ms=180000,
+            explicit=False,
+            is_published=True,
+        )
+        db.add(track)
+        db.add(TrackArtist(track_id=track.id, artist_id=artist.id, role="primary", position=0))
+        db.add(
+            Interaction(
+                distinct_id="agent-user",
+                track_id=track.id,
+                event="impression",
+                context_json=json.dumps({"request_id": "agent-request", "rank": 1}),
+            )
+        )
+        db.add(
+            Interaction(
+                distinct_id="agent-user",
+                track_id=track.id,
+                event="save",
+                context_json=json.dumps({"request_id": "agent-request", "rank": 1}),
+            )
+        )
+        db.add(
+            Interaction(
+                distinct_id="agent-user",
+                track_id=track.id,
+                event="play_complete",
+                context_json=json.dumps({"request_id": "agent-request", "rank": 1}),
+            )
+        )
+        db.commit()
+
+        artifact = compute_reward_artifact(db)
+        assert artifact["trackCount"] == 1
+        assert artifact["tracks"]["agent-upload-track"]["score"] > 0
+        assert artifact["tracks"]["agent-upload-track"]["musicianFirstBoost"] > 0
+
+        path = tmp_path / "reward_scores.json"
+        written = write_reward_artifact(path=path, db=db)
+        assert written["trackCount"] == 1
+        scores = load_reward_scores(path=path)
+        assert scores["agent-upload-track"] > 0
+        artifacts = list_reward_artifacts(path=path)
+        assert any(item["current"] for item in artifacts["artifacts"])
+
+        db.add(Interaction(distinct_id="agent-user", track_id=track.id, event="skip"))
+        db.commit()
+        second = write_reward_artifact(path=path, db=db)
+        assert second["trackCount"] == 1
+        previous = path.with_name("reward_scores.previous.json")
+        assert previous.exists()
+        rolled_back = rollback_reward_artifact(path=path)
+        assert rolled_back["restored"] == "reward_scores.previous.json"
+
+        dataset_path = tmp_path / "training_dataset.jsonl"
+        dataset = write_training_dataset(path=dataset_path, db=db, days=30)
+        assert dataset["rowCount"] == 1
+        ranker_path = tmp_path / "ranker_scores.json"
+        ranker = train_ranker_artifact(path=ranker_path, dataset=dataset_path, db=db, days=30)
+        assert ranker["trackCount"] == 1
+        assert load_ranker_scores(path=ranker_path)["agent-upload-track"] > 0
+        metrics = compute_recommender_metrics(db, days=7)
+        assert metrics["impressions"] == 1
+        assert metrics["rates"]["completion"] == 1.0
+        evaluation = evaluate_reward_artifact(db, path=path, days=30)
+        assert evaluation["artifactTrackCount"] == 1
+        assert evaluation["impressionsWithOutcome"] == 1
+    finally:
+        db.close()
+
+
+def test_admin_can_refresh_recommender_reward_artifact(tmp_path):
+    previous_artifact = os.environ.get("RECOMMENDER_REWARD_ARTIFACT")
+    previous_dataset = os.environ.get("RECOMMENDER_TRAINING_DATASET")
+    previous_ranker = os.environ.get("RECOMMENDER_RANKER_ARTIFACT")
+    os.environ["RECOMMENDER_REWARD_ARTIFACT"] = str(tmp_path / "admin_reward_scores.json")
+    os.environ["RECOMMENDER_TRAINING_DATASET"] = str(tmp_path / "admin_training_dataset.jsonl")
+    os.environ["RECOMMENDER_RANKER_ARTIFACT"] = str(tmp_path / "admin_ranker_scores.json")
+    client = _fresh_client()
+    try:
+        db = SessionLocal()
+        try:
+            db.add(Interaction(distinct_id="admin-agent-user", track_id="admin-track", event="like"))
+            db.commit()
+        finally:
+            db.close()
+
+        denied = client.post("/api/admin/recommender/reward-artifact")
+        assert denied.status_code == 403, denied.text
+
+        ok = client.post(
+            "/api/admin/recommender/reward-artifact",
+            headers={"X-Admin-Api-Key": "test-admin-key"},
+        )
+        assert ok.status_code == 200, ok.text
+        body = ok.json()
+        assert body["ok"] is True
+        assert body["trackCount"] >= 1
+
+        metrics = client.get(
+            "/api/admin/recommender/metrics?days=7",
+            headers={"X-Admin-Api-Key": "test-admin-key"},
+        )
+        assert metrics.status_code == 200, metrics.text
+        assert metrics.json()["events"]["like"] == 1
+
+        evaluation = client.get(
+            "/api/admin/recommender/evaluation?days=30",
+            headers={"X-Admin-Api-Key": "test-admin-key"},
+        )
+        assert evaluation.status_code == 200, evaluation.text
+        assert "pairwiseAccuracy" in evaluation.json()
+
+        artifacts = client.get(
+            "/api/admin/recommender/artifacts",
+            headers={"X-Admin-Api-Key": "test-admin-key"},
+        )
+        assert artifacts.status_code == 200, artifacts.text
+        assert artifacts.json()["artifacts"]
+
+        dataset = client.post(
+            "/api/admin/recommender/training-dataset",
+            headers={"X-Admin-Api-Key": "test-admin-key"},
+            json={"days": 30},
+        )
+        assert dataset.status_code == 200, dataset.text
+        assert dataset.json()["rowCount"] >= 0
+
+        trained = client.post(
+            "/api/admin/recommender/train-ranker",
+            headers={"X-Admin-Api-Key": "test-admin-key"},
+            json={"days": 30},
+        )
+        assert trained.status_code == 200, trained.text
+        assert "ranker" in trained.json()
+
+        rollback = client.post(
+            "/api/admin/recommender/rollback",
+            headers={"X-Admin-Api-Key": "test-admin-key"},
+            json={},
+        )
+        assert rollback.status_code in {200, 404}, rollback.text
+    finally:
+        if previous_artifact is None:
+            os.environ.pop("RECOMMENDER_REWARD_ARTIFACT", None)
+        else:
+            os.environ["RECOMMENDER_REWARD_ARTIFACT"] = previous_artifact
+        if previous_dataset is None:
+            os.environ.pop("RECOMMENDER_TRAINING_DATASET", None)
+        else:
+            os.environ["RECOMMENDER_TRAINING_DATASET"] = previous_dataset
+        if previous_ranker is None:
+            os.environ.pop("RECOMMENDER_RANKER_ARTIFACT", None)
+        else:
+            os.environ["RECOMMENDER_RANKER_ARTIFACT"] = previous_ranker
 
 
 def test_spotify_callback_error_paths():

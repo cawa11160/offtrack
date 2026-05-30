@@ -1,7 +1,7 @@
 import "mapbox-gl/dist/mapbox-gl.css";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import mapboxgl, { Map, Marker, Popup } from "mapbox-gl";
+import type { Map, Marker, Popup } from "mapbox-gl";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Calendar, Clock, MapPin, Music2, Search, Ticket, X } from "lucide-react";
 
@@ -24,6 +24,15 @@ type ConcertLike = {
 };
 
 const MAPBOX_TOKEN = (import.meta.env.VITE_MAPBOX_TOKEN as string | undefined)?.trim();
+type MapboxGL = typeof import("mapbox-gl").default;
+let mapboxPromise: Promise<MapboxGL> | null = null;
+
+function loadMapbox() {
+  if (!mapboxPromise) {
+    mapboxPromise = import("mapbox-gl").then((mod) => mod.default);
+  }
+  return mapboxPromise;
+}
 
 function normalizeCityParam(value: string | null) {
   return value && value !== "any" ? value : "all";
@@ -34,7 +43,7 @@ function normalizeDateParam(value: string | null): "all" | "week" | "weekend" | 
   return "all";
 }
 
-async function initMapboxCspWorker() {
+async function initMapboxCspWorker(mapboxgl: MapboxGL) {
   try {
     // @ts-expect-error - Vite worker import
     const mod = await import("mapbox-gl/dist/mapbox-gl-csp-worker?worker");
@@ -71,6 +80,8 @@ const Concerts = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const initialConcertsRef = useRef<ConcertLike[]>([]);
+  const mapboxRef = useRef<MapboxGL | null>(null);
   const mapRef = useRef<Map | null>(null);
   const markersRef = useRef<Marker[]>([]);
   const popupRef = useRef<Popup | null>(null);
@@ -111,6 +122,12 @@ const Concerts = () => {
   }, [filteredConcerts, selectedId]);
 
   useEffect(() => {
+    if (!initialConcertsRef.current.length && typedConcerts.length) {
+      initialConcertsRef.current = typedConcerts;
+    }
+  }, [typedConcerts]);
+
+  useEffect(() => {
     if (!filteredConcerts.length) {
       setSelectedId(null);
       return;
@@ -119,20 +136,26 @@ const Concerts = () => {
   }, [filteredConcerts, selectedId]);
 
   useEffect(() => {
-    if (!mapboxgl.supported()) {
-      setMapError("WebGL is not available in this browser/device.");
-      return;
-    }
-    void initMapboxCspWorker();
+    let disposed = false;
     if (!MAPBOX_TOKEN) {
       setMapError("Missing Mapbox token (VITE_MAPBOX_TOKEN).");
       return;
     }
     if (!mapContainerRef.current || mapRef.current) return;
 
-    try {
+    void (async () => {
+      const mapboxgl = await loadMapbox();
+      mapboxRef.current = mapboxgl;
+      if (disposed) return;
+      if (!mapboxgl.supported()) {
+        setMapError("WebGL is not available in this browser/device.");
+        return;
+      }
+      await initMapboxCspWorker(mapboxgl);
+      if (disposed || !mapContainerRef.current) return;
+
       mapboxgl.accessToken = MAPBOX_TOKEN;
-      const first = filteredConcerts[0] ?? typedConcerts[0];
+      const first = initialConcertsRef.current[0];
       const center = first ? getConcertCoords(first, 0) : { lng: -74.006, lat: 40.7128 };
       const map = new mapboxgl.Map({
         container: mapContainerRef.current,
@@ -149,11 +172,12 @@ const Concerts = () => {
       });
       map.on("load", () => map.resize());
       setTimeout(() => map.resize(), 250);
-    } catch (err: unknown) {
-      setMapError(err instanceof Error ? err.message : "Map initialization failed.");
-    }
+    })().catch((err: unknown) => {
+      if (!disposed) setMapError(err instanceof Error ? err.message : "Map initialization failed.");
+    });
 
     return () => {
+      disposed = true;
       popupRef.current?.remove();
       markersRef.current.forEach((m) => m.remove());
       mapRef.current?.remove();
@@ -161,10 +185,11 @@ const Concerts = () => {
       markersRef.current = [];
       mapRef.current = null;
     };
-  }, [filteredConcerts, typedConcerts]);
+  }, []);
 
   useEffect(() => {
-    if (!mapRef.current) return;
+    const mapboxgl = mapboxRef.current;
+    if (!mapRef.current || !mapboxgl) return;
     markersRef.current.forEach((m) => m.remove());
     markersRef.current = filteredConcerts.map((concert, index) => {
       const coords = getConcertCoords(concert, index);
@@ -181,7 +206,8 @@ const Concerts = () => {
   }, [filteredConcerts, selectedConcert?.id]);
 
   useEffect(() => {
-    if (!mapRef.current || !selectedConcert) return;
+    const mapboxgl = mapboxRef.current;
+    if (!mapRef.current || !selectedConcert || !mapboxgl) return;
     const idx = Math.max(0, filteredConcerts.findIndex((c) => c.id === selectedConcert.id));
     const { lng, lat } = getConcertCoords(selectedConcert, idx);
     popupRef.current?.remove();

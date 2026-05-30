@@ -50,6 +50,17 @@ from models import (
 )
 from models import PaymentMethod, BillingReceipt, RefreshSession, SecurityAuditLog
 from recommender import get_recommender
+from recommender_agent import (
+    compute_recommender_metrics,
+    evaluate_reward_artifact,
+    list_reward_artifacts,
+    load_ranker_scores,
+    load_reward_scores,
+    rollback_reward_artifact,
+    train_ranker_artifact,
+    write_reward_artifact,
+    write_training_dataset,
+)
 from analytics import get_analytics
 from audio_processing import process_audio_file, validate_audio_upload
 from catalog_sync import ensure_catalog_backfill, parse_artist_names as _sync_parse_artist_names
@@ -1591,6 +1602,131 @@ def _serialize_uploaded_catalog_track(track: CatalogTrack) -> Dict[str, Any]:
     }
 
 
+def _uploaded_track_recommendation(track: CatalogTrack) -> Dict[str, Any]:
+    asset = _catalog_track_primary_asset(track, kind="full")
+    artist = _catalog_track_artist_text(track)
+    reasons = ["Independent musician on Offtrack"]
+    if asset:
+        reasons.append("Full track uploaded by the artist")
+    if getattr(track, "owner_user_id", None) is not None:
+        reasons.append("Claimed artist upload")
+    return {
+        "id": track.id,
+        "title": track.canonical_title,
+        "artist": artist,
+        "year": _safe_year(getattr(track, "release_year", None)),
+        "imageUrl": track.image_url,
+        "popularity": 0,
+        "source": "upload",
+        "sourceType": "upload",
+        "previewUrl": None,
+        "audioUrl": f"/api/uploads/{track.id}/stream" if asset else None,
+        "spotifyUrl": None,
+        "spotifyUri": None,
+        "durationMs": int(asset.duration_ms) if asset and asset.duration_ms is not None else track.duration_ms,
+        "reasons": reasons[:3],
+    }
+
+
+def _featured_upload_recommendations(db: Session, exclude_ids: set[str], limit: int = 3) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+    try:
+        rows = (
+            db.query(CatalogTrack)
+            .options(
+                selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+                selectinload(CatalogTrack.audio_assets),
+            )
+            .filter(
+                CatalogTrack.source_type == "upload",
+                CatalogTrack.is_published.is_(True),
+                CatalogTrack.owner_user_id.isnot(None),
+            )
+            .order_by(CatalogTrack.created_at.desc(), CatalogTrack.id.asc())
+            .limit(max(1, min(limit * 4, 24)))
+            .all()
+        )
+    except SQLAlchemyError:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        if row.id in exclude_ids:
+            continue
+        rec = _uploaded_track_recommendation(row)
+        if not rec.get("audioUrl"):
+            continue
+        out.append(rec)
+        exclude_ids.add(row.id)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _exploration_upload_recommendations(db: Session, exclude_ids: set[str], limit: int = 2) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+    try:
+        rows = (
+            db.query(CatalogTrack)
+            .options(
+                selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+                selectinload(CatalogTrack.audio_assets),
+            )
+            .filter(
+                CatalogTrack.source_type == "upload",
+                CatalogTrack.is_published.is_(True),
+                CatalogTrack.owner_user_id.isnot(None),
+            )
+            .order_by(CatalogTrack.created_at.desc(), CatalogTrack.id.asc())
+            .limit(80)
+            .all()
+        )
+    except SQLAlchemyError:
+        return []
+
+    candidates: List[tuple[int, Any, Dict[str, Any]]] = []
+    track_ids = [row.id for row in rows if row.id and row.id not in exclude_ids]
+    impression_counts: Dict[str, int] = {}
+    if track_ids:
+        try:
+            counted = (
+                db.query(Interaction.track_id, func.count(Interaction.id))
+                .filter(Interaction.event == "impression", Interaction.track_id.in_(track_ids))
+                .group_by(Interaction.track_id)
+                .all()
+            )
+            impression_counts = {str(track_id): int(count or 0) for track_id, count in counted}
+        except SQLAlchemyError:
+            impression_counts = {}
+
+    for row in rows:
+        if row.id in exclude_ids:
+            continue
+        rec = _uploaded_track_recommendation(row)
+        if not rec.get("audioUrl"):
+            continue
+        rec["exploration"] = True
+        reasons = list(rec.get("reasons") or [])
+        if "Exploration slot for new listener feedback" not in reasons:
+            reasons.insert(0, "Exploration slot for new listener feedback")
+        rec["reasons"] = reasons[:3]
+        candidates.append((impression_counts.get(row.id, 0), row.created_at, rec))
+
+    candidates.sort(key=lambda item: (item[0], item[1] or datetime.min.replace(tzinfo=timezone.utc)))
+    out: List[Dict[str, Any]] = []
+    for _, _, rec in candidates:
+        item_id = str(rec.get("id") or "")
+        if not item_id or item_id in exclude_ids:
+            continue
+        out.append(rec)
+        exclude_ids.add(item_id)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _managed_upload_query(db: Session, upload_id: str) -> Optional[CatalogTrack]:
     return (
         db.query(CatalogTrack)
@@ -1883,6 +2019,8 @@ class FeedbackRequest(BaseModel):
     duration_ms: Optional[int] = Field(default=None, ge=0, le=24 * 60 * 60 * 1000)
     play_position_ms: Optional[int] = Field(default=None, ge=0, le=24 * 60 * 60 * 1000)
     source_page: Optional[str] = Field(default=None, max_length=128)
+    recommendation_request_id: Optional[str] = Field(default=None, max_length=80)
+    recommendation_rank: Optional[int] = Field(default=None, ge=1, le=1000)
     context: Optional[Dict[str, Any]] = None
 
 
@@ -1988,6 +2126,90 @@ def catalog_sync_endpoint(req: CatalogSyncRequest, request: Request, db: Session
         raise HTTPException(status_code=503, detail="Database unavailable")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Catalog sync failed: {exc}")
+
+
+@app.post("/api/admin/recommender/reward-artifact")
+def recommender_reward_artifact_endpoint(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request)
+    try:
+        artifact = write_reward_artifact(db=db)
+        return {
+            "ok": True,
+            "version": artifact.get("version"),
+            "generatedAt": artifact.get("generatedAt"),
+            "trackCount": artifact.get("trackCount", 0),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not build recommender reward artifact: {exc}")
+
+
+@app.get("/api/admin/recommender/metrics")
+def recommender_metrics_endpoint(request: Request, days: int = 7, db: Session = Depends(get_db)):
+    _require_admin(request)
+    try:
+        return compute_recommender_metrics(db, days=max(1, min(int(days or 7), 90)))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not compute recommender metrics: {exc}")
+
+
+@app.get("/api/admin/recommender/evaluation")
+def recommender_evaluation_endpoint(request: Request, days: int = 30, db: Session = Depends(get_db)):
+    _require_admin(request)
+    try:
+        return evaluate_reward_artifact(db, days=max(1, min(int(days or 30), 180)))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not evaluate recommender artifact: {exc}")
+
+
+@app.get("/api/admin/recommender/artifacts")
+def recommender_artifacts_endpoint(request: Request):
+    _require_admin(request)
+    try:
+        return list_reward_artifacts()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not list recommender artifacts: {exc}")
+
+
+@app.post("/api/admin/recommender/rollback")
+def recommender_rollback_endpoint(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
+    _require_admin(request)
+    try:
+        name = str(payload.get("name") or "").strip() or None
+        return rollback_reward_artifact(name=name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not rollback recommender artifact: {exc}")
+
+
+@app.post("/api/admin/recommender/training-dataset")
+def recommender_training_dataset_endpoint(request: Request, payload: Dict[str, Any] = Body(default_factory=dict), db: Session = Depends(get_db)):
+    _require_admin(request)
+    try:
+        days = max(1, min(int(payload.get("days") or 90), 365))
+        return write_training_dataset(db=db, days=days)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not build recommender training dataset: {exc}")
+
+
+@app.post("/api/admin/recommender/train-ranker")
+def recommender_train_ranker_endpoint(request: Request, payload: Dict[str, Any] = Body(default_factory=dict), db: Session = Depends(get_db)):
+    _require_admin(request)
+    try:
+        days = max(1, min(int(payload.get("days") or 90), 365))
+        dataset = write_training_dataset(db=db, days=days)
+        ranker = train_ranker_artifact(db=db, days=days)
+        return {
+            "ok": True,
+            "dataset": dataset,
+            "ranker": {
+                "kind": ranker.get("kind"),
+                "generatedAt": ranker.get("generatedAt"),
+                "trackCount": ranker.get("trackCount", 0),
+            },
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not train recommender ranker: {exc}")
 
 
 @app.post("/api/reload")
@@ -2151,6 +2373,7 @@ def search_endpoint(
 # -----------------------------
 @app.post("/api/recommend")
 def recommend_endpoint(req: RecommendRequest, request: Request = None, background_tasks: BackgroundTasks = None, db: Session = Depends(get_db)):
+    recommendation_request_id = uuid.uuid4().hex
     err = getattr(app.state, "recommender_error", "")
     if err:
         err = _try_reload_recommender()
@@ -2170,11 +2393,17 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
 
     try:
         did = None
+        user_id = None
         try:
             if request is not None:
                 did = get_analytics().distinct_id(request, explicit=req.distinct_id)
         except Exception:
             did = req.distinct_id
+        try:
+            if request is not None:
+                user_id = get_current_user_id(request)
+        except Exception:
+            user_id = None
 
         # Personalization signals from feedback (best-effort)
         liked_ids: List[str] = []
@@ -2210,6 +2439,7 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
             except Exception:
                 pass
 
+        engagement_scores = _recommendation_engagement_scores(db, did)
         exclude_ids = [x for x in (req.already_shown_ids or []) if isinstance(x, str) and x.strip()]
         recs = get_recommender().recommend(
             seeds,
@@ -2219,6 +2449,7 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
             superliked_ids=superliked_ids,
             disliked_ids=disliked_ids,
             exclude_ids=exclude_ids,
+            engagement_scores=engagement_scores,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Recommender failed: {str(e)}")
@@ -2257,7 +2488,7 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
     except Exception:
         audio_ids = set()
 
-    for r in recs:
+    for rank, r in enumerate(recs, start=1):
         title = (r.get("title") or "").strip()
         artist = (r.get("artist") or "").strip()
         details: Optional[Dict[str, Any]] = None
@@ -2303,6 +2534,8 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
         out.append(
             {
                 **r,
+                "recommendationRequestId": recommendation_request_id,
+                "recommendationRank": rank,
                 "imageUrl": image_url,
                 "previewUrl": preview_url,
                 "spotifyUrl": spotify_url,
@@ -2352,8 +2585,62 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
             except Exception:
                 pass
 
+    try:
+        current_ids = {str(item.get("id") or "").strip() for item in out if str(item.get("id") or "").strip()}
+        seed_ids = {str(seed.get("id") or "").strip() for seed in seeds if str(seed.get("id") or "").strip()}
+        excluded_for_uploads = current_ids | seed_ids | {str(x).strip() for x in exclude_ids if str(x).strip()}
+        upload_limit = 3 if (req.mode or "all") == "indie" else 2
+        upload_recs = _featured_upload_recommendations(db, excluded_for_uploads, upload_limit)
+        if upload_recs:
+            if (req.mode or "all") == "indie":
+                mixed = upload_recs + out
+            else:
+                split_at = min(3, len(out))
+                mixed = out[:split_at] + upload_recs + out[split_at:]
+
+            deduped: List[Dict[str, Any]] = []
+            seen: set[str] = set()
+            for item in mixed:
+                item_id = str(item.get("id") or "").strip()
+                if not item_id or item_id in seen:
+                    continue
+                seen.add(item_id)
+                deduped.append(item)
+            out = deduped[: int(req.n)]
+    except Exception:
+        pass
+
+    try:
+        current_ids = {str(item.get("id") or "").strip() for item in out if str(item.get("id") or "").strip()}
+        seed_ids = {str(seed.get("id") or "").strip() for seed in seeds if str(seed.get("id") or "").strip()}
+        excluded_for_exploration = current_ids | seed_ids | {str(x).strip() for x in exclude_ids if str(x).strip()}
+        exploration_limit = 2 if (req.mode or "all") == "indie" else 1
+        exploration_recs = _exploration_upload_recommendations(db, excluded_for_exploration, exploration_limit)
+        if exploration_recs:
+            base_limit = max(0, int(req.n) - len(exploration_recs))
+            out = (out[:base_limit] + exploration_recs)[: int(req.n)]
+    except Exception:
+        pass
+
+    for rank, item in enumerate(out, start=1):
+        item["recommendationRequestId"] = recommendation_request_id
+        item["recommendationRank"] = rank
+
+    try:
+        _record_recommendation_impressions(
+            db,
+            distinct_id=did,
+            user_id=user_id,
+            request_id=recommendation_request_id,
+            recommendations=out,
+            seeds=seeds,
+            mode=(req.mode or "all"),
+        )
+    except Exception:
+        pass
+
     musician_list = list(musicians.values())[:6]
-    return {"recommendations": out, "musicians": musician_list}
+    return {"recommendationRequestId": recommendation_request_id, "recommendations": out, "musicians": musician_list}
 
 
 
@@ -2373,9 +2660,14 @@ def feedback_endpoint(
     """
     event = (req.event or "").strip().lower()
     allowed_events = {
+        "impression",
         "like",
         "superlike",
         "dislike",
+        "not_interested",
+        "save",
+        "share",
+        "replay",
         "play",
         "play_start",
         "play_30s",
@@ -2386,6 +2678,7 @@ def feedback_endpoint(
         "upload_play",
         "genre_click",
         "artist_click",
+        "follow_artist",
     }
     if event not in allowed_events:
         raise HTTPException(status_code=400, detail="Invalid event")
@@ -2434,6 +2727,11 @@ def feedback_endpoint(
                 pass
 
         if should_insert:
+            context_payload = dict(req.context or {})
+            if req.recommendation_request_id:
+                context_payload["request_id"] = req.recommendation_request_id
+            if req.recommendation_rank is not None:
+                context_payload["rank"] = req.recommendation_rank
             db.add(
                 Interaction(
                     distinct_id=distinct_id,
@@ -2445,8 +2743,8 @@ def feedback_endpoint(
                     duration_ms=req.duration_ms,
                     play_position_ms=req.play_position_ms,
                     source_page=(req.source_page or "").strip() or None,
-                    context_json=json.dumps(req.context or {}, ensure_ascii=True, default=str)[:20000]
-                    if req.context
+                    context_json=json.dumps(context_payload, ensure_ascii=True, default=str)[:20000]
+                    if context_payload
                     else None,
                 )
             )
@@ -2473,7 +2771,11 @@ def feedback_endpoint(
 
 def _interaction_weight(event: str) -> float:
     return {
+        "impression": 0.0,
         "superlike": 6.0,
+        "save": 5.0,
+        "follow_artist": 4.5,
+        "replay": 4.5,
         "like": 4.0,
         "play_complete": 4.0,
         "play_30s": 3.0,
@@ -2484,9 +2786,152 @@ def _interaction_weight(event: str) -> float:
         "open_spotify": 1.0,
         "artist_click": 1.0,
         "genre_click": 1.0,
-        "skip": 0.25,
+        "share": 1.0,
+        "skip": -1.5,
         "dislike": -2.0,
+        "not_interested": -4.0,
     }.get((event or "").strip().lower(), 1.0)
+
+
+def _reward_score(raw_score: float, impressions: int = 0) -> float:
+    exposure = max(1.0, float(impressions or 0) ** 0.5)
+    return max(-1.0, min(1.0, float(raw_score) / (8.0 + exposure)))
+
+
+def _recommendation_engagement_scores(db: Session, distinct_id: Optional[str]) -> Dict[str, float]:
+    """
+    Compact behavior score used by the online ranker.
+
+    This is intentionally simple and explainable for production MVP:
+    global track quality gives every listener a cold-start signal, while a
+    listener's own events have stronger weight. A learned ranker can later train
+    from the same impressions and feedback rows.
+    """
+    allowed_events = {
+        "impression",
+        "superlike",
+        "save",
+        "follow_artist",
+        "replay",
+        "like",
+        "play_complete",
+        "play_30s",
+        "upload_play",
+        "play",
+        "play_start",
+        "click_recommendation",
+        "open_spotify",
+        "artist_click",
+        "share",
+        "skip",
+        "dislike",
+        "not_interested",
+    }
+    scores: Dict[str, float] = {}
+    try:
+        scores.update(load_reward_scores())
+    except Exception:
+        scores = {}
+    try:
+        for tid, value in load_ranker_scores().items():
+            scores[tid] = max(-1.0, min(1.0, scores.get(tid, 0.0) + 0.35 * float(value)))
+    except Exception:
+        pass
+    impressions: Dict[str, int] = {}
+
+    try:
+        rows = (
+            db.query(Interaction.track_id, Interaction.event, func.count(Interaction.id))
+            .filter(Interaction.event.in_(allowed_events))
+            .group_by(Interaction.track_id, Interaction.event)
+            .limit(5000)
+            .all()
+        )
+        raw: Dict[str, float] = {}
+        for track_id, event, count in rows:
+            tid = (track_id or "").strip()
+            if not tid:
+                continue
+            c = int(count or 0)
+            ev = (event or "").strip().lower()
+            if ev == "impression":
+                impressions[tid] = impressions.get(tid, 0) + c
+                continue
+            raw[tid] = raw.get(tid, 0.0) + _interaction_weight(ev) * c
+
+        for tid, value in raw.items():
+            scores[tid] = 0.45 * _reward_score(value, impressions.get(tid, 0))
+    except Exception:
+        pass
+
+    if distinct_id:
+        try:
+            rows = (
+                db.query(Interaction)
+                .filter(Interaction.distinct_id == distinct_id)
+                .order_by(Interaction.created_at.desc())
+                .limit(400)
+                .all()
+            )
+            personal_raw: Dict[str, float] = {}
+            personal_impressions: Dict[str, int] = {}
+            for row in rows:
+                tid = (row.track_id or "").strip()
+                ev = (row.event or "").strip().lower()
+                if not tid or ev not in allowed_events:
+                    continue
+                if ev == "impression":
+                    personal_impressions[tid] = personal_impressions.get(tid, 0) + 1
+                    continue
+                personal_raw[tid] = personal_raw.get(tid, 0.0) + _interaction_weight(ev)
+            for tid, value in personal_raw.items():
+                scores[tid] = max(-1.0, min(1.0, scores.get(tid, 0.0) + 0.75 * _reward_score(value, personal_impressions.get(tid, 0))))
+        except Exception:
+            pass
+
+    return scores
+
+
+def _record_recommendation_impressions(
+    db: Session,
+    *,
+    distinct_id: Optional[str],
+    user_id: Optional[int],
+    request_id: str,
+    recommendations: List[Dict[str, Any]],
+    seeds: List[Dict[str, Any]],
+    mode: str,
+) -> None:
+    if not distinct_id or not recommendations:
+        return
+    seed_ids = [str(seed.get("id") or "").strip() for seed in seeds if str(seed.get("id") or "").strip()]
+    try:
+        for rank, item in enumerate(recommendations, start=1):
+            track_id = str(item.get("id") or "").strip()
+            if not track_id:
+                continue
+            context = {
+                "request_id": request_id,
+                "rank": rank,
+                "mode": mode,
+                "seed_ids": seed_ids,
+                "source": item.get("source"),
+                "source_type": item.get("sourceType"),
+                "reasons": item.get("reasons") or [],
+            }
+            db.add(
+                Interaction(
+                    distinct_id=distinct_id,
+                    user_id=user_id,
+                    track_id=track_id,
+                    event="impression",
+                    source_page="recommendations",
+                    context_json=json.dumps(context, ensure_ascii=True, default=str)[:20000],
+                )
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 def _add_graph_node(nodes: Dict[str, Dict[str, Any]], node_id: str, **values: Any) -> Dict[str, Any]:
@@ -3077,6 +3522,143 @@ def list_managed_uploads(limit: int = 100, request: Request = None, db: Session 
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
     return {"tracks": [_serialize_uploaded_catalog_track(row) for row in rows]}
+
+
+@app.get("/api/artist/dashboard")
+def artist_dashboard(request: Request, db: Session = Depends(get_db)):
+    user = _require_artist_user(request, db)
+    user_id = int(user.id)
+    try:
+        tracks = (
+            db.query(CatalogTrack)
+            .options(
+                selectinload(CatalogTrack.artist_links).selectinload(TrackArtist.artist),
+                selectinload(CatalogTrack.audio_assets),
+            )
+            .filter(CatalogTrack.source_type == "upload", CatalogTrack.owner_user_id == user_id)
+            .order_by(CatalogTrack.created_at.desc(), CatalogTrack.id.asc())
+            .all()
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+
+    track_ids = [track.id for track in tracks]
+    track_metrics: Dict[str, Dict[str, Any]] = {
+        track.id: {
+            "eventCounts": {},
+            "sourceCounts": {},
+            "uniqueListeners": set(),
+            "qualifiedListeners": set(),
+            "lastInteractionAt": None,
+        }
+        for track in tracks
+    }
+    event_counts: Dict[str, int] = {}
+    source_counts: Dict[str, int] = {}
+    recent_rows: List[Interaction] = []
+
+    meaningful_events = {
+        "play",
+        "play_start",
+        "play_30s",
+        "play_complete",
+        "upload_play",
+        "like",
+        "superlike",
+        "open_spotify",
+        "click_recommendation",
+        "artist_click",
+    }
+
+    if track_ids:
+        try:
+            recent_rows = (
+                db.query(Interaction)
+                .filter(Interaction.track_id.in_(track_ids))
+                .order_by(Interaction.created_at.desc())
+                .limit(1000)
+                .all()
+            )
+        except SQLAlchemyError:
+            raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+
+    total_unique_listeners: set[str] = set()
+    qualified_connections = 0
+    for row in recent_rows:
+        tid = (row.track_id or "").strip()
+        if tid not in track_metrics:
+            continue
+        event = (row.event or "interaction").strip().lower()
+        source_page = (row.source_page or "unknown").strip() or "unknown"
+        distinct_id = (row.distinct_id or "anonymous").strip() or "anonymous"
+        metrics = track_metrics[tid]
+        metrics["eventCounts"][event] = int(metrics["eventCounts"].get(event, 0)) + 1
+        metrics["sourceCounts"][source_page] = int(metrics["sourceCounts"].get(source_page, 0)) + 1
+        metrics["uniqueListeners"].add(distinct_id)
+        total_unique_listeners.add(distinct_id)
+        event_counts[event] = int(event_counts.get(event, 0)) + 1
+        source_counts[source_page] = int(source_counts.get(source_page, 0)) + 1
+        if event in meaningful_events:
+            metrics["qualifiedListeners"].add(distinct_id)
+            qualified_connections += 1
+        if not metrics["lastInteractionAt"]:
+            metrics["lastInteractionAt"] = row.created_at
+
+    def _count_events(events: set[str]) -> int:
+        return sum(int(event_counts.get(event, 0)) for event in events)
+
+    serialized_tracks = []
+    for track in tracks:
+        item = _serialize_uploaded_catalog_track(track)
+        metrics = track_metrics.get(track.id) or {}
+        item["metrics"] = {
+            "eventCounts": metrics.get("eventCounts") or {},
+            "sourceCounts": metrics.get("sourceCounts") or {},
+            "uniqueListeners": len(metrics.get("uniqueListeners") or set()),
+            "qualifiedListeners": len(metrics.get("qualifiedListeners") or set()),
+            "lastInteractionAt": metrics.get("lastInteractionAt"),
+        }
+        serialized_tracks.append(item)
+
+    recent = []
+    track_title_by_id = {track.id: track.canonical_title for track in tracks}
+    for row in recent_rows[:25]:
+        did = (row.distinct_id or "anonymous").strip() or "anonymous"
+        recent.append(
+            {
+                "id": row.id,
+                "trackId": row.track_id,
+                "trackTitle": track_title_by_id.get(row.track_id, row.track_id),
+                "event": row.event,
+                "sourcePage": row.source_page,
+                "listenerKey": f"listener-{hashlib.sha256(did.encode('utf-8')).hexdigest()[:8]}",
+                "createdAt": row.created_at,
+            }
+        )
+
+    return {
+        "artist": {
+            "id": user.id,
+            "name": user.name or "",
+            "email": user.email,
+            "emailVerified": _email_verified(user),
+        },
+        "summary": {
+            "totalTracks": len(tracks),
+            "publishedTracks": sum(1 for track in tracks if bool(getattr(track, "is_published", True))),
+            "totalInteractions": len(recent_rows),
+            "uniqueListeners": len(total_unique_listeners),
+            "qualifiedConnections": qualified_connections,
+            "plays": _count_events({"play", "play_start", "play_30s", "play_complete", "upload_play"}),
+            "likes": _count_events({"like", "superlike"}),
+            "recommendationClicks": _count_events({"click_recommendation"}),
+            "conversionClicks": _count_events({"open_spotify", "artist_click"}),
+        },
+        "eventCounts": event_counts,
+        "sourceCounts": source_counts,
+        "tracks": serialized_tracks,
+        "recentInteractions": recent,
+    }
 
 
 @app.patch("/api/uploads/{upload_id}")

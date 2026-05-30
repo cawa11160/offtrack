@@ -33,6 +33,10 @@ export type RecItem = {
   durationMs?: number | null;
 
   reasons?: string[];
+  source?: string;
+  sourceType?: "catalog" | "upload" | string;
+  recommendationRequestId?: string;
+  recommendationRank?: number;
 };
 
 export type MusicianRec = {
@@ -46,6 +50,7 @@ export type MusicianRec = {
 };
 
 export type RecommendResponse = {
+  recommendationRequestId?: string;
   recommendations: RecItem[];
   musicians?: MusicianRec[];
 };
@@ -139,6 +144,10 @@ export async function apiFeedback(
     | "like"
     | "superlike"
     | "dislike"
+    | "not_interested"
+    | "save"
+    | "share"
+    | "replay"
     | "play"
     | "play_start"
     | "play_30s"
@@ -148,13 +157,16 @@ export async function apiFeedback(
     | "open_spotify"
     | "click_recommendation"
     | "artist_click"
-    | "genre_click",
+    | "genre_click"
+    | "follow_artist",
   context?: {
     artistId?: number;
     genreId?: number;
     durationMs?: number;
     playPositionMs?: number;
     sourcePage?: string;
+    recommendationRequestId?: string;
+    recommendationRank?: number;
     extra?: Record<string, unknown>;
   }
 ): Promise<boolean> {
@@ -170,6 +182,8 @@ export async function apiFeedback(
       duration_ms: context?.durationMs ?? null,
       play_position_ms: context?.playPositionMs ?? null,
       source_page: context?.sourcePage ?? null,
+      recommendation_request_id: context?.recommendationRequestId ?? null,
+      recommendation_rank: context?.recommendationRank ?? null,
       context: context?.extra ?? null,
     }),
   });
@@ -249,6 +263,47 @@ export type UploadedTrackItem = {
   ownerUserId?: number | null;
   isPublished?: boolean;
   createdAt?: string;
+  metrics?: ArtistTrackMetrics;
+};
+
+export type ArtistTrackMetrics = {
+  eventCounts: Record<string, number>;
+  sourceCounts: Record<string, number>;
+  uniqueListeners: number;
+  qualifiedListeners: number;
+  lastInteractionAt?: string | null;
+};
+
+export type ArtistDashboard = {
+  artist: {
+    id: number;
+    name?: string;
+    email: string;
+    emailVerified: boolean;
+  };
+  summary: {
+    totalTracks: number;
+    publishedTracks: number;
+    totalInteractions: number;
+    uniqueListeners: number;
+    qualifiedConnections: number;
+    plays: number;
+    likes: number;
+    recommendationClicks: number;
+    conversionClicks: number;
+  };
+  eventCounts: Record<string, number>;
+  sourceCounts: Record<string, number>;
+  tracks: UploadedTrackItem[];
+  recentInteractions: Array<{
+    id: number;
+    trackId: string;
+    trackTitle: string;
+    event: string;
+    sourcePage?: string | null;
+    listenerKey: string;
+    createdAt?: string;
+  }>;
 };
 
 export async function apiListUploads(limit = 50): Promise<UploadedTrackItem[]> {
@@ -263,6 +318,12 @@ export async function apiListManagedUploads(limit = 100): Promise<UploadedTrackI
   if (!r.ok) throw new Error(await readError(r));
   const data = await r.json().catch(() => ({}));
   return (data?.tracks ?? []) as UploadedTrackItem[];
+}
+
+export async function apiGetArtistDashboard(): Promise<ArtistDashboard> {
+  const r = await apiFetch("/api/artist/dashboard");
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as ArtistDashboard;
 }
 
 export async function apiUploadNewTrack(args: {
@@ -474,6 +535,42 @@ export type CatalogSyncResult = {
   providerNotes?: Record<string, string>;
 };
 
+export type RecommenderMetrics = {
+  windowDays: number;
+  generatedAt: string;
+  events: Record<string, number>;
+  impressions: number;
+  positiveSignals: number;
+  negativeSignals: number;
+  rates: Record<string, number>;
+  qualityScore: number;
+};
+
+export type RecommenderEvaluation = {
+  windowDays: number;
+  generatedAt: string;
+  artifactTrackCount: number;
+  impressionsWithOutcome: number;
+  pairwiseAccuracy: number;
+  positivePrecisionWhenScorePositive: number;
+  pairCount: number;
+};
+
+export type RecommenderArtifactInfo = {
+  name: string;
+  path: string;
+  current: boolean;
+  previous: boolean;
+  generatedAt?: string | null;
+  trackCount?: number | null;
+  sizeBytes: number;
+};
+
+export type RecommenderArtifactsResponse = {
+  current: string;
+  artifacts: RecommenderArtifactInfo[];
+};
+
 async function adminFetch(path: string, adminApiKey: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   headers.set("X-Admin-Api-Key", adminApiKey);
@@ -568,4 +665,79 @@ export async function apiAdminCatalogSync(args: {
   });
   if (!r.ok) throw new Error(await readError(r));
   return (await r.json()) as CatalogSyncResult;
+}
+
+export async function apiAdminRecommenderMetrics(args: {
+  adminApiKey: string;
+  days?: number;
+}): Promise<RecommenderMetrics> {
+  const days = Math.max(1, Math.min(args.days ?? 7, 90));
+  const r = await adminFetch(`/api/admin/recommender/metrics?days=${days}`, args.adminApiKey);
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as RecommenderMetrics;
+}
+
+export async function apiAdminRecommenderEvaluation(args: {
+  adminApiKey: string;
+  days?: number;
+}): Promise<RecommenderEvaluation> {
+  const days = Math.max(1, Math.min(args.days ?? 30, 180));
+  const r = await adminFetch(`/api/admin/recommender/evaluation?days=${days}`, args.adminApiKey);
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as RecommenderEvaluation;
+}
+
+export async function apiAdminRecommenderArtifacts(args: {
+  adminApiKey: string;
+}): Promise<RecommenderArtifactsResponse> {
+  const r = await adminFetch("/api/admin/recommender/artifacts", args.adminApiKey);
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as RecommenderArtifactsResponse;
+}
+
+export async function apiAdminBuildRewardArtifact(args: {
+  adminApiKey: string;
+}): Promise<{ ok: boolean; version?: number; generatedAt?: string; trackCount: number }> {
+  const r = await adminFetch("/api/admin/recommender/reward-artifact", args.adminApiKey, { method: "POST" });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as { ok: boolean; version?: number; generatedAt?: string; trackCount: number };
+}
+
+export async function apiAdminRollbackRewardArtifact(args: {
+  adminApiKey: string;
+  name?: string;
+}): Promise<{ ok: boolean; restored: string; current: string; trackCount: number }> {
+  const r = await adminFetch("/api/admin/recommender/rollback", args.adminApiKey, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: args.name ?? null }),
+  });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as { ok: boolean; restored: string; current: string; trackCount: number };
+}
+
+export async function apiAdminBuildTrainingDataset(args: {
+  adminApiKey: string;
+  days?: number;
+}): Promise<{ ok: boolean; path: string; rowCount: number; windowDays: number }> {
+  const r = await adminFetch("/api/admin/recommender/training-dataset", args.adminApiKey, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ days: Math.max(1, Math.min(args.days ?? 90, 365)) }),
+  });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as { ok: boolean; path: string; rowCount: number; windowDays: number };
+}
+
+export async function apiAdminTrainRanker(args: {
+  adminApiKey: string;
+  days?: number;
+}): Promise<{ ok: boolean; dataset: { rowCount: number; path: string }; ranker: { kind?: string; generatedAt?: string; trackCount: number } }> {
+  const r = await adminFetch("/api/admin/recommender/train-ranker", args.adminApiKey, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ days: Math.max(1, Math.min(args.days ?? 90, 365)) }),
+  });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as { ok: boolean; dataset: { rowCount: number; path: string }; ranker: { kind?: string; generatedAt?: string; trackCount: number } };
 }

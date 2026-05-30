@@ -82,6 +82,23 @@ services:
       - redis
     volumes:
       - offtrack_media:/app/media
+      - offtrack_artifacts:/app/artifacts
+
+  recommender-agent:
+    build: ./backend
+    command: ["python", "recommender_agent.py", "loop"]
+    environment:
+      OFFTRACK_ENV: ${OFFTRACK_ENV-development}
+      DATABASE_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD-postgres}@db:5432/offtrack
+      OFFTRACK_AUTO_MIGRATE: "false"
+      OFFTRACK_AUTO_SEED: "false"
+      RECOMMENDER_AGENT_INTERVAL_SECONDS: ${RECOMMENDER_AGENT_INTERVAL_SECONDS-3600}
+      RECOMMENDER_REWARD_ARTIFACT: /app/artifacts/reward_scores.json
+    depends_on:
+      - db
+      - backend
+    volumes:
+      - offtrack_artifacts:/app/artifacts
 
   frontend:
     build: ./frontend/
@@ -100,3 +117,4 @@ services:
 volumes:
   offtrack_pg:
   offtrack_media:
+  offtrack_artifacts:

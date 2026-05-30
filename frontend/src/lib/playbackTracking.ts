@@ -7,6 +7,8 @@ export type PlaybackMilestoneTrack = {
   title?: string;
   artist?: string;
   sourceKind?: "upload" | "preview" | "spotify" | "unknown";
+  recommendationRequestId?: string;
+  recommendationRank?: number;
 };
 
 type PlaybackState = {
@@ -45,6 +47,8 @@ export function usePlaybackMilestones(sourcePage: string) {
         durationMs: state.durationMs,
         playPositionMs: state.lastPositionMs,
         sourcePage,
+        recommendationRequestId: state.track?.recommendationRequestId,
+        recommendationRank: state.track?.recommendationRank,
         extra: {
           title: state.track?.title,
           artist: state.track?.artist,

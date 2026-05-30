@@ -452,6 +452,7 @@ class Recommender:
         superliked_ids: Optional[List[str]] = None,
         disliked_ids: Optional[List[str]] = None,
         exclude_ids: Optional[List[str]] = None,
+        engagement_scores: Optional[Dict[str, float]] = None,
     ) -> List[Dict[str, Any]]:
         if self.df is None or self.X is None:
             raise RuntimeError("Recommender not loaded yet.")
@@ -515,6 +516,17 @@ class Recommender:
         pop = df.loc[cand_pos, "popularity"].astype(int).to_numpy()
         pop_w = self._popularity_weight(pop, mode)
         score = sim_to_q * pop_w
+
+        # Production learning hook: offline/online reward scores from impressions
+        # and listening behavior. Values are expected to be roughly [-1, 1].
+        try:
+            if engagement_scores:
+                track_ids = [str(df.at[int(p), "id"]) for p in cand_pos.tolist()]
+                reward = np.array([float(engagement_scores.get(tid, 0.0)) for tid in track_ids], dtype=float)
+                reward = np.clip(reward, -1.0, 1.0)
+                score = score + 0.18 * reward
+        except Exception:
+            pass
 
         # -----------------------------
         # Personalization via feedback

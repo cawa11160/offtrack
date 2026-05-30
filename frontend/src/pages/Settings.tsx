@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
   Bell,
+  BrainCircuit,
   CreditCard,
   Headphones,
   LayoutGrid,
@@ -184,14 +185,24 @@ export default function Settings() {
             <h1 className="mt-1 text-4xl font-bold leading-none sm:text-5xl">Preferences</h1>
           </div>
           {showAdminButton ? (
-            <button
-              type="button"
-              onClick={() => navigate("/admin/security")}
-              className="inline-flex h-10 items-center gap-2 rounded-md border border-black/10 bg-white px-4 text-sm font-semibold text-black transition hover:bg-black/5"
-            >
-              <ShieldAlert className="h-4 w-4" />
-              Admin security
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => navigate("/admin/recommender")}
+                className="inline-flex h-10 items-center gap-2 rounded-md border border-black/10 bg-white px-4 text-sm font-semibold text-black transition hover:bg-black/5"
+              >
+                <BrainCircuit className="h-4 w-4" />
+                Recommender
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate("/admin/security")}
+                className="inline-flex h-10 items-center gap-2 rounded-md border border-black/10 bg-white px-4 text-sm font-semibold text-black transition hover:bg-black/5"
+              >
+                <ShieldAlert className="h-4 w-4" />
+                Admin security
+              </button>
+            </div>
           ) : null}
         </div>
 

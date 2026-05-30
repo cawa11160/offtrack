@@ -76,6 +76,10 @@ function hasPlayableSource(rec: Rec) {
   return Boolean(rec.audioUrl || rec.previewUrl || rec.spotifyUrl || rec.spotifyUri);
 }
 
+function isArtistUpload(rec: Rec) {
+  return rec.sourceType === "upload" || rec.source === "upload" || Boolean(rec.audioUrl?.includes("/api/uploads/"));
+}
+
 function loadDiscoveryQueue(): DiscoveryQueueItem[] {
   if (typeof window === "undefined") return [];
   try {
@@ -221,6 +225,7 @@ export default function Recommendations() {
   const [mode, setMode] = useState<"all" | "indie" | "mainstream">("all");
   const [searchResults, setSearchResults] = useState<SearchResult[][]>([[], [], []]);
   const [searchLoading, setSearchLoading] = useState([false, false, false]);
+  const [closedSeedSlots, setClosedSeedSlots] = useState<boolean[]>([false, false, false]);
   const [recs, setRecs] = useState<Rec[]>([]);
   const [musicians, setMusicians] = useState<MusicianRec[]>([]);
   const [error, setError] = useState<string>("");
@@ -240,7 +245,7 @@ export default function Recommendations() {
   useEffect(() => {
     const timers = seedValues.map((value, index) => {
       const q = value.trim();
-      if (q.length < 2) {
+      if (q.length < 2 || closedSeedSlots[index]) {
         setSearchResults((prev) => prev.map((rows, i) => (i === index ? [] : rows)));
         setSearchLoading((prev) => prev.map((item, i) => (i === index ? false : item)));
         return null;
@@ -259,7 +264,7 @@ export default function Recommendations() {
         if (timer !== null) window.clearTimeout(timer);
       });
     };
-  }, [seedValues]);
+  }, [closedSeedSlots, seedValues]);
 
   const currentSeeds = useMemo(() => {
     return seedValues
@@ -319,6 +324,7 @@ export default function Recommendations() {
   function setSeed(slot: number, value: string) {
     setSeedValues((prev) => prev.map((item, index) => (index === slot ? value : item)));
     setPickedSeeds((prev) => prev.map((item, index) => (index === slot ? null : item)));
+    setClosedSeedSlots((prev) => prev.map((item, index) => (index === slot ? false : item)));
   }
 
   function pickSeed(slot: number, result: SearchResult | SeedSong) {
@@ -331,12 +337,16 @@ export default function Recommendations() {
     setSeedValues((prev) => prev.map((item, index) => (index === slot ? formatResult(next as SearchResult) : item)));
     setPickedSeeds((prev) => prev.map((item, index) => (index === slot ? next : item)));
     setSearchResults((prev) => prev.map((rows, index) => (index === slot ? [] : rows)));
+    setSearchLoading((prev) => prev.map((item, index) => (index === slot ? false : item)));
+    setClosedSeedSlots((prev) => prev.map((item, index) => (index === slot ? true : item)));
   }
 
   function clearSeed(slot: number) {
     setSeedValues((prev) => prev.map((item, index) => (index === slot ? "" : item)));
     setPickedSeeds((prev) => prev.map((item, index) => (index === slot ? null : item)));
     setSearchResults((prev) => prev.map((rows, index) => (index === slot ? [] : rows)));
+    setSearchLoading((prev) => prev.map((item, index) => (index === slot ? false : item)));
+    setClosedSeedSlots((prev) => prev.map((item, index) => (index === slot ? false : item)));
   }
 
   function addQuickSeed(seed: SeedSong) {
@@ -360,8 +370,10 @@ export default function Recommendations() {
     };
     persistDiscoveryQueue([item, ...discoveryQueue.filter((row) => row.id !== rec.id)].slice(0, 40));
     phCapture("save_discovery_queue", { track_id: rec.id, title: rec.title, artist: rec.artist });
-    void apiFeedback(rec.id, "click_recommendation", {
+    void apiFeedback(rec.id, "save", {
       sourcePage: "recommendations",
+      recommendationRequestId: rec.recommendationRequestId,
+      recommendationRank: rec.recommendationRank,
       extra: { action: "save_discovery_queue", reasons: item.reasons },
     });
   }
@@ -371,6 +383,8 @@ export default function Recommendations() {
     phCapture("select_recommendation", { track_id: rec.id, title: rec.title, artist: rec.artist });
     void apiFeedback(rec.id, "click_recommendation", {
       sourcePage: "recommendations",
+      recommendationRequestId: rec.recommendationRequestId,
+      recommendationRank: rec.recommendationRank,
       extra: { action: "select", anchor: familiarAnchor(rec, currentSeeds) },
     });
   }
@@ -399,6 +413,8 @@ export default function Recommendations() {
     phCapture("preview_20s_recommendation", { track_id: rec.id, title: rec.title, artist: rec.artist });
     void apiFeedback(rec.id, "click_recommendation", {
       sourcePage: "recommendations",
+      recommendationRequestId: rec.recommendationRequestId,
+      recommendationRank: rec.recommendationRank,
       extra: { action: "preview_20s", anchor: familiarAnchor(rec, currentSeeds) },
     });
   }
@@ -422,8 +438,22 @@ export default function Recommendations() {
       if (!spotifySessionRef.current) spotifySessionRef.current = await initSpotifyPlayer(apiBase);
       await playSpotifyTrack(apiBase, spotifySessionRef.current.deviceId, trackId);
       phCapture("play_full_spotify_sdk", { track_id: rec.id, title: rec.title, artist: rec.artist });
-      void apiFeedback(rec.id, "open_spotify");
-      playback.start({ id: rec.id, title: rec.title, artist: rec.artist, sourceKind: "spotify" }, rec.durationMs ?? undefined);
+      void apiFeedback(rec.id, "open_spotify", {
+        sourcePage: "recommendations",
+        recommendationRequestId: rec.recommendationRequestId,
+        recommendationRank: rec.recommendationRank,
+      });
+      playback.start(
+        {
+          id: rec.id,
+          title: rec.title,
+          artist: rec.artist,
+          sourceKind: "spotify",
+          recommendationRequestId: rec.recommendationRequestId,
+          recommendationRank: rec.recommendationRank,
+        },
+        rec.durationMs ?? undefined
+      );
       return true;
     } catch (e: unknown) {
       const status = getErrorStatus(e);
@@ -457,8 +487,22 @@ export default function Recommendations() {
         setPlayingId(rec.id);
         setIsPlaying(true);
         phCapture(fullAudioUrl ? "play_full" : "play_preview", { track_id: rec.id, title: rec.title, artist: rec.artist });
-        playback.start({ id: rec.id, title: rec.title, artist: rec.artist, sourceKind: fullAudioUrl ? "upload" : "preview" }, rec.durationMs ?? undefined);
-        void apiFeedback(rec.id, "play");
+        playback.start(
+          {
+            id: rec.id,
+            title: rec.title,
+            artist: rec.artist,
+            sourceKind: fullAudioUrl ? "upload" : "preview",
+            recommendationRequestId: rec.recommendationRequestId,
+            recommendationRank: rec.recommendationRank,
+          },
+          rec.durationMs ?? undefined
+        );
+        void apiFeedback(rec.id, "play", {
+          sourcePage: "recommendations",
+          recommendationRequestId: rec.recommendationRequestId,
+          recommendationRank: rec.recommendationRank,
+        });
         return;
       } catch {
         // Continue to Spotify fallback.
@@ -493,7 +537,11 @@ export default function Recommendations() {
 
     try {
       phCapture(`${action}_track`, { track_id: rec.id, title: rec.title, artist: rec.artist });
-      const ok = await apiFeedback(rec.id, action);
+      const ok = await apiFeedback(rec.id, action, {
+        sourcePage: "recommendations",
+        recommendationRequestId: rec.recommendationRequestId,
+        recommendationRank: rec.recommendationRank,
+      });
       if (!ok) throw new Error("Feedback not accepted by backend.");
       await loadRecommendations({ fromFeedback: true });
     } catch (e: unknown) {
@@ -534,9 +582,9 @@ export default function Recommendations() {
         <div className="mt-7 grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
           <div>
             <p className="text-sm font-semibold uppercase tracking-[0.18em] text-black/45">Recommendations</p>
-            <h1 className="mt-1 text-4xl font-bold leading-none sm:text-5xl">Taste engine</h1>
+            <h1 className="mt-1 text-4xl font-bold leading-none sm:text-5xl">Musician-first discovery</h1>
             <p className="mt-3 max-w-3xl text-base font-semibold text-black/55">
-              Choose up to three reference tracks, tune the popularity range, and refine future results with feedback.
+              Choose reference tracks, find independent musicians alongside catalog matches, and send useful feedback back to artists.
             </p>
           </div>
           <div className="rounded-lg border border-black/10 bg-[#f8f7f2] p-4">
@@ -649,7 +697,12 @@ export default function Recommendations() {
                     className="h-72 w-full object-cover md:h-full"
                   />
                   <div className="flex min-h-[280px] flex-col justify-end p-5">
-                    <p className="text-sm font-semibold uppercase tracking-[0.18em] text-black/45">Selected track</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold uppercase tracking-[0.18em] text-black/45">Selected track</p>
+                      {isArtistUpload(selectedRec) ? (
+                        <span className="rounded-md bg-[#ecfeff] px-2 py-1 text-xs font-bold text-[#0f766e]">Artist upload</span>
+                      ) : null}
+                    </div>
                     <h2 className="mt-2 text-4xl font-bold leading-none">{selectedRec.title}</h2>
                     <p className="mt-3 text-lg font-semibold text-black/55">{cleanArtist(selectedRec.artist)}</p>
                     <div className="mt-4 rounded-md bg-white p-3">
@@ -706,7 +759,7 @@ export default function Recommendations() {
             {recs.length ? (
               <section className="rounded-lg border border-black/10 bg-white p-4">
                 <div className="flex items-center justify-between gap-3">
-                  <h2 className="text-xl font-bold">Recommended tracks</h2>
+                  <h2 className="text-xl font-bold">Recommended tracks and musician uploads</h2>
                   <span className="text-sm font-semibold text-black/45">{recs.length} results</span>
                 </div>
                 <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -722,7 +775,9 @@ export default function Recommendations() {
                           <span className="min-w-0">
                             <span className="block truncate text-sm font-bold">{rec.title}</span>
                             <span className="mt-1 block truncate text-xs font-semibold text-black/50">{cleanArtist(rec.artist)}</span>
-                            <span className="mt-3 block truncate text-xs font-semibold text-black/40">{familiarAnchor(rec, currentSeeds)}</span>
+                            <span className="mt-3 block truncate text-xs font-semibold text-black/40">
+                              {isArtistUpload(rec) ? "Independent artist upload" : familiarAnchor(rec, currentSeeds)}
+                            </span>
                           </span>
                         </button>
                         <div className="mt-3 flex flex-wrap gap-1.5">

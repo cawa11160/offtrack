@@ -1,5 +1,13 @@
 # Offtrack
 
+Offtrack is musician first: the product should help musicians get discovered,
+understand their audience, and convert listener attention into durable fan
+relationships.
+
+- Product principles: [docs/product-principles.md](docs/product-principles.md)
+- Execution roadmap: [docs/execution-roadmap.md](docs/execution-roadmap.md)
+- Recommender agent: [docs/recommender-agent.md](docs/recommender-agent.md)
+
 ## Dev (Docker, recommended)
 
 1. Build + run:

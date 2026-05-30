@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Compass,
+  BarChart3,
   Home,
   Map,
   Music,
@@ -13,6 +14,7 @@ import {
   Share2,
   ShieldAlert,
   ShoppingBag,
+  UploadCloud,
   User,
   X,
 } from "lucide-react";
@@ -34,6 +36,8 @@ const pageItems: NavItem[] = [
   { id: "__pages__", name: "Pages", icon: <span />, type: "label" },
   { id: "home", name: "Home", icon: <Home className="h-4 w-4" />, type: "page" },
   { id: "recommendations", name: "Recommendations", icon: <Compass className="h-4 w-4" />, type: "page" },
+  { id: "uploads", name: "Uploads", icon: <UploadCloud className="h-4 w-4" />, type: "page" },
+  { id: "artist-dashboard", name: "Artist Dashboard", icon: <BarChart3 className="h-4 w-4" />, type: "page" },
   { id: "browse", name: "Browse", icon: <Search className="h-4 w-4" />, type: "page" },
   { id: "map", name: "Map", icon: <Map className="h-4 w-4" />, type: "page" },
   { id: "lyric-ai", name: "Lyric AI", icon: <PencilLine className="h-4 w-4" />, type: "page" },
@@ -102,6 +106,7 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
+  const resizeFrameRef = useRef<number | null>(null);
   const [height, setHeight] = useState<number>(() =>
     typeof window === "undefined" ? 900 : window.innerHeight || 900
   );
@@ -145,11 +150,20 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
 
   useEffect(() => {
     const updateHeight = () => {
-      setHeight(window.innerHeight);
+      if (resizeFrameRef.current !== null) return;
+      resizeFrameRef.current = window.requestAnimationFrame(() => {
+        resizeFrameRef.current = null;
+        setHeight(window.innerHeight);
+      });
     };
     updateHeight();
     window.addEventListener("resize", updateHeight);
-    return () => window.removeEventListener("resize", updateHeight);
+    return () => {
+      window.removeEventListener("resize", updateHeight);
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -163,6 +177,8 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
     const routeToId: Record<string, string> = {
       "/": "home",
       "/recommendations": "recommendations",
+      "/uploads": "uploads",
+      "/artist/analytics": "artist-dashboard",
       "/search": "browse",
       "/concerts": "map",
       "/lyric-ai": "lyric-ai",
@@ -335,6 +351,8 @@ export function ArcSidebar({ collapsed, onToggle }: ArcSidebarProps) {
               const routeById: Record<string, string> = {
                 home: "/",
                 recommendations: "/recommendations",
+                uploads: "/uploads",
+                "artist-dashboard": "/artist/analytics",
                 browse: "/search",
                 map: "/concerts",
                 "lyric-ai": "/lyric-ai",

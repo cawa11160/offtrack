@@ -25,6 +25,7 @@ import { sanitizeDisplayName, validateAuthEmail } from "@/lib/authInput";
 type PointNode = MusicWebNode & {
   x: number;
   y: number;
+  lane: "center" | "track" | "artist" | "genre";
 };
 
 const nodeColors: Record<MusicWebNode["type"], string> = {
@@ -48,22 +49,25 @@ function orbit(count: number, index: number, radiusX: number, radiusY: number, s
   };
 }
 
+function laneY(count: number, index: number) {
+  if (count <= 1) return 50;
+  return 18 + (index / (count - 1)) * 64;
+}
+
 function layoutPreview(nodes: MusicWebNode[]): PointNode[] {
   const user = nodes.find((node) => node.type === "user");
-  const tracks = nodes.filter((node) => node.type === "track").slice(0, 8);
-  const artists = nodes.filter((node) => node.type === "artist").slice(0, 5);
-  const genres = nodes.filter((node) => node.type === "genre").slice(0, 5);
+  const tracks = nodes.filter((node) => node.type === "track").slice(0, 6);
+  const artists = nodes.filter((node) => node.type === "artist").slice(0, 4);
+  const genres = nodes.filter((node) => node.type === "genre").slice(0, 4);
 
   const positioned: PointNode[] = [];
-  if (user) positioned.push({ ...user, x: 50, y: 50 });
-  tracks.forEach((node, index) => positioned.push({ ...node, ...orbit(tracks.length, index, 25, 24) }));
+  if (user) positioned.push({ ...user, x: 50, y: 50, lane: "center" });
+  tracks.forEach((node, index) => positioned.push({ ...node, ...orbit(tracks.length, index, 27, 25), lane: "track" }));
   artists.forEach((node, index) => {
-    const point = orbit(artists.length, index, 39, 34, -160);
-    positioned.push({ ...node, x: Math.min(point.x, 34), y: point.y });
+    positioned.push({ ...node, x: 14, y: laneY(artists.length, index), lane: "artist" });
   });
   genres.forEach((node, index) => {
-    const point = orbit(genres.length, index, 39, 34, -20);
-    positioned.push({ ...node, x: Math.max(point.x, 66), y: point.y });
+    positioned.push({ ...node, x: 86, y: laneY(genres.length, index), lane: "genre" });
   });
   return positioned;
 }
@@ -82,6 +86,7 @@ function fallbackCover(label: string, subtitle?: string) {
 function GraphPreview({ data }: { data: MusicWebResponse | null }) {
   const nodes = useMemo(() => layoutPreview(data?.nodes ?? []), [data]);
   const nodeMap = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+  const legendNodes = useMemo(() => nodes.filter((node) => node.type !== "user").slice(0, 10), [nodes]);
   const edges = useMemo(
     () => (data?.edges ?? []).filter((edge) => nodeMap.has(edge.source) && nodeMap.has(edge.target)).slice(0, 28),
     [data, nodeMap]
@@ -106,57 +111,78 @@ function GraphPreview({ data }: { data: MusicWebResponse | null }) {
   }
 
   return (
-    <div className="relative h-[360px] overflow-hidden rounded-lg border border-black/10 bg-[#f8f7f2]">
-      <svg className="absolute inset-0 h-full w-full" aria-hidden="true">
-        {edges.map((edge) => {
-          const source = nodeMap.get(edge.source);
-          const target = nodeMap.get(edge.target);
-          if (!source || !target) return null;
+    <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-black/10 bg-[#f8f7f2]">
+      <div className="relative isolate h-[320px] overflow-hidden sm:h-[360px] lg:h-[400px] xl:h-[420px]">
+        <div className="absolute left-3 top-3 z-10 rounded bg-white/85 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-black/45">
+          Artists
+        </div>
+        <div className="absolute right-3 top-3 z-10 rounded bg-white/85 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-black/45">
+          Genres
+        </div>
+        <svg className="absolute inset-0 h-full w-full" aria-hidden="true">
+          {edges.map((edge) => {
+            const source = nodeMap.get(edge.source);
+            const target = nodeMap.get(edge.target);
+            if (!source || !target) return null;
+            return (
+              <line
+                key={edge.id}
+                x1={`${source.x}%`}
+                y1={`${source.y}%`}
+                x2={`${target.x}%`}
+                y2={`${target.y}%`}
+                stroke="#111111"
+                strokeOpacity={Math.max(0.1, Math.min(0.36, Number(edge.weight || 1) / 14))}
+                strokeWidth={Math.max(1, Math.min(3, Number(edge.weight || 1)))}
+              />
+            );
+          })}
+        </svg>
+        {nodes.map((node) => {
+          const size = nodeSize(node.type, node.weight);
+          const showLabel = node.lane === "center" || node.lane === "track";
           return (
-            <line
-              key={edge.id}
-              x1={`${source.x}%`}
-              y1={`${source.y}%`}
-              x2={`${target.x}%`}
-              y2={`${target.y}%`}
-              stroke="#111111"
-              strokeOpacity={Math.max(0.12, Math.min(0.5, Number(edge.weight || 1) / 10))}
-              strokeWidth={Math.max(1, Math.min(4, Number(edge.weight || 1)))}
-            />
+            <div
+              key={node.id}
+              className="absolute flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-1"
+              style={{ left: `${node.x}%`, top: `${node.y}%`, width: showLabel ? "min(116px, 30vw)" : size }}
+              title={[node.label, node.subtitle].filter(Boolean).join(" - ")}
+            >
+              <div
+                className="grid shrink-0 place-items-center overflow-hidden rounded-full border-[3px] border-white text-white shadow-md"
+                style={{ width: size, height: size, backgroundColor: nodeColors[node.type] }}
+              >
+                {node.imageUrl && node.type === "track" ? (
+                  <img src={node.imageUrl} alt="" className="h-full w-full object-cover" />
+                ) : node.type === "artist" ? (
+                  <Radio className="h-4 w-4" />
+                ) : node.type === "genre" ? (
+                  <Tags className="h-4 w-4" />
+                ) : node.type === "track" ? (
+                  <Music2 className="h-4 w-4" />
+                ) : (
+                  <UserRound className="h-4 w-4" />
+                )}
+              </div>
+              {showLabel ? (
+                <span className="max-w-full truncate rounded bg-white/95 px-2 py-0.5 text-[11px] font-semibold text-black shadow-sm">
+                  {node.label}
+                </span>
+              ) : null}
+            </div>
           );
         })}
-      </svg>
-      {nodes.map((node) => {
-        const size = nodeSize(node.type, node.weight);
-        return (
-          <div
-            key={node.id}
-            className="absolute flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-1"
-            style={{ left: `${node.x}%`, top: `${node.y}%`, width: 104 }}
-            title={[node.label, node.subtitle].filter(Boolean).join(" - ")}
-          >
-            <div
-              className="grid place-items-center overflow-hidden rounded-full border-[3px] border-white text-white shadow-md"
-              style={{ width: size, height: size, backgroundColor: nodeColors[node.type] }}
-            >
-              {node.imageUrl && node.type === "track" ? (
-                <img src={node.imageUrl} alt="" className="h-full w-full object-cover" />
-              ) : node.type === "artist" ? (
-                <Radio className="h-4 w-4" />
-              ) : node.type === "genre" ? (
-                <Tags className="h-4 w-4" />
-              ) : node.type === "track" ? (
-                <Music2 className="h-4 w-4" />
-              ) : (
-                <UserRound className="h-4 w-4" />
-              )}
+      </div>
+      {legendNodes.length ? (
+        <div className="grid min-w-0 gap-2 border-t border-black/10 bg-white/80 p-3 sm:grid-cols-2">
+          {legendNodes.map((node) => (
+            <div key={`legend-${node.id}`} className="flex min-w-0 items-center gap-2">
+              <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: nodeColors[node.type] }} />
+              <span className="truncate text-xs font-semibold text-black/65">{node.label}</span>
             </div>
-            <span className="max-w-[104px] truncate rounded bg-white/95 px-2 py-0.5 text-[11px] font-semibold text-black shadow-sm">
-              {node.label}
-            </span>
-          </div>
-        );
-      })}
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -284,8 +310,8 @@ export default function Profile() {
           </div>
         </div>
 
-        <section className="grid gap-5 lg:grid-cols-[minmax(0,0.95fr)_minmax(420px,1.25fr)]">
-          <div className="rounded-lg bg-[#efebe1] p-5 sm:p-6">
+        <section className="grid min-w-0 items-start gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.25fr)]">
+          <div className="min-w-0 rounded-lg bg-[#efebe1] p-5 sm:p-6">
             <div className="flex flex-col gap-5 sm:flex-row sm:items-end">
               <div className="grid h-28 w-28 shrink-0 place-items-center rounded-full bg-black text-3xl font-bold text-white sm:h-36 sm:w-36">
                 {initials(displayName)}
@@ -338,9 +364,9 @@ export default function Profile() {
             ) : null}
           </div>
 
-          <div className="rounded-lg border border-black/10 bg-white p-4">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div>
+          <div className="min-w-0 overflow-hidden rounded-lg border border-black/10 bg-white p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
                 <h2 className="text-xl font-bold">Listening graph</h2>
                 <p className="text-sm font-medium text-black/55">Tracks, artists, and genres from your history</p>
               </div>

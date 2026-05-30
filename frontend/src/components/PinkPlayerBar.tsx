@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { CSSProperties, useCallback, useEffect, useRef, useState } from "react";
 import { Pause, Play, Repeat, Shuffle, SkipBack, SkipForward, Volume2, VolumeX } from "lucide-react";
 import { apiListUploads, apiRecommend, apiUrl, type RecItem } from "@/lib/api";
 import { usePlaybackMilestones } from "@/lib/playbackTracking";
@@ -14,6 +14,8 @@ type PlayableSong = Song & {
   id: string;
   sourceUrl: string;
   sourceKind: "upload" | "preview";
+  recommendationRequestId?: string;
+  recommendationRank?: number;
 };
 
 type PinkPlayerBarProps = {
@@ -48,9 +50,12 @@ function CustomSlider({
 
 export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayerBarProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const libraryPromiseRef = useRef<Promise<PlayableSong[]> | null>(null);
+  const lastProgressAtRef = useRef(0);
   const [audioLibrary, setAudioLibrary] = useState<PlayableSong[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [libraryLoading, setLibraryLoading] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [volume, setVolume] = useState(80);
   const [isShuffle, setIsShuffle] = useState(false);
@@ -66,9 +71,12 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
-  useEffect(() => {
-    let alive = true;
-    (async () => {
+  const loadAudioLibrary = useCallback((): Promise<PlayableSong[]> => {
+    if (audioLibrary.length) return Promise.resolve(audioLibrary);
+    if (libraryPromiseRef.current) return libraryPromiseRef.current;
+
+    setLibraryLoading(true);
+    libraryPromiseRef.current = (async () => {
       const next: PlayableSong[] = [];
 
       const uploads = await apiListUploads(20).catch(() => []);
@@ -97,22 +105,25 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
           duration: (r.durationMs && Number.isFinite(r.durationMs) ? Math.max(0, Math.floor(r.durationMs / 1000)) : 0),
           sourceUrl: src,
           sourceKind: r.audioUrl ? "upload" : "preview",
+          recommendationRequestId: r.recommendationRequestId,
+          recommendationRank: r.recommendationRank,
         });
       }
 
       const deduped = Array.from(
         new Map(next.map((t) => [`${t.title.toLowerCase()}|${t.artist.toLowerCase()}|${t.sourceUrl}`, t])).values()
       );
-      if (!alive) return;
       setAudioLibrary(deduped);
       setActiveIndex(0);
       setDuration(deduped[0]?.duration || currentSong.duration || 0);
-    })();
+      return deduped;
+    })().finally(() => {
+      libraryPromiseRef.current = null;
+      setLibraryLoading(false);
+    });
 
-    return () => {
-      alive = false;
-    };
-  }, [currentSong]);
+    return libraryPromiseRef.current;
+  }, [audioLibrary, currentSong.coverUrl, currentSong.duration]);
 
   const getNextIndex = useCallback((fromIndex: number) => {
     if (audioLibrary.length <= 1) return fromIndex;
@@ -131,9 +142,9 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
     return (fromIndex - 1 + audioLibrary.length) % audioLibrary.length;
   }, [audioLibrary.length]);
 
-  const playTrack = useCallback(async (index: number) => {
+  const playTrack = useCallback(async (index: number, library: PlayableSong[] = audioLibrary) => {
     const audio = audioRef.current;
-    const song = audioLibrary[index];
+    const song = library[index];
     if (!audio || !song?.sourceUrl) return;
     if (activeSong?.id && activeSong.id !== song.id) {
       playback.skip();
@@ -148,7 +159,14 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
       await audio.play();
       setIsPlaying(true);
       playback.start(
-        { id: song.id, title: song.title, artist: song.artist, sourceKind: song.sourceKind },
+        {
+          id: song.id,
+          title: song.title,
+          artist: song.artist,
+          sourceKind: song.sourceKind,
+          recommendationRequestId: song.recommendationRequestId,
+          recommendationRank: song.recommendationRank,
+        },
         song.duration ? song.duration * 1000 : undefined
       );
     } catch {
@@ -161,6 +179,9 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
     if (!audio) return;
 
     const onTime = () => {
+      const now = performance.now();
+      if (now - lastProgressAtRef.current < 250 && !audio.ended) return;
+      lastProgressAtRef.current = now;
       setCurrentTime(audio.currentTime || 0);
       playback.progress(audio.currentTime || 0, Number.isFinite(audio.duration) ? audio.duration : undefined);
     };
@@ -177,7 +198,14 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
           if (activeSong) {
             playback.resetForTrack(activeSong, activeSong.duration ? activeSong.duration * 1000 : undefined);
             playback.start(
-              { id: activeSong.id, title: activeSong.title, artist: activeSong.artist, sourceKind: activeSong.sourceKind },
+              {
+                id: activeSong.id,
+                title: activeSong.title,
+                artist: activeSong.artist,
+                sourceKind: activeSong.sourceKind,
+                recommendationRequestId: activeSong.recommendationRequestId,
+                recommendationRank: activeSong.recommendationRank,
+              },
               activeSong.duration ? activeSong.duration * 1000 : undefined
             );
           }
@@ -220,14 +248,26 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
       setIsPlaying(false);
       return;
     }
-    if (audioLibrary.length === 0) return;
+    if (audioLibrary.length === 0) {
+      const loaded = await loadAudioLibrary();
+      if (!loaded.length) return;
+      await playTrack(0, loaded);
+      return;
+    }
 
     if (audio.src && !audio.ended && activeSong) {
       try {
         await audio.play();
         setIsPlaying(true);
         playback.start(
-          { id: activeSong.id, title: activeSong.title, artist: activeSong.artist, sourceKind: activeSong.sourceKind },
+          {
+            id: activeSong.id,
+            title: activeSong.title,
+            artist: activeSong.artist,
+            sourceKind: activeSong.sourceKind,
+            recommendationRequestId: activeSong.recommendationRequestId,
+            recommendationRank: activeSong.recommendationRank,
+          },
           activeSong.duration ? activeSong.duration * 1000 : undefined
         );
       } catch {
@@ -249,11 +289,10 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
 
   return (
     <div
-      className="fixed bottom-4 z-40"
+      className="fixed bottom-4 left-2 right-3 z-40 md:left-[var(--player-left-inset)]"
       style={{
-        left: `${Math.max(8, leftInset)}px`,
-        right: "12px",
-      }}
+        "--player-left-inset": `${Math.max(8, leftInset)}px`,
+      } as CSSProperties & Record<string, string>}
     >
       <audio ref={audioRef} preload="metadata" />
       <div className="h-24 overflow-hidden rounded-l-full rounded-r-[10px] border-2 border-[#ff8a8a] bg-[#ff8a8a] px-5 shadow-xl">
@@ -281,7 +320,7 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
               <button className="text-black" onClick={() => void playTrack(getPrevIndex(activeIndex))} disabled={audioLibrary.length === 0}>
                 <SkipBack size={28} fill="black" strokeWidth={0} />
               </button>
-              <button onClick={() => void togglePlay()} className="text-black" disabled={audioLibrary.length === 0}>
+              <button onClick={() => void togglePlay()} className="text-black disabled:opacity-50" disabled={libraryLoading}>
                 {isPlaying ? <Pause size={32} fill="black" strokeWidth={0} /> : <Play size={32} fill="black" strokeWidth={0} />}
               </button>
               <button className="text-black" onClick={() => void playTrack(getNextIndex(activeIndex))} disabled={audioLibrary.length === 0}>
@@ -299,7 +338,7 @@ export default function PinkPlayerBar({ currentSong, leftInset = 0 }: PinkPlayer
             </div>
             {!activeSong ? (
               <p className="mt-1 text-xs font-bold text-black/60">
-                No playable track found yet. Add uploaded songs or enable Spotify previews in backend.
+                {libraryLoading ? "Loading playable tracks..." : "Press play to load songs."}
               </p>
             ) : null}
           </div>

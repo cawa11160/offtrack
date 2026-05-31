@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { apiGetMusicWeb, type MusicWebNode, type MusicWebResponse } from "@/lib/api";
+import { apiGetMusicWeb, apiGetUserSettings, type ArtistConversionLinks, type MusicWebNode, type MusicWebResponse } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { sanitizeDisplayName, validateAuthEmail } from "@/lib/authInput";
 import { ProfileHubNav } from "@/components/profile/ProfileHubNav";
@@ -82,6 +82,20 @@ function nodeSize(type: MusicWebNode["type"], weight?: number) {
 
 function fallbackCover(label: string, subtitle?: string) {
   return `https://placehold.co/240x240/f4f1e8/111111?text=${encodeURIComponent(`${label} ${subtitle ?? ""}`.trim() || "Track")}`;
+}
+
+function conversionEntries(links?: ArtistConversionLinks) {
+  const labels: Record<keyof ArtistConversionLinks, string> = {
+    spotify: "Spotify",
+    website: "Website",
+    merch: "Merch",
+    tickets: "Tickets",
+    emailSignup: "Email",
+    support: "Support",
+  };
+  return (Object.keys(labels) as Array<keyof ArtistConversionLinks>)
+    .map((key) => ({ key, label: labels[key], url: String(links?.[key] || "").trim() }))
+    .filter((item) => item.url);
 }
 
 function GraphPreview({ data }: { data: MusicWebResponse | null }) {
@@ -201,6 +215,7 @@ export default function Profile() {
   const [draftName, setDraftName] = useState("");
   const [draftEmail, setDraftEmail] = useState("");
   const [draftAccountType, setDraftAccountType] = useState<"listener" | "artist">("listener");
+  const [conversionLinks, setConversionLinks] = useState<ArtistConversionLinks>({});
 
   async function loadMusicWeb() {
     setLoading(true);
@@ -223,6 +238,16 @@ export default function Profile() {
     setDraftEmail(user?.email ?? "");
     setDraftAccountType(user?.account_type === "artist" ? "artist" : "listener");
   }, [user]);
+
+  useEffect(() => {
+    if (user?.account_type !== "artist") {
+      setConversionLinks({});
+      return;
+    }
+    apiGetUserSettings()
+      .then((settings) => setConversionLinks(settings.conversionLinks || {}))
+      .catch(() => setConversionLinks({}));
+  }, [user?.account_type]);
 
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -279,6 +304,7 @@ export default function Profile() {
   }, [data]);
   const topArtists = data?.stats?.topArtists ?? [];
   const topGenres = data?.stats?.topGenres ?? [];
+  const artistLinks = conversionEntries(conversionLinks);
 
   return (
     <div className="min-h-screen w-full bg-white pb-36 text-black">
@@ -480,6 +506,27 @@ export default function Profile() {
                 Track qualified listeners, discovery sources, and conversion actions for your uploads.
               </p>
             </Link>
+          </section>
+        ) : null}
+
+        {user?.account_type === "artist" && artistLinks.length ? (
+          <section className="rounded-lg border border-black/10 bg-white p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-bold uppercase tracking-[0.12em] text-black/45">Conversion links</p>
+                <h2 className="mt-1 text-xl font-bold">Where listeners can support you</h2>
+              </div>
+              <Link to="/settings" className="rounded-md border border-black/10 px-3 py-2 text-sm font-bold hover:bg-black/5">
+                Edit links
+              </Link>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {artistLinks.map((link) => (
+                <a key={link.key} href={link.url} target="_blank" rel="noreferrer" className="rounded-md bg-[#f8f7f2] px-3 py-2 text-sm font-bold text-black/65 hover:bg-black/5">
+                  {link.label}
+                </a>
+              ))}
+            </div>
           </section>
         ) : null}
 

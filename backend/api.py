@@ -1058,6 +1058,42 @@ def _settings_payload(row: UserSettings | None) -> Dict[str, Dict[str, Any]]:
     return {key: {**defaults, **stored.get(key, {})} for key, defaults in SETTINGS_DEFAULTS.items()}
 
 
+def _settings_for_user_id(db: Session, user_id: int | None) -> Dict[str, Dict[str, Any]]:
+    if user_id is None:
+        return _settings_payload(None)
+    try:
+        row = db.query(UserSettings).filter(UserSettings.user_id == int(user_id)).first()
+    except SQLAlchemyError:
+        row = None
+    return _settings_payload(row)
+
+
+def _conversion_links_for_user(db: Session, user_id: int | None) -> Dict[str, str]:
+    settings = _settings_for_user_id(db, user_id)
+    links = settings.get("conversionLinks") or {}
+    return {key: str(value or "").strip() for key, value in links.items() if str(value or "").strip()}
+
+
+def _artist_settings_for_user(db: Session, user_id: int | None) -> Dict[str, Any]:
+    return _settings_for_user_id(db, user_id).get("artist") or dict(SETTINGS_DEFAULTS["artist"])
+
+
+def _upload_discovery_enabled(db: Session, track: CatalogTrack) -> bool:
+    owner_id = getattr(track, "owner_user_id", None)
+    if owner_id is None:
+        return True
+    artist_settings = _artist_settings_for_user(db, int(owner_id))
+    return bool(artist_settings.get("discoveryEnabled", True))
+
+
+def _upload_public_profile_enabled(db: Session, track: CatalogTrack) -> bool:
+    owner_id = getattr(track, "owner_user_id", None)
+    if owner_id is None:
+        return True
+    artist_settings = _artist_settings_for_user(db, int(owner_id))
+    return bool(artist_settings.get("publicProfile", True))
+
+
 def _bool_setting(data: Dict[str, Any], key: str, default: bool) -> bool:
     return bool(data.get(key, default))
 
@@ -2115,6 +2151,14 @@ def _uploaded_track_recommendation(track: CatalogTrack) -> Dict[str, Any]:
     }
 
 
+def _attach_artist_conversion_fields(db: Session, item: Dict[str, Any], owner_user_id: int | None) -> Dict[str, Any]:
+    links = _conversion_links_for_user(db, owner_user_id)
+    artist_settings = _artist_settings_for_user(db, owner_user_id)
+    item["artistConversionLinks"] = links
+    item["artistProfilePublic"] = bool(artist_settings.get("publicProfile", True))
+    return item
+
+
 def _featured_upload_recommendations(db: Session, exclude_ids: set[str], limit: int = 3) -> List[Dict[str, Any]]:
     if limit <= 0:
         return []
@@ -2141,9 +2185,12 @@ def _featured_upload_recommendations(db: Session, exclude_ids: set[str], limit: 
     for row in rows:
         if row.id in exclude_ids:
             continue
+        if not _upload_discovery_enabled(db, row):
+            continue
         rec = _uploaded_track_recommendation(row)
         if not rec.get("audioUrl"):
             continue
+        _attach_artist_conversion_fields(db, rec, getattr(row, "owner_user_id", None))
         out.append(rec)
         exclude_ids.add(row.id)
         if len(out) >= limit:
@@ -2191,9 +2238,12 @@ def _exploration_upload_recommendations(db: Session, exclude_ids: set[str], limi
     for row in rows:
         if row.id in exclude_ids:
             continue
+        if not _upload_discovery_enabled(db, row):
+            continue
         rec = _uploaded_track_recommendation(row)
         if not rec.get("audioUrl"):
             continue
+        _attach_artist_conversion_fields(db, rec, getattr(row, "owner_user_id", None))
         rec["exploration"] = True
         reasons = list(rec.get("reasons") or [])
         if "Exploration slot for new listener feedback" not in reasons:
@@ -2931,7 +2981,13 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
             except Exception:
                 pass
 
-        engagement_scores = _recommendation_engagement_scores(db, did)
+        listener_settings = _settings_for_user_id(db, user_id) if user_id is not None else _settings_payload(None)
+        personalized_enabled = bool((listener_settings.get("privacy") or {}).get("personalizedRecommendations", True))
+        if not personalized_enabled:
+            liked_ids = []
+            superliked_ids = []
+            disliked_ids = []
+        engagement_scores = _recommendation_engagement_scores(db, did) if personalized_enabled else {}
         exclude_ids = [x for x in (req.already_shown_ids or []) if isinstance(x, str) and x.strip()]
         recs = get_recommender().recommend(
             seeds,
@@ -3117,6 +3173,25 @@ def recommend_endpoint(req: RecommendRequest, request: Request = None, backgroun
     for rank, item in enumerate(out, start=1):
         item["recommendationRequestId"] = recommendation_request_id
         item["recommendationRank"] = rank
+        if item.get("sourceType") == "upload" or item.get("source") == "upload":
+            artist_name = str(item.get("artist") or "Unknown Artist").strip() or "Unknown Artist"
+            key = artist_name.lower()
+            if key not in musicians:
+                musicians[key] = {
+                    "id": str(uuid.uuid4()),
+                    "name": artist_name,
+                    "imageUrl": item.get("imageUrl"),
+                    "spotifyUrl": None,
+                    "topTracks": [],
+                    "reasons": [],
+                    "concertsUrl": f"https://www.songkick.com/search?query={quote(artist_name)}",
+                    "conversionLinks": item.get("artistConversionLinks") or {},
+                }
+            if item.get("artistConversionLinks"):
+                musicians[key]["conversionLinks"] = item.get("artistConversionLinks")
+            title = str(item.get("title") or "").strip()
+            if title and title not in musicians[key]["topTracks"] and len(musicians[key]["topTracks"]) < 3:
+                musicians[key]["topTracks"].append(title)
 
     try:
         _record_recommendation_impressions(
@@ -3645,7 +3720,7 @@ def profile_music_web(
     playable_uploads = [
         track
         for track in discovery_uploads
-        if track.id not in track_ids and _catalog_track_primary_asset(track, kind="full") is not None
+        if track.id not in track_ids and _catalog_track_primary_asset(track, kind="full") is not None and _upload_discovery_enabled(db, track)
     ]
     ranked_uploads = sorted(
         playable_uploads,
@@ -3670,6 +3745,7 @@ def profile_music_web(
             source="upload",
             sourceType="upload",
             audioUrl=item.get("audioUrl"),
+            artistConversionLinks=_conversion_links_for_user(db, getattr(track, "owner_user_id", None)),
             discoveryScore=score,
             discoveryReason=discovery_reason,
             isDiscoveryCandidate=True,
@@ -3831,6 +3907,8 @@ def track_detail(
         image_url = cover_for(t, a).strip()
 
     audio_url = None
+    artist_conversion_links: Dict[str, str] = {}
+    artist_profile_public = True
     if tid:
         try:
             if row:
@@ -3841,6 +3919,8 @@ def track_detail(
                 asset = _catalog_track_primary_asset(catalog_row, kind="full")
                 if asset:
                     audio_url = f"/api/uploads/{quote(tid)}/stream"
+                artist_conversion_links = _conversion_links_for_user(db, getattr(catalog_row, "owner_user_id", None))
+                artist_profile_public = _upload_public_profile_enabled(db, catalog_row)
         except Exception:
             audio_url = None
 
@@ -3855,6 +3935,76 @@ def track_detail(
         "spotifyUri": (details.get("spotifyUri") if details else None),
         "durationMs": (details.get("durationMs") if details else None),
         "source": "db" if row else ("upload" if catalog_row else ("spotify" if details else "unknown")),
+        "artistConversionLinks": artist_conversion_links,
+        "artistProfilePublic": artist_profile_public,
+    }
+
+
+@app.get("/api/artist-profile")
+def artist_profile_endpoint(name: str, db: Session = Depends(get_db)):
+    artist_name = (name or "").strip()
+    if not artist_name:
+        raise HTTPException(status_code=400, detail="Artist name is required")
+
+    try:
+        artist_row = db.query(Artist).filter(func.lower(Artist.name) == artist_name.lower()).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+
+    if not artist_row:
+        return {
+            "name": artist_name,
+            "found": False,
+            "publicProfile": True,
+            "conversionLinks": {},
+            "tracks": [],
+        }
+
+    try:
+        tracks = (
+            db.query(CatalogTrack)
+            .join(TrackArtist, TrackArtist.track_id == CatalogTrack.id)
+            .options(selectinload(CatalogTrack.audio_assets))
+            .filter(
+                TrackArtist.artist_id == artist_row.id,
+                CatalogTrack.source_type == "upload",
+                CatalogTrack.is_published.is_(True),
+            )
+            .order_by(CatalogTrack.created_at.desc(), CatalogTrack.id.asc())
+            .limit(25)
+            .all()
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+
+    owner_id = next((getattr(track, "owner_user_id", None) for track in tracks if getattr(track, "owner_user_id", None) is not None), None)
+    artist_settings = _artist_settings_for_user(db, int(owner_id)) if owner_id is not None else dict(SETTINGS_DEFAULTS["artist"])
+    public_profile = bool(artist_settings.get("publicProfile", True))
+    if not public_profile:
+        return {
+            "name": artist_row.name,
+            "found": True,
+            "publicProfile": False,
+            "conversionLinks": {},
+            "tracks": [],
+        }
+
+    return {
+        "name": artist_row.name,
+        "found": True,
+        "publicProfile": True,
+        "conversionLinks": _conversion_links_for_user(db, int(owner_id)) if owner_id is not None else {},
+        "tracks": [
+            {
+                "id": track.id,
+                "title": track.canonical_title,
+                "imageUrl": track.image_url,
+                "audioUrl": f"/api/uploads/{track.id}/stream" if _catalog_track_primary_asset(track, kind="full") else None,
+                "durationMs": track.duration_ms,
+                "createdAt": getattr(track, "created_at", None),
+            }
+            for track in tracks
+        ],
     }
 
 

@@ -28,7 +28,7 @@ os.environ.setdefault("SPOTIFY_CLIENT_SECRET", "test-secret")
 os.environ.setdefault("FRONTEND_URL", "http://localhost:8080")
 os.environ["ADMIN_API_KEY"] = "test-admin-key"
 
-from api import app, db_search, pwd_context  # noqa: E402
+from api import _auth_fail_state, _rate_state, app, db_search, pwd_context  # noqa: E402
 from catalog_ingest import sync_current_catalog  # noqa: E402
 from catalog_sync import ensure_catalog_backfill  # noqa: E402
 from db import SessionLocal, engine  # noqa: E402
@@ -69,6 +69,8 @@ from storage import is_remote_storage_path, remote_media_url  # noqa: E402
 def _fresh_client() -> TestClient:
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
+    _rate_state.clear()
+    _auth_fail_state.clear()
     return TestClient(app)
 
 
@@ -294,6 +296,83 @@ def test_user_settings_persist_export_and_delete_history():
     deleted = client.delete("/api/settings/listening-history", headers=headers)
     assert deleted.status_code == 200, deleted.text
     assert deleted.json()["deleted"] == 1
+
+
+def test_artist_conversion_links_surface_on_track_and_artist_profile():
+    client = _fresh_client()
+    signup = client.post(
+        "/api/auth/signup",
+        json={"name": "Conversion Artist", "email": "conversion@example.com", "password": "password123", "account_type": "artist"},
+    )
+    assert signup.status_code == 200, signup.text
+    token = signup.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    patched = client.patch(
+        "/api/settings",
+        headers=headers,
+        json={
+            "artist": {"publicProfile": True, "discoveryEnabled": False},
+            "conversionLinks": {
+                "website": "https://conversion.example.com",
+                "merch": "https://conversion.example.com/merch",
+            },
+        },
+    )
+    assert patched.status_code == 200, patched.text
+
+    db = SessionLocal()
+    try:
+        owner = db.query(User).filter(User.email == "conversion@example.com").first()
+        assert owner is not None
+        artist = Artist(name="Conversion Artist")
+        db.add(artist)
+        db.flush()
+        track = CatalogTrack(
+            id="conversion-upload",
+            canonical_title="Conversion Song",
+            source_type="upload",
+            duration_ms=123000,
+            explicit=False,
+            is_published=True,
+            owner_user_id=owner.id,
+        )
+        db.add(track)
+        db.flush()
+        db.add(TrackArtist(track_id=track.id, artist_id=artist.id, role="primary", position=0))
+        db.add(
+            AudioAsset(
+                id="conversion-upload-asset",
+                track_id=track.id,
+                storage_path=str(BACKEND_DIR / "tests" / ".tmp_media" / "conversion.mp3"),
+                mime_type="audio/mpeg",
+                size_bytes=789,
+                duration_ms=123000,
+                kind="full",
+                is_primary=True,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    detail = client.get("/api/track?track_id=conversion-upload")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["artistConversionLinks"]["website"] == "https://conversion.example.com"
+    assert detail.json()["artistConversionLinks"]["merch"] == "https://conversion.example.com/merch"
+
+    profile = client.get("/api/artist-profile?name=Conversion%20Artist")
+    assert profile.status_code == 200, profile.text
+    assert profile.json()["publicProfile"] is True
+    assert profile.json()["conversionLinks"]["website"] == "https://conversion.example.com"
+    assert profile.json()["tracks"][0]["id"] == "conversion-upload"
+
+    hidden = client.patch("/api/settings", headers=headers, json={"artist": {"publicProfile": False}})
+    assert hidden.status_code == 200, hidden.text
+    hidden_profile = client.get("/api/artist-profile?name=Conversion%20Artist")
+    assert hidden_profile.status_code == 200, hidden_profile.text
+    assert hidden_profile.json()["publicProfile"] is False
+    assert hidden_profile.json()["tracks"] == []
 
 
 def test_user_can_change_password_and_logout_all_sessions():

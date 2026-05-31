@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ExternalLink, Play, Pause } from "lucide-react";
-import { apiFeedback, apiGetTrackDetail, apiUrl, type TrackDetail } from "@/lib/api";
+import { apiFeedback, apiGetTrackDetail, apiUrl, type ArtistConversionLinks, type TrackDetail } from "@/lib/api";
 import { getErrorMessage, getErrorStatus } from "@/lib/errors";
 import { usePlaybackMilestones } from "@/lib/playbackTracking";
 import { extractSpotifyTrackId, fetchSpotifyStatus, initSpotifyPlayer, playSpotifyTrack, type SpotifySession } from "@/lib/spotify";
@@ -17,6 +17,20 @@ function msToClock(ms?: number | null) {
 function fallbackCover(title: string, artist: string) {
   const text = encodeURIComponent(`${title} ${artist}`.trim() || "music");
   return `https://picsum.photos/seed/${text}/800/800`;
+}
+
+function conversionEntries(links?: ArtistConversionLinks) {
+  const labels: Record<keyof ArtistConversionLinks, string> = {
+    spotify: "Spotify",
+    website: "Website",
+    merch: "Merch",
+    tickets: "Tickets",
+    emailSignup: "Email",
+    support: "Support",
+  };
+  return (Object.keys(labels) as Array<keyof ArtistConversionLinks>)
+    .map((key) => ({ key, label: labels[key], url: String(links?.[key] || "").trim() }))
+    .filter((item) => item.url);
 }
 
 export default function TrackDetailPage() {
@@ -72,6 +86,7 @@ export default function TrackDetailPage() {
     () => (spotifyTrackId ? `https://open.spotify.com/embed/track/${spotifyTrackId}?utm_source=generator` : ""),
     [spotifyTrackId]
   );
+  const conversionLinks = useMemo(() => conversionEntries(track?.artistConversionLinks), [track?.artistConversionLinks]);
 
   async function onPlayPause() {
     const a = audioRef.current;
@@ -209,6 +224,29 @@ export default function TrackDetailPage() {
                   <ExternalLink className="h-4 w-4" />
                 </a>
               </div>
+
+              {conversionLinks.length ? (
+                <div className="mt-5 rounded-[10px] bg-white p-3">
+                  <p className="text-[14px] font-bold uppercase tracking-[0.08em] text-black/55">Support the artist</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {conversionLinks.map((link) => (
+                      <a
+                        key={link.key}
+                        href={link.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={() => {
+                          if (track.id) void apiFeedback(track.id, "artist_click", { sourcePage: "track_detail", extra: { conversion: link.key } });
+                        }}
+                        className="inline-flex h-[38px] items-center gap-2 rounded-[10px] bg-[#f8f7f2] px-3 text-[13px] font-bold text-black"
+                      >
+                        {link.label}
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
 
               {showEmbed && spotifyEmbedUrl ? (
                 <div className="mt-5 overflow-hidden rounded-[12px] bg-white p-2">

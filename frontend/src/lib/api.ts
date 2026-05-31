@@ -30,6 +30,8 @@ export type RecItem = {
   spotifyUrl?: string | null;
   spotifyUri?: string | null;
   spotifyArtistUrl?: string | null;
+  artistConversionLinks?: ArtistConversionLinks;
+  artistProfilePublic?: boolean;
   durationMs?: number | null;
 
   reasons?: string[];
@@ -47,12 +49,22 @@ export type MusicianRec = {
   topTracks?: string[];
   reasons?: string[];
   concertsUrl?: string;
+  conversionLinks?: ArtistConversionLinks;
 };
 
 export type RecommendResponse = {
   recommendationRequestId?: string;
   recommendations: RecItem[];
   musicians?: MusicianRec[];
+};
+
+export type ArtistConversionLinks = {
+  spotify?: string;
+  website?: string;
+  merch?: string;
+  tickets?: string;
+  emailSignup?: string;
+  support?: string;
 };
 
 export type TrackDetail = {
@@ -64,8 +76,25 @@ export type TrackDetail = {
   previewUrl?: string | null;
   spotifyUrl?: string | null;
   spotifyUri?: string | null;
+  artistConversionLinks?: ArtistConversionLinks;
+  artistProfilePublic?: boolean;
   durationMs?: number | null;
   source?: string;
+};
+
+export type ArtistProfile = {
+  name: string;
+  found: boolean;
+  publicProfile: boolean;
+  conversionLinks: ArtistConversionLinks;
+  tracks: Array<{
+    id: string;
+    title: string;
+    imageUrl?: string | null;
+    audioUrl?: string | null;
+    durationMs?: number | null;
+    createdAt?: string | null;
+  }>;
 };
 
 // If you set VITE_API_BASE_URL on Vercel (e.g. https://your-backend.com),
@@ -198,6 +227,7 @@ export type MusicWebNode = {
   subtitle?: string;
   imageUrl?: string | null;
   audioUrl?: string | null;
+  artistConversionLinks?: ArtistConversionLinks;
   source?: string;
   sourceType?: string;
   weight?: number;
@@ -250,6 +280,13 @@ export async function apiGetTrackDetail(args: {
   const r = await apiFetch(`/api/track?${q.toString()}`);
   if (!r.ok) throw new Error(await readError(r));
   return (await r.json()) as TrackDetail;
+}
+
+export async function apiGetArtistProfile(name: string): Promise<ArtistProfile> {
+  const q = new URLSearchParams({ name });
+  const r = await apiFetch(`/api/artist-profile?${q.toString()}`);
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as ArtistProfile;
 }
 
 export type UploadedTrackItem = {

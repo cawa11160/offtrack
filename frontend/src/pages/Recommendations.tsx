@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
-import { apiFeedback, apiRecommend, apiSearch, apiUrl, type MusicianRec, type RecItem, type SearchResult, type SeedSong } from "@/lib/api";
+import { apiFeedback, apiRecommend, apiSearch, apiUrl, type ArtistConversionLinks, type MusicianRec, type RecItem, type SearchResult, type SeedSong } from "@/lib/api";
 import { addAlreadyShownIds, getAlreadyShownIds } from "@/lib/analytics";
 import { albums } from "@/data/mockData";
 import { getErrorMessage, getErrorStatus } from "@/lib/errors";
@@ -74,6 +74,20 @@ function fallbackCover(title: string, artist: string) {
 
 function hasPlayableSource(rec: Rec) {
   return Boolean(rec.audioUrl || rec.previewUrl || rec.spotifyUrl || rec.spotifyUri);
+}
+
+function conversionEntries(links?: ArtistConversionLinks) {
+  const labels: Record<keyof ArtistConversionLinks, string> = {
+    spotify: "Spotify",
+    website: "Website",
+    merch: "Merch",
+    tickets: "Tickets",
+    emailSignup: "Email",
+    support: "Support",
+  };
+  return (Object.keys(labels) as Array<keyof ArtistConversionLinks>)
+    .map((key) => ({ key, label: labels[key], url: String(links?.[key] || "").trim() }))
+    .filter((item) => item.url);
 }
 
 function isArtistUpload(rec: Rec) {
@@ -283,6 +297,10 @@ export default function Recommendations() {
   const selectedWhy = useMemo(
     () => (selectedRec ? activationReasons(selectedRec, currentSeeds) : []),
     [currentSeeds, selectedRec]
+  );
+  const selectedConversionLinks = useMemo(
+    () => conversionEntries(selectedRec?.artistConversionLinks),
+    [selectedRec?.artistConversionLinks]
   );
 
   const quickSeeds = useMemo(
@@ -743,6 +761,33 @@ export default function Recommendations() {
                         </a>
                       ) : null}
                     </div>
+                    {selectedConversionLinks.length ? (
+                      <div className="mt-4 rounded-md bg-white p-3">
+                        <p className="text-xs font-bold uppercase tracking-[0.12em] text-black/45">Artist links</p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {selectedConversionLinks.map((link) => (
+                            <a
+                              key={link.key}
+                              href={link.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              onClick={() => {
+                                void apiFeedback(selectedRec.id, "artist_click", {
+                                  sourcePage: "recommendations",
+                                  recommendationRequestId: selectedRec.recommendationRequestId,
+                                  recommendationRank: selectedRec.recommendationRank,
+                                  extra: { conversion: link.key },
+                                });
+                              }}
+                              className="inline-flex min-h-9 items-center gap-2 rounded-md bg-[#f8f7f2] px-3 py-2 text-xs font-bold text-black hover:bg-black/5"
+                            >
+                              {link.label}
+                              <ExternalLink className="h-3.5 w-3.5" />
+                            </a>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </section>
@@ -768,6 +813,7 @@ export default function Recommendations() {
                     const chips = reasonChips(rec, currentSeeds);
                     const whyOpen = Boolean(expandedWhyByTrack[rec.id]);
                     const why = activationReasons(rec, currentSeeds);
+                    const links = conversionEntries(rec.artistConversionLinks);
                     return (
                       <article key={rec.id} className={`rounded-lg border p-3 transition ${selected ? "border-black bg-[#f8f7f2]" : "border-black/10 bg-white hover:bg-[#f8f7f2]"}`}>
                         <button type="button" onClick={() => selectRecommendation(rec)} className="flex w-full gap-3 text-left">
@@ -828,6 +874,29 @@ export default function Recommendations() {
                         >
                           Open
                         </button>
+                        {links.length ? (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {links.slice(0, 3).map((link) => (
+                              <a
+                                key={link.key}
+                                href={link.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={() => {
+                                  void apiFeedback(rec.id, "artist_click", {
+                                    sourcePage: "recommendations",
+                                    recommendationRequestId: rec.recommendationRequestId,
+                                    recommendationRank: rec.recommendationRank,
+                                    extra: { conversion: link.key },
+                                  });
+                                }}
+                                className="rounded-md bg-[#ecfeff] px-2 py-1 text-[11px] font-bold text-[#0f766e]"
+                              >
+                                {link.label}
+                              </a>
+                            ))}
+                          </div>
+                        ) : null}
                       </article>
                     );
                   })}
@@ -877,6 +946,15 @@ export default function Recommendations() {
                       Spotify
                     </button>
                   </div>
+                  {conversionEntries(m.conversionLinks).length ? (
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {conversionEntries(m.conversionLinks).slice(0, 4).map((link) => (
+                        <a key={link.key} href={link.url} target="_blank" rel="noreferrer" className="rounded-md bg-[#f8f7f2] px-2 py-1 text-xs font-bold text-black/55">
+                          {link.label}
+                        </a>
+                      ))}
+                    </div>
+                  ) : null}
                 </article>
               ))}
             </div>

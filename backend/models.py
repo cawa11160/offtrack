@@ -248,6 +248,24 @@ class User(Base):
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
+class UserSettings(Base):
+    __tablename__ = "user_settings"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    general_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    audio_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notifications_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    privacy_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artist_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conversion_links_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        index=True,
+    )
+
+
 class Track(Base):
     __tablename__ = "tracks"
 
@@ -423,3 +441,4 @@ Index("ix_payment_methods_user_default", PaymentMethod.user_id, PaymentMethod.is
 Index("ix_billing_receipts_user_created", BillingReceipt.user_id, BillingReceipt.created_at)
 Index("ix_refresh_sessions_user_active", RefreshSession.user_id, RefreshSession.revoked_at, RefreshSession.expires_at)
 Index("ix_security_audit_action_created", SecurityAuditLog.action, SecurityAuditLog.created_at)
+Index("ix_user_settings_updated", UserSettings.updated_at)

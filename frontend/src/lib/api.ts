@@ -272,6 +272,68 @@ export type UploadedTrackItem = {
   metrics?: ArtistTrackMetrics;
 };
 
+export type UserSettingsPayload = {
+  general: {
+    appearance: "light" | "dark" | "system";
+    density: "compact" | "normal" | "comfortable";
+    autoplay: boolean;
+  };
+  audio: {
+    volume: number;
+    bass: number;
+    treble: number;
+    balance: number;
+  };
+  notifications: {
+    releaseAlerts: boolean;
+    friendActivity: boolean;
+    concertAlerts: boolean;
+    listenerActivity: boolean;
+    discoveryScoreChanges: boolean;
+    weeklyArtistReport: boolean;
+    securityAlerts: boolean;
+  };
+  privacy: {
+    personalizedRecommendations: boolean;
+    analyticsConsent: boolean;
+    publicListening: boolean;
+    shareAggregateArtistFit: boolean;
+  };
+  artist: {
+    publicProfile: boolean;
+    discoveryEnabled: boolean;
+    explicitContentDefault: boolean;
+    ownershipConfirmed: boolean;
+    playMilestoneThreshold: number;
+    saveMilestoneThreshold: number;
+    skipAlertThreshold: number;
+  };
+  conversionLinks: {
+    spotify: string;
+    website: string;
+    merch: string;
+    tickets: string;
+    emailSignup: string;
+    support: string;
+  };
+  account?: {
+    id: number;
+    email: string;
+    name?: string | null;
+    accountType: "listener" | "artist";
+    emailVerified: boolean;
+  };
+};
+
+export type UserSettingsUpdate = Partial<{
+  general: Partial<UserSettingsPayload["general"]>;
+  audio: Partial<UserSettingsPayload["audio"]>;
+  notifications: Partial<UserSettingsPayload["notifications"]>;
+  privacy: Partial<UserSettingsPayload["privacy"]>;
+  artist: Partial<UserSettingsPayload["artist"]>;
+  conversionLinks: Partial<UserSettingsPayload["conversionLinks"]>;
+}>;
+
 export type ArtistTrackMetrics = {
   eventCounts: Record<string, number>;
   sourceCounts: Record<string, number>;
@@ -344,6 +406,48 @@ export async function apiGetArtistDashboard(): Promise<ArtistDashboard> {
   const r = await apiFetch("/api/artist/dashboard");
   if (!r.ok) throw new Error(await readError(r));
   return (await r.json()) as ArtistDashboard;
+}
+
+export async function apiGetUserSettings(): Promise<UserSettingsPayload> {
+  const r = await apiFetch("/api/settings");
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as UserSettingsPayload;
+}
+
+export async function apiUpdateUserSettings(update: UserSettingsUpdate): Promise<UserSettingsPayload> {
+  const r = await apiFetch("/api/settings", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as UserSettingsPayload;
+}
+
+export async function apiChangePassword(args: { currentPassword: string; newPassword: string }): Promise<void> {
+  const r = await apiFetch("/api/auth/change-password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ current_password: args.currentPassword, new_password: args.newPassword }),
+  });
+  if (!r.ok) throw new Error(await readError(r));
+}
+
+export async function apiLogoutAllSessions(): Promise<void> {
+  const r = await apiFetch("/api/auth/logout-all", { method: "POST" });
+  if (!r.ok) throw new Error(await readError(r));
+}
+
+export async function apiExportUserData(): Promise<Blob> {
+  const r = await apiFetch("/api/settings/export");
+  if (!r.ok) throw new Error(await readError(r));
+  return new Blob([JSON.stringify(await r.json(), null, 2)], { type: "application/json" });
+}
+
+export async function apiDeleteListeningHistory(): Promise<{ deleted: number }> {
+  const r = await apiFetch("/api/settings/listening-history", { method: "DELETE" });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as { deleted: number };
 }
 
 export async function apiUploadNewTrack(args: {

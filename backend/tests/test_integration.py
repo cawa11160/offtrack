@@ -238,6 +238,98 @@ def test_artist_can_resend_and_verify_email():
     assert resend_after.json()["email_verification_url"] is None
 
 
+def test_user_settings_persist_export_and_delete_history():
+    client = _fresh_client()
+    signup = client.post(
+        "/api/auth/signup",
+        json={"name": "Settings Artist", "email": "settings@example.com", "password": "password123", "account_type": "artist"},
+    )
+    assert signup.status_code == 200, signup.text
+    token = signup.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    initial = client.get("/api/settings", headers=headers)
+    assert initial.status_code == 200, initial.text
+    assert initial.json()["artist"]["discoveryEnabled"] is True
+
+    updated = client.patch(
+        "/api/settings",
+        headers=headers,
+        json={
+            "notifications": {"weeklyArtistReport": False, "listenerActivity": True},
+            "privacy": {"publicListening": True, "analyticsConsent": False},
+            "artist": {"discoveryEnabled": False, "playMilestoneThreshold": 250},
+            "conversionLinks": {"spotify": "https://open.spotify.com/artist/test", "website": "https://artist.example.com"},
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    body = updated.json()
+    assert body["notifications"]["weeklyArtistReport"] is False
+    assert body["privacy"]["analyticsConsent"] is False
+    assert body["artist"]["discoveryEnabled"] is False
+    assert body["artist"]["playMilestoneThreshold"] == 250
+    assert body["conversionLinks"]["spotify"] == "https://open.spotify.com/artist/test"
+
+    invalid = client.patch(
+        "/api/settings",
+        headers=headers,
+        json={"conversionLinks": {"merch": "ftp://bad.example.com/shop"}},
+    )
+    assert invalid.status_code == 422, invalid.text
+
+    db = SessionLocal()
+    try:
+        me = db.query(User).filter(User.email == "settings@example.com").first()
+        assert me is not None
+        db.add(Interaction(distinct_id="settings-user", user_id=me.id, track_id="settings-track", event="play", source_page="test"))
+        db.commit()
+    finally:
+        db.close()
+
+    exported = client.get("/api/settings/export", headers=headers)
+    assert exported.status_code == 200, exported.text
+    assert exported.json()["settings"]["artist"]["playMilestoneThreshold"] == 250
+    assert len(exported.json()["recentInteractions"]) == 1
+
+    deleted = client.delete("/api/settings/listening-history", headers=headers)
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deleted"] == 1
+
+
+def test_user_can_change_password_and_logout_all_sessions():
+    client = _fresh_client()
+    signup = client.post(
+        "/api/auth/signup",
+        json={"name": "Password User", "email": "password-user@example.com", "password": "password123"},
+    )
+    assert signup.status_code == 200, signup.text
+    token = signup.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    bad = client.post(
+        "/api/auth/change-password",
+        headers=headers,
+        json={"current_password": "wrong123", "new_password": "newpassword123"},
+    )
+    assert bad.status_code == 401, bad.text
+
+    changed = client.post(
+        "/api/auth/change-password",
+        headers=headers,
+        json={"current_password": "password123", "new_password": "newpassword123"},
+    )
+    assert changed.status_code == 200, changed.text
+
+    old_login = client.post("/api/auth/login", json={"email": "password-user@example.com", "password": "password123"})
+    assert old_login.status_code == 401, old_login.text
+    new_login = client.post("/api/auth/login", json={"email": "password-user@example.com", "password": "newpassword123"})
+    assert new_login.status_code == 200, new_login.text
+    new_headers = {"Authorization": f"Bearer {new_login.json()['access_token']}"}
+    logout_all = client.post("/api/auth/logout-all", headers=new_headers)
+    assert logout_all.status_code == 200, logout_all.text
+    assert logout_all.json()["revoked"] >= 1
+
+
 def test_refresh_sessions_rotate_and_logout_revokes_cookie():
     client = _fresh_client()
     signup = client.post(

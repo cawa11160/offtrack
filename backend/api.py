@@ -47,6 +47,7 @@ from models import (
     TrackGenre,
     UploadedTrack,
     User,
+    UserSettings,
 )
 from models import PaymentMethod, BillingReceipt, RefreshSession, SecurityAuditLog
 from recommender import get_recommender
@@ -852,6 +853,20 @@ class PaymentMethodIn(BaseModel):
     set_default: bool = True
 
 
+class PasswordChangeIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class UserSettingsIn(BaseModel):
+    general: Dict[str, Any] | None = None
+    audio: Dict[str, Any] | None = None
+    notifications: Dict[str, Any] | None = None
+    privacy: Dict[str, Any] | None = None
+    artist: Dict[str, Any] | None = None
+    conversionLinks: Dict[str, Any] | None = None
+
+
 class AdminLockIn(BaseModel):
     minutes: int = Field(default=30, ge=1, le=7 * 24 * 60)
     reason: str | None = Field(default="manual_admin_lock", max_length=500)
@@ -968,6 +983,133 @@ def _require_artist_user(req: Request, db: Session) -> User:
     if EMAIL_VERIFICATION_REQUIRED_FOR_ARTIST_UPLOADS and not _email_verified(user):
         raise HTTPException(status_code=403, detail="Verify your email before using artist uploads")
     return user
+
+
+SETTINGS_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "general": {"appearance": "light", "density": "normal", "autoplay": True},
+    "audio": {"volume": 74, "bass": 52, "treble": 48, "balance": 50},
+    "notifications": {
+        "releaseAlerts": True,
+        "friendActivity": False,
+        "concertAlerts": True,
+        "listenerActivity": True,
+        "discoveryScoreChanges": True,
+        "weeklyArtistReport": True,
+        "securityAlerts": True,
+    },
+    "privacy": {
+        "personalizedRecommendations": True,
+        "analyticsConsent": True,
+        "publicListening": False,
+        "shareAggregateArtistFit": True,
+    },
+    "artist": {
+        "publicProfile": True,
+        "discoveryEnabled": True,
+        "explicitContentDefault": False,
+        "ownershipConfirmed": False,
+        "playMilestoneThreshold": 100,
+        "saveMilestoneThreshold": 25,
+        "skipAlertThreshold": 35,
+    },
+    "conversionLinks": {
+        "spotify": "",
+        "website": "",
+        "merch": "",
+        "tickets": "",
+        "emailSignup": "",
+        "support": "",
+    },
+}
+
+
+def _json_obj(raw: str | None) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _settings_row(db: Session, user_id: int) -> UserSettings:
+    row = db.query(UserSettings).filter(UserSettings.user_id == int(user_id)).first()
+    if row:
+        return row
+    row = UserSettings(user_id=int(user_id))
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _settings_payload(row: UserSettings | None) -> Dict[str, Dict[str, Any]]:
+    if row is None:
+        stored: Dict[str, Dict[str, Any]] = {}
+    else:
+        stored = {
+            "general": _json_obj(row.general_json),
+            "audio": _json_obj(row.audio_json),
+            "notifications": _json_obj(row.notifications_json),
+            "privacy": _json_obj(row.privacy_json),
+            "artist": _json_obj(row.artist_json),
+            "conversionLinks": _json_obj(row.conversion_links_json),
+        }
+    return {key: {**defaults, **stored.get(key, {})} for key, defaults in SETTINGS_DEFAULTS.items()}
+
+
+def _bool_setting(data: Dict[str, Any], key: str, default: bool) -> bool:
+    return bool(data.get(key, default))
+
+
+def _choice_setting(data: Dict[str, Any], key: str, default: str, choices: set[str]) -> str:
+    value = str(data.get(key, default) or default).strip().lower()
+    return value if value in choices else default
+
+
+def _int_setting(data: Dict[str, Any], key: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(data.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _sanitize_settings_section(section: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = SETTINGS_DEFAULTS[section]
+    if section == "general":
+        return {
+            "appearance": _choice_setting(data, "appearance", defaults["appearance"], {"light", "dark", "system"}),
+            "density": _choice_setting(data, "density", defaults["density"], {"compact", "normal", "comfortable"}),
+            "autoplay": _bool_setting(data, "autoplay", defaults["autoplay"]),
+        }
+    if section == "audio":
+        return {key: _int_setting(data, key, int(defaults[key]), 0, 100) for key in defaults}
+    if section == "notifications":
+        return {key: _bool_setting(data, key, bool(defaults[key])) for key in defaults}
+    if section == "privacy":
+        return {key: _bool_setting(data, key, bool(defaults[key])) for key in defaults}
+    if section == "artist":
+        return {
+            "publicProfile": _bool_setting(data, "publicProfile", defaults["publicProfile"]),
+            "discoveryEnabled": _bool_setting(data, "discoveryEnabled", defaults["discoveryEnabled"]),
+            "explicitContentDefault": _bool_setting(data, "explicitContentDefault", defaults["explicitContentDefault"]),
+            "ownershipConfirmed": _bool_setting(data, "ownershipConfirmed", defaults["ownershipConfirmed"]),
+            "playMilestoneThreshold": _int_setting(data, "playMilestoneThreshold", defaults["playMilestoneThreshold"], 1, 1000000),
+            "saveMilestoneThreshold": _int_setting(data, "saveMilestoneThreshold", defaults["saveMilestoneThreshold"], 1, 1000000),
+            "skipAlertThreshold": _int_setting(data, "skipAlertThreshold", defaults["skipAlertThreshold"], 0, 100),
+        }
+    if section == "conversionLinks":
+        clean: Dict[str, Any] = {}
+        for key in defaults:
+            clean[key] = _sanitize_optional_http_url(data.get(key), key) or ""
+        return clean
+    return dict(defaults)
+
+
+def _serialize_json(data: Dict[str, Any]) -> str:
+    return json.dumps(data, separators=(",", ":"), sort_keys=True)
+
 
 @app.post("/api/auth/signup", response_model=AuthOut)
 def auth_signup(payload: SignupIn, req: Request, resp: Response, db: Session = Depends(get_db)):
@@ -1203,6 +1345,148 @@ def auth_resend_verification(req: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail="Could not create verification token. Please try again.")
     _audit_log(action="auth_email_verification_sent", user_id=user.id, email=user.email, req=req)
     return {"ok": True, "email_verification_url": _verification_url(req, token)}
+
+
+@app.post("/api/auth/change-password")
+def auth_change_password(payload: PasswordChangeIn, req: Request, db: Session = Depends(get_db)):
+    user = _require_active_user(req, db)
+    _validate_password_input(payload.current_password)
+    policy_error = _password_policy_error(payload.new_password)
+    if policy_error:
+        raise HTTPException(status_code=422, detail=policy_error)
+    if not _verify_password(payload.current_password, user.password_hash):
+        _audit_log(action="auth_password_change_failed", user_id=user.id, email=user.email, req=req, reason="invalid_current_password")
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    user.password_hash = _hash_password(payload.new_password)
+    try:
+        db.add(user)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not change password. Please try again.")
+    _audit_log(action="auth_password_changed", user_id=user.id, email=user.email, req=req)
+    return {"ok": True}
+
+
+@app.post("/api/auth/logout-all")
+def auth_logout_all(req: Request, resp: Response, db: Session = Depends(get_db)):
+    user = _require_active_user(req, db)
+    try:
+        revoked = _revoke_user_refresh_sessions(db, int(user.id))
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not revoke sessions. Please try again.")
+    _clear_refresh_cookie(resp)
+    _audit_log(action="auth_logout_all", user_id=user.id, email=user.email, req=req, meta={"revoked_refresh_sessions": revoked})
+    return {"ok": True, "revoked": revoked}
+
+
+@app.get("/api/settings")
+def get_user_settings(req: Request, db: Session = Depends(get_db)):
+    user = _require_active_user(req, db)
+    try:
+        row = db.query(UserSettings).filter(UserSettings.user_id == int(user.id)).first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+    payload = _settings_payload(row)
+    payload["account"] = {
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+        "accountType": user.account_type or "listener",
+        "emailVerified": _email_verified(user),
+    }
+    return payload
+
+
+@app.patch("/api/settings")
+def update_user_settings(payload: UserSettingsIn, req: Request, db: Session = Depends(get_db)):
+    user = _require_active_user(req, db)
+    try:
+        row = _settings_row(db, int(user.id))
+        current = _settings_payload(row)
+        fields = payload.model_fields_set if hasattr(payload, "model_fields_set") else getattr(payload, "__fields_set__", set())
+        for section, column in [
+            ("general", "general_json"),
+            ("audio", "audio_json"),
+            ("notifications", "notifications_json"),
+            ("privacy", "privacy_json"),
+            ("artist", "artist_json"),
+            ("conversionLinks", "conversion_links_json"),
+        ]:
+            if section not in fields:
+                continue
+            incoming = getattr(payload, section, None)
+            if incoming is None:
+                continue
+            if not isinstance(incoming, dict):
+                raise HTTPException(status_code=422, detail=f"{section} settings must be an object")
+            merged = {**current[section], **incoming}
+            setattr(row, column, _serialize_json(_sanitize_settings_section(section, merged)))
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not save settings. Please try again.")
+    _audit_log(action="settings_updated", user_id=user.id, email=user.email, req=req)
+    return _settings_payload(row)
+
+
+@app.get("/api/settings/export")
+def export_user_settings(req: Request, db: Session = Depends(get_db)):
+    user = _require_active_user(req, db)
+    try:
+        settings = db.query(UserSettings).filter(UserSettings.user_id == int(user.id)).first()
+        interactions = (
+            db.query(Interaction)
+            .filter(Interaction.user_id == int(user.id))
+            .order_by(Interaction.created_at.desc())
+            .limit(1000)
+            .all()
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Could not export data. Please try again.")
+    return {
+        "account": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "accountType": user.account_type or "listener",
+            "emailVerified": _email_verified(user),
+            "createdAt": getattr(user, "created_at", None),
+        },
+        "settings": _settings_payload(settings),
+        "recentInteractions": [
+            {
+                "trackId": row.track_id,
+                "event": row.event,
+                "sourcePage": row.source_page,
+                "createdAt": getattr(row, "created_at", None),
+            }
+            for row in interactions
+        ],
+    }
+
+
+@app.delete("/api/settings/listening-history")
+def delete_listening_history(req: Request, db: Session = Depends(get_db)):
+    user = _require_active_user(req, db)
+    try:
+        deleted = (
+            db.query(Interaction)
+            .filter(Interaction.user_id == int(user.id))
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not delete listening history. Please try again.")
+    _audit_log(action="settings_listening_history_deleted", user_id=user.id, email=user.email, req=req, meta={"deleted": int(deleted or 0)})
+    return {"ok": True, "deleted": int(deleted or 0)}
 
 
 @app.post("/api/admin/users/{user_id}/lock")

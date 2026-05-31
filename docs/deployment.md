@@ -105,6 +105,20 @@ curl https://<render-backend-host>/api/ping
 curl https://<render-backend-host>/api/db_status
 ```
 
+Run database migrations after every backend deploy that includes an Alembic revision:
+
+```bash
+alembic upgrade head
+```
+
+For the current production batch, confirm the latest revision is applied:
+
+```bash
+alembic current
+```
+
+The expected head includes `20260530_0007`, which adds real notifications and upload-level discovery controls.
+
 Admin recommender checks:
 
 ```bash
@@ -123,16 +137,21 @@ After every production deploy:
 2. Search for a song and request recommendations.
 3. Pick a recommendation and confirm the picker closes.
 4. Upload a test artist track and confirm playback works.
-5. Open the profile page and confirm listening graphs do not overlap.
-6. Open `/admin/recommender`, refresh metrics, build an artifact, and verify it appears in the artifact list.
-7. Check Render logs for startup guardrail failures and request errors.
+5. Pause discovery for that upload, request recommendations, then resume discovery and confirm the track can re-enter discovery.
+6. Trigger a listener action on the upload and confirm the artist notification drawer shows the event.
+7. Open the musician dashboard and confirm conversion paths, paused discovery count, and track-level discovery scores render without overlap.
+8. Open the profile page and confirm listening graphs do not overlap.
+9. Open `/admin/recommender`, refresh metrics, build an artifact, and verify it appears in the artifact list.
+10. Check Render logs for startup guardrail failures and request errors.
 
 ## Beyond Launch
 
 Next production upgrades:
 
 - Move rate limiting to Render Key Value or Upstash Redis and set `RATE_LIMIT_BACKEND=redis`.
-- Add PostHog dashboards for recommendation impressions, saves, skips, artist clicks, and upload exposure.
+- Add PostHog dashboards for recommendation impressions, saves, skips, artist clicks, upload exposure, and conversion paths.
 - Add a canary recommender flow before auto-promoting new ranker artifacts.
 - Add email delivery for verification and artist notifications.
 - Add R2 lifecycle policies and backups for uploaded audio.
+- Add a notification email worker so high-value listener signals reach artists even when they are not in the app.
+- Add a recommender promotion gate that compares artist discovery lift, listener retention, and skip rate before promoting new artifacts.

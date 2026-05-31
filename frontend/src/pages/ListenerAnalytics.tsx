@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { BarChart3, ExternalLink, Heart, Loader2, MousePointerClick, Music2, Radio, UploadCloud, Users } from "lucide-react";
+import { BarChart3, ExternalLink, Heart, Loader2, MousePointerClick, Music2, PauseCircle, Radio, UploadCloud, Users } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { apiGetArtistDashboard, type ArtistDashboard, type UploadedTrackItem } from "@/lib/api";
@@ -33,6 +33,21 @@ function scoreTone(value?: number) {
 function topEvents(track: UploadedTrackItem) {
   const events = Object.entries(track.metrics?.eventCounts ?? {}).sort((a, b) => b[1] - a[1]);
   return events.slice(0, 3);
+}
+
+function conversionLabel(key: string) {
+  const labels: Record<string, string> = {
+      spotify: "Spotify",
+      website: "Website",
+      merch: "Merch",
+      tickets: "Tickets",
+      emailSignup: "Email signup",
+      support: "Support",
+      artistProfile: "Artist profile",
+      follow: "Follow",
+      share: "Share",
+    };
+  return labels[key] || key.replace(/_/g, " ");
 }
 
 export default function ListenerAnalytics() {
@@ -134,7 +149,7 @@ export default function ListenerAnalytics() {
 
         {error ? <div className="mt-6 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">{error}</div> : null}
 
-        <div className="mt-6 grid gap-3 md:grid-cols-2 2xl:grid-cols-5">
+        <div className="mt-6 grid gap-3 md:grid-cols-2 2xl:grid-cols-6">
           <div className="min-w-0 rounded-lg border border-black/10 bg-[#f8f7f2] p-4">
             <div className="flex items-center gap-2 text-sm font-bold text-black/55">
               <Music2 className="h-4 w-4" />
@@ -170,6 +185,13 @@ export default function ListenerAnalytics() {
             </div>
             <p className="mt-3 text-3xl font-bold">{formatNumber(summary?.averageDiscoveryScore)}</p>
           </div>
+          <div className="min-w-0 rounded-lg border border-black/10 bg-white p-4">
+            <div className="flex items-center gap-2 text-sm font-bold text-black/55">
+              <PauseCircle className="h-4 w-4" />
+              Paused discovery
+            </div>
+            <p className="mt-3 text-3xl font-bold">{formatNumber(summary?.discoveryPausedTracks)}</p>
+          </div>
         </div>
 
         <div className="mt-6 grid gap-5 2xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -193,6 +215,7 @@ export default function ListenerAnalytics() {
                           <span className="rounded bg-[#f1f5f9] px-2 py-1">{formatNumber(track.metrics?.uniqueListeners)} listeners</span>
                           <span className="rounded bg-[#ecfeff] px-2 py-1">{formatNumber(track.metrics?.qualifiedListeners)} qualified</span>
                           <span className="rounded bg-[#f8f7f2] px-2 py-1">{track.isPublished === false ? "Hidden" : "Published"}</span>
+                          {track.discoveryPaused ? <span className="rounded bg-amber-50 px-2 py-1 text-amber-800">Discovery paused</span> : null}
                           <span className={`rounded border px-2 py-1 ${scoreTone(track.metrics?.discoveryScore?.value)}`}>
                             Score {formatNumber(track.metrics?.discoveryScore?.value)} - {track.metrics?.discoveryScore?.label || "New"}
                           </span>
@@ -230,6 +253,17 @@ export default function ListenerAnalytics() {
                           </div>
                         </div>
                       ) : null}
+                      {Object.entries(track.metrics?.conversionBreakdown ?? {}).length ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {Object.entries(track.metrics?.conversionBreakdown ?? {})
+                            .sort((a, b) => b[1] - a[1])
+                            .map(([key, count]) => (
+                              <span key={`${track.id}-conversion-${key}`} className="rounded-md border border-black/10 px-3 py-2 text-sm font-semibold">
+                                {conversionLabel(key)}: {formatNumber(count)}
+                              </span>
+                            ))}
+                        </div>
+                      ) : null}
                     </article>
                   );
                 })
@@ -246,6 +280,27 @@ export default function ListenerAnalytics() {
           </section>
 
           <aside className="grid min-w-0 content-start gap-5">
+            <section className="rounded-lg border border-black/10 bg-white p-4">
+              <div className="flex items-center gap-2">
+                <MousePointerClick className="h-5 w-5 text-black/55" />
+                <h2 className="text-xl font-bold">Conversion paths</h2>
+              </div>
+              <div className="mt-3 grid gap-2">
+                {Object.entries(summary?.conversionBreakdown ?? {}).length ? (
+                  Object.entries(summary?.conversionBreakdown ?? {})
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([key, count]) => (
+                      <div key={key} className="flex items-center justify-between gap-3 rounded-md bg-[#f8f7f2] px-3 py-2 text-sm font-semibold">
+                        <span className="truncate">{conversionLabel(key)}</span>
+                        <span>{formatNumber(count)}</span>
+                      </div>
+                    ))
+                ) : (
+                  <p className="rounded-md bg-[#f8f7f2] p-3 text-sm font-semibold text-black/45">No conversion clicks yet</p>
+                )}
+              </div>
+            </section>
+
             <section className="rounded-lg border border-black/10 bg-[#f8f7f2] p-4">
               <div className="flex items-center gap-2">
                 <BarChart3 className="h-5 w-5 text-black/55" />

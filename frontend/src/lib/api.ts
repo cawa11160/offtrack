@@ -305,8 +305,23 @@ export type UploadedTrackItem = {
   storagePath?: string | null;
   ownerUserId?: number | null;
   isPublished?: boolean;
+  discoveryPaused?: boolean;
+  discoveryPausedReason?: string | null;
+  discoveryEligible?: boolean;
+  artistDiscoveryEnabled?: boolean;
   createdAt?: string;
   metrics?: ArtistTrackMetrics;
+};
+
+export type NotificationItem = {
+  id: string;
+  type: "listener" | "conversion" | "discovery" | "security" | "system" | "music" | "event" | string;
+  title: string;
+  body: string;
+  link?: string | null;
+  readAt?: string | null;
+  createdAt?: string | null;
+  unread?: boolean;
 };
 
 export type UserSettingsPayload = {
@@ -374,6 +389,7 @@ export type UserSettingsUpdate = Partial<{
 export type ArtistTrackMetrics = {
   eventCounts: Record<string, number>;
   sourceCounts: Record<string, number>;
+  conversionBreakdown?: Record<string, number>;
   uniqueListeners: number;
   qualifiedListeners: number;
   lastInteractionAt?: string | null;
@@ -409,7 +425,9 @@ export type ArtistDashboard = {
     likes: number;
     recommendationClicks: number;
     conversionClicks: number;
+    conversionBreakdown?: Record<string, number>;
     averageDiscoveryScore?: number;
+    discoveryPausedTracks?: number;
   };
   eventCounts: Record<string, number>;
   sourceCounts: Record<string, number>;
@@ -443,6 +461,30 @@ export async function apiGetArtistDashboard(): Promise<ArtistDashboard> {
   const r = await apiFetch("/api/artist/dashboard");
   if (!r.ok) throw new Error(await readError(r));
   return (await r.json()) as ArtistDashboard;
+}
+
+export async function apiListNotifications(limit = 50): Promise<{ notifications: NotificationItem[]; unreadCount: number }> {
+  const r = await apiFetch(`/api/notifications?limit=${limit}`);
+  if (!r.ok) throw new Error(await readError(r));
+  const data = await r.json().catch(() => ({}));
+  return {
+    notifications: (data?.notifications ?? []) as NotificationItem[],
+    unreadCount: Number(data?.unreadCount ?? 0),
+  };
+}
+
+export async function apiMarkNotificationRead(id: string): Promise<NotificationItem | null> {
+  const r = await apiFetch(`/api/notifications/${encodeURIComponent(id)}/read`, { method: "POST" });
+  if (!r.ok) throw new Error(await readError(r));
+  const data = await r.json().catch(() => ({}));
+  return (data?.notification ?? null) as NotificationItem | null;
+}
+
+export async function apiMarkAllNotificationsRead(): Promise<{ updated: number }> {
+  const r = await apiFetch("/api/notifications/read-all", { method: "POST" });
+  if (!r.ok) throw new Error(await readError(r));
+  const data = await r.json().catch(() => ({}));
+  return { updated: Number(data?.updated ?? 0) };
 }
 
 export async function apiGetUserSettings(): Promise<UserSettingsPayload> {
@@ -519,6 +561,23 @@ export async function apiUpdateUpload(args: {
       artist: args.artist ?? undefined,
       image_url: args.imageUrl ?? undefined,
       is_published: args.isPublished ?? undefined,
+    }),
+  });
+  if (!r.ok) throw new Error(await readError(r));
+  return (await r.json()) as UploadedTrackItem;
+}
+
+export async function apiUpdateUploadDiscovery(args: {
+  id: string;
+  discoveryPaused: boolean;
+  reason?: string;
+}): Promise<UploadedTrackItem> {
+  const r = await apiFetch(`/api/uploads/${encodeURIComponent(args.id)}/discovery`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      discovery_paused: args.discoveryPaused,
+      reason: args.reason ?? undefined,
     }),
   });
   if (!r.ok) throw new Error(await readError(r));

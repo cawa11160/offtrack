@@ -911,6 +911,17 @@ def test_artist_dashboard_reports_owned_upload_interactions():
         },
     )
     assert like.status_code == 200, like.text
+    conversion = client.post(
+        "/api/feedback",
+        json={
+            "track_id": uploaded_id,
+            "event": "open_spotify",
+            "distinct_id": "listener-three",
+            "source_page": "track_detail",
+            "context": {"conversion": "website"},
+        },
+    )
+    assert conversion.status_code == 200, conversion.text
 
     res = client.get("/api/artist/dashboard", headers={"Authorization": f"Bearer {token}"})
     assert res.status_code == 200, res.text
@@ -919,15 +930,28 @@ def test_artist_dashboard_reports_owned_upload_interactions():
     assert body["summary"]["publishedTracks"] == 1
     assert body["summary"]["plays"] == 1
     assert body["summary"]["likes"] == 1
-    assert body["summary"]["uniqueListeners"] == 2
-    assert body["summary"]["qualifiedConnections"] == 2
+    assert body["summary"]["conversionClicks"] == 1
+    assert body["summary"]["conversionBreakdown"]["website"] == 1
+    assert body["summary"]["uniqueListeners"] == 3
+    assert body["summary"]["qualifiedConnections"] == 3
     assert body["tracks"][0]["id"] == uploaded_id
     assert body["tracks"][0]["metrics"]["eventCounts"]["play"] == 1
-    assert body["tracks"][0]["metrics"]["qualifiedListeners"] == 2
+    assert body["tracks"][0]["metrics"]["conversionBreakdown"]["website"] == 1
+    assert body["tracks"][0]["metrics"]["qualifiedListeners"] == 3
     assert body["tracks"][0]["metrics"]["discoveryScore"]["value"] > 0
     assert body["tracks"][0]["metrics"]["discoveryScore"]["nextAction"]
     assert body["summary"]["averageDiscoveryScore"] > 0
     assert body["recentInteractions"][0]["listenerKey"].startswith("listener-")
+
+    notifications = client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"})
+    assert notifications.status_code == 200, notifications.text
+    notification_body = notifications.json()
+    assert notification_body["unreadCount"] >= 2
+    assert any(row["type"] == "conversion" for row in notification_body["notifications"])
+    first_id = notification_body["notifications"][0]["id"]
+    marked = client.post(f"/api/notifications/{first_id}/read", headers={"Authorization": f"Bearer {token}"})
+    assert marked.status_code == 200, marked.text
+    assert marked.json()["notification"]["unread"] is False
 
     managed = client.get("/api/uploads/manage", headers={"Authorization": f"Bearer {token}"})
     assert managed.status_code == 200, managed.text
@@ -985,6 +1009,26 @@ def test_recommend_includes_published_artist_uploads():
     assert uploaded[0]["source"] == "upload"
     assert uploaded[0]["audioUrl"] == f"/api/uploads/{uploaded_id}/stream"
     assert "Independent musician on Offtrack" in uploaded[0]["reasons"]
+
+    paused = client.patch(
+        f"/api/uploads/{uploaded_id}/discovery",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"discovery_paused": True, "reason": "test pause"},
+    )
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["discoveryPaused"] is True
+    assert paused.json()["discoveryEligible"] is False
+
+    with (
+        patch("api.get_recommender", return_value=StubRec()),
+        patch("api.spotify_enabled", return_value=False),
+        patch("api.itunes_track_lookup", return_value=None),
+    ):
+        app.state.recommender_error = ""
+        paused_res = client.post("/api/recommend", json={"seeds": [{"title": "seed"}], "n": 3, "mode": "all"})
+    assert paused_res.status_code == 200, paused_res.text
+    paused_recommendations = paused_res.json().get("recommendations") or []
+    assert all(row.get("id") != uploaded_id for row in paused_recommendations)
 
 
 def test_recommend_reserves_underexposed_upload_exploration_slot():

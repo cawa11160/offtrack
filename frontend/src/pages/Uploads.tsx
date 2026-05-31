@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Eye, EyeOff, Image, Music2, RefreshCcw, Save, Trash2, UploadCloud, UserRound } from "lucide-react";
+import { CheckCircle2, Eye, EyeOff, Image, Music2, PauseCircle, PlayCircle, RefreshCcw, Save, Trash2, UploadCloud, UserRound } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -9,6 +9,7 @@ import {
   apiReplaceUploadAudio,
   apiUnpublishUpload,
   apiUpdateUpload,
+  apiUpdateUploadDiscovery,
   apiUploadNewTrack,
   apiUrl,
   type UploadedTrackItem,
@@ -218,6 +219,28 @@ export default function Uploads() {
       setTracks((prev) => prev.map((item) => (item.id === track.id ? updated : item)));
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Failed to update publish state"));
+    } finally {
+      setBusyByTrack((prev) => ({ ...prev, [track.id]: false }));
+    }
+  }
+
+  async function setDiscoveryPaused(track: UploadedTrackItem, discoveryPaused: boolean) {
+    setBusyByTrack((prev) => ({ ...prev, [track.id]: true }));
+    setError("");
+    try {
+      const updated = await apiUpdateUploadDiscovery({
+        id: track.id,
+        discoveryPaused,
+        reason: discoveryPaused ? "Paused by artist from uploads" : undefined,
+      });
+      setTracks((prev) => prev.map((item) => (item.id === track.id ? updated : item)));
+      toast.success(discoveryPaused ? "Discovery paused" : "Discovery resumed", {
+        description: discoveryPaused ? "This song will stay playable but leave recommendation pools." : "This song can re-enter listener discovery.",
+      });
+    } catch (e: unknown) {
+      const message = getErrorMessage(e, "Failed to update discovery control");
+      setError(message);
+      toast.error("Discovery update failed", { description: message });
     } finally {
       setBusyByTrack((prev) => ({ ...prev, [track.id]: false }));
     }
@@ -490,6 +513,19 @@ export default function Uploads() {
                         <span className="rounded-md bg-black/5 px-2 py-1">
                           {track.isPublished === false ? "Unpublished" : "Published"}
                         </span>
+                        {canManageUploads ? (
+                          <span
+                            className={`rounded-md border px-2 py-1 ${
+                              track.discoveryPaused
+                                ? "border-amber-200 bg-amber-50 text-amber-800"
+                                : track.discoveryEligible === false
+                                  ? "border-black/10 bg-black/5 text-black/45"
+                                  : "border-green-200 bg-green-50 text-green-700"
+                            }`}
+                          >
+                            {track.discoveryPaused ? "Discovery paused" : track.discoveryEligible === false ? "Discovery off" : "Discovery on"}
+                          </span>
+                        ) : null}
                         {track.metrics?.discoveryScore ? (
                           <span className={`rounded-md border px-2 py-1 ${scoreTone(track.metrics.discoveryScore.value)}`}>
                             Discovery {track.metrics.discoveryScore.value} - {track.metrics.discoveryScore.label}
@@ -500,6 +536,7 @@ export default function Uploads() {
                       {canManageUploads && track.metrics?.discoveryScore ? (
                         <div className="mt-3 rounded-md bg-[#f8f7f2] px-3 py-2 text-sm font-semibold text-black/60">
                           {track.metrics.discoveryScore.nextAction}
+                          {track.discoveryPausedReason ? <div className="mt-1 text-xs text-black/45">{track.discoveryPausedReason}</div> : null}
                         </div>
                       ) : null}
 
@@ -544,7 +581,7 @@ export default function Uploads() {
                   </div>
 
                   {canManageUploads ? (
-                    <div className="flex flex-wrap gap-2 lg:w-44 lg:justify-end">
+                    <div className="flex flex-wrap gap-2 lg:w-60 lg:justify-end">
                       <button
                         type="button"
                         onClick={() => void saveTrack(track)}
@@ -562,6 +599,15 @@ export default function Uploads() {
                       >
                         {track.isPublished === false ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
                         {track.isPublished === false ? "Publish" : "Hide"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void setDiscoveryPaused(track, !track.discoveryPaused)}
+                        disabled={busy || track.isPublished === false}
+                        className="inline-flex items-center gap-2 rounded-md border border-black/10 px-3 py-2 text-xs font-bold hover:bg-black/5 disabled:opacity-50"
+                      >
+                        {track.discoveryPaused ? <PlayCircle className="h-3.5 w-3.5" /> : <PauseCircle className="h-3.5 w-3.5" />}
+                        {track.discoveryPaused ? "Resume discovery" : "Pause discovery"}
                       </button>
                       <button
                         type="button"

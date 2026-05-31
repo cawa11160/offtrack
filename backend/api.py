@@ -41,10 +41,12 @@ from models import (
     Genre,
     Interaction,
     LyricReel,
+    Notification,
     Track,
     TrackArtist,
     TrackAudio,
     TrackGenre,
+    UploadDiscoveryControl,
     UploadedTrack,
     User,
     UserSettings,
@@ -1078,12 +1080,92 @@ def _artist_settings_for_user(db: Session, user_id: int | None) -> Dict[str, Any
     return _settings_for_user_id(db, user_id).get("artist") or dict(SETTINGS_DEFAULTS["artist"])
 
 
+def _notification_allowed(db: Session, user_id: int, notification_type: str) -> bool:
+    settings = _settings_for_user_id(db, int(user_id)).get("notifications") or {}
+    kind = (notification_type or "system").strip().lower()
+    if kind in {"listener", "conversion", "artist"}:
+        return bool(settings.get("listenerActivity", True))
+    if kind == "discovery":
+        return bool(settings.get("discoveryScoreChanges", True))
+    if kind == "security":
+        return bool(settings.get("securityAlerts", True))
+    if kind in {"release", "music"}:
+        return bool(settings.get("releaseAlerts", True))
+    if kind in {"event", "concert"}:
+        return bool(settings.get("concertAlerts", True))
+    return True
+
+
+def _create_notification(
+    db: Session,
+    user_id: int | None,
+    notification_type: str,
+    title: str,
+    body: str,
+    link: str | None = None,
+) -> Notification | None:
+    if user_id is None:
+        return None
+    if not _notification_allowed(db, int(user_id), notification_type):
+        return None
+    row = Notification(
+        id=f"ntf_{uuid.uuid4().hex}",
+        user_id=int(user_id),
+        type=(notification_type or "system").strip().lower()[:32] or "system",
+        title=(title or "Offtrack update").strip()[:255],
+        body=(body or "").strip()[:2000],
+        link=(link or "").strip()[:2000] or None,
+    )
+    db.add(row)
+    return row
+
+
+def _serialize_notification(row: Notification) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "type": row.type,
+        "title": row.title,
+        "body": row.body,
+        "link": row.link,
+        "readAt": getattr(row, "read_at", None),
+        "createdAt": getattr(row, "created_at", None),
+        "unread": getattr(row, "read_at", None) is None,
+    }
+
+
+def _upload_discovery_control(db: Session, track_id: str) -> UploadDiscoveryControl | None:
+    if not track_id:
+        return None
+    return db.query(UploadDiscoveryControl).filter(UploadDiscoveryControl.track_id == track_id).first()
+
+
+def _upload_discovery_status(db: Session, track: CatalogTrack) -> Dict[str, Any]:
+    owner_id = getattr(track, "owner_user_id", None)
+    paused = False
+    reason = ""
+    if owner_id is not None:
+        control = _upload_discovery_control(db, track.id)
+        if control:
+            paused = bool(getattr(control, "discovery_paused", False))
+            reason = str(getattr(control, "reason", "") or "")
+    artist_enabled = True
+    if owner_id is not None:
+        artist_settings = _artist_settings_for_user(db, int(owner_id))
+        artist_enabled = bool(artist_settings.get("discoveryEnabled", True))
+    is_published = bool(getattr(track, "is_published", True))
+    return {
+        "discoveryPaused": paused,
+        "discoveryPausedReason": reason,
+        "discoveryEligible": bool(is_published and artist_enabled and not paused),
+        "artistDiscoveryEnabled": artist_enabled,
+    }
+
+
 def _upload_discovery_enabled(db: Session, track: CatalogTrack) -> bool:
     owner_id = getattr(track, "owner_user_id", None)
     if owner_id is None:
         return True
-    artist_settings = _artist_settings_for_user(db, int(owner_id))
-    return bool(artist_settings.get("discoveryEnabled", True))
+    return bool(_upload_discovery_status(db, track).get("discoveryEligible", True))
 
 
 def _upload_public_profile_enabled(db: Session, track: CatalogTrack) -> bool:
@@ -1472,6 +1554,67 @@ def update_user_settings(payload: UserSettingsIn, req: Request, db: Session = De
     return _settings_payload(row)
 
 
+@app.get("/api/notifications")
+def list_notifications(req: Request, limit: int = 50, db: Session = Depends(get_db)):
+    user = _require_active_user(req, db)
+    limit = max(1, min(int(limit or 50), 100))
+    try:
+        rows = (
+            db.query(Notification)
+            .filter(Notification.user_id == int(user.id))
+            .order_by(Notification.created_at.desc(), Notification.id.desc())
+            .limit(limit)
+            .all()
+        )
+        unread_count = (
+            db.query(func.count(Notification.id))
+            .filter(Notification.user_id == int(user.id), Notification.read_at.is_(None))
+            .scalar()
+            or 0
+        )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
+    return {"notifications": [_serialize_notification(row) for row in rows], "unreadCount": int(unread_count)}
+
+
+@app.post("/api/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str, req: Request, db: Session = Depends(get_db)):
+    user = _require_active_user(req, db)
+    nid = (notification_id or "").strip()
+    try:
+        row = db.query(Notification).filter(Notification.id == nid, Notification.user_id == int(user.id)).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Notification not found")
+        if row.read_at is None:
+            row.read_at = _now_utc()
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not update notification. Please try again.")
+    return {"ok": True, "notification": _serialize_notification(row)}
+
+
+@app.post("/api/notifications/read-all")
+def mark_all_notifications_read(req: Request, db: Session = Depends(get_db)):
+    user = _require_active_user(req, db)
+    now = _now_utc()
+    try:
+        updated = (
+            db.query(Notification)
+            .filter(Notification.user_id == int(user.id), Notification.read_at.is_(None))
+            .update({Notification.read_at: now}, synchronize_session=False)
+        )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not update notifications. Please try again.")
+    return {"ok": True, "updated": int(updated or 0)}
+
+
 @app.get("/api/settings/export")
 def export_user_settings(req: Request, db: Session = Depends(get_db)):
     user = _require_active_user(req, db)
@@ -1633,7 +1776,7 @@ def admin_unowned_uploads(req: Request, limit: int = 100, db: Session = Depends(
     track_metrics, _, _, _ = _artist_upload_metrics(db, track_ids)
     return {
         "tracks": [
-            _attach_upload_metrics(row, _serialize_uploaded_catalog_track(row), track_metrics.get(row.id) or {})
+            _attach_upload_metrics(row, _serialize_uploaded_catalog_track(row, db), track_metrics.get(row.id) or {})
             for row in rows
         ]
     }
@@ -1685,7 +1828,7 @@ def admin_claim_upload_owner(
         raise HTTPException(status_code=503, detail="Could not claim upload. Please try again.")
 
     refreshed = _managed_upload_query(db, track.id)
-    return {"ok": True, "track": _serialize_uploaded_catalog_track(refreshed or track)}
+    return {"ok": True, "track": _serialize_uploaded_catalog_track(refreshed or track, db)}
 
 
 @app.get("/api/billing/payment-methods")
@@ -1940,9 +2083,9 @@ def _catalog_track_primary_asset(track: CatalogTrack, kind: str = "full") -> Opt
     return ranked[0] if ranked else None
 
 
-def _serialize_uploaded_catalog_track(track: CatalogTrack) -> Dict[str, Any]:
+def _serialize_uploaded_catalog_track(track: CatalogTrack, db: Session | None = None) -> Dict[str, Any]:
     asset = _catalog_track_primary_asset(track, kind="full")
-    return {
+    item = {
         "id": track.id,
         "title": track.canonical_title,
         "artist": _catalog_track_artist_text(track),
@@ -1960,6 +2103,9 @@ def _serialize_uploaded_catalog_track(track: CatalogTrack) -> Dict[str, Any]:
         "isPublished": bool(getattr(track, "is_published", True)),
         "createdAt": getattr(track, "created_at", None),
     }
+    if db is not None:
+        item.update(_upload_discovery_status(db, track))
+    return item
 
 
 QUALIFIED_ARTIST_EVENTS = {
@@ -1977,6 +2123,38 @@ QUALIFIED_ARTIST_EVENTS = {
     "follow_artist",
     "share",
 }
+
+
+CONVERSION_EVENTS = {"open_spotify", "artist_click", "follow_artist", "share"}
+
+
+def _interaction_conversion_key(row: Interaction) -> str | None:
+    event = (getattr(row, "event", "") or "").strip().lower()
+    if event not in CONVERSION_EVENTS:
+        return None
+    context: Dict[str, Any] = {}
+    raw = getattr(row, "context_json", None)
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                context = parsed
+        except Exception:
+            context = {}
+    explicit = str(context.get("conversion") or context.get("conversion_type") or context.get("conversionType") or "").strip().lower()
+    if explicit:
+        allowed = {"spotify", "website", "merch", "tickets", "email_signup", "emailsignup", "support", "artist_profile", "profile"}
+        if explicit in allowed:
+            return "emailSignup" if explicit in {"email_signup", "emailsignup"} else ("artistProfile" if explicit in {"artist_profile", "profile"} else explicit)
+    if event == "open_spotify":
+        return "spotify"
+    if event == "artist_click":
+        return "artistProfile"
+    if event == "follow_artist":
+        return "follow"
+    if event == "share":
+        return "share"
+    return None
 
 
 def _safe_rate(numerator: float, denominator: float) -> float:
@@ -2066,6 +2244,7 @@ def _artist_upload_metrics(db: Session, track_ids: List[str]) -> tuple[Dict[str,
         track_id: {
             "eventCounts": {},
             "sourceCounts": {},
+            "conversionBreakdown": {},
             "uniqueListeners": set(),
             "qualifiedListeners": set(),
             "lastInteractionAt": None,
@@ -2103,6 +2282,9 @@ def _artist_upload_metrics(db: Session, track_ids: List[str]) -> tuple[Dict[str,
         metrics["uniqueListeners"].add(distinct_id)
         event_counts[event] = int(event_counts.get(event, 0)) + 1
         source_counts[source_page] = int(source_counts.get(source_page, 0)) + 1
+        conversion_key = _interaction_conversion_key(row)
+        if conversion_key:
+            metrics["conversionBreakdown"][conversion_key] = int(metrics["conversionBreakdown"].get(conversion_key, 0)) + 1
         if event in QUALIFIED_ARTIST_EVENTS:
             metrics["qualifiedListeners"].add(distinct_id)
         if not metrics["lastInteractionAt"]:
@@ -2117,6 +2299,7 @@ def _attach_upload_metrics(track: CatalogTrack, item: Dict[str, Any], metrics: D
     item["metrics"] = {
         "eventCounts": metrics.get("eventCounts") or {},
         "sourceCounts": metrics.get("sourceCounts") or {},
+        "conversionBreakdown": metrics.get("conversionBreakdown") or {},
         "uniqueListeners": len(metrics.get("uniqueListeners") or set()),
         "qualifiedListeners": len(metrics.get("qualifiedListeners") or set()),
         "lastInteractionAt": metrics.get("lastInteractionAt"),
@@ -2572,6 +2755,11 @@ class UploadUpdateRequest(BaseModel):
     artist: Optional[str] = Field(default=None, max_length=1000)
     image_url: Optional[str] = Field(default=None, max_length=2000)
     is_published: Optional[bool] = None
+
+
+class UploadDiscoveryControlRequest(BaseModel):
+    discovery_paused: bool
+    reason: Optional[str] = Field(default=None, max_length=500)
 
 
 class AdminClaimUploadRequest(BaseModel):
@@ -3299,6 +3487,11 @@ def feedback_endpoint(
                 context_payload["request_id"] = req.recommendation_request_id
             if req.recommendation_rank is not None:
                 context_payload["rank"] = req.recommendation_rank
+            context_json = (
+                json.dumps(context_payload, ensure_ascii=True, default=str)[:20000]
+                if context_payload
+                else None
+            )
             db.add(
                 Interaction(
                     distinct_id=distinct_id,
@@ -3310,11 +3503,41 @@ def feedback_endpoint(
                     duration_ms=req.duration_ms,
                     play_position_ms=req.play_position_ms,
                     source_page=(req.source_page or "").strip() or None,
-                    context_json=json.dumps(context_payload, ensure_ascii=True, default=str)[:20000]
-                    if context_payload
-                    else None,
+                    context_json=context_json,
                 )
             )
+            if event in QUALIFIED_ARTIST_EVENTS:
+                owned_track = (
+                    db.query(CatalogTrack)
+                    .filter(
+                        CatalogTrack.id == track_id,
+                        CatalogTrack.source_type == "upload",
+                        CatalogTrack.owner_user_id.isnot(None),
+                    )
+                    .first()
+                )
+                owner_id = int(getattr(owned_track, "owner_user_id", 0) or 0) if owned_track else 0
+                if owner_id and owner_id != user_id:
+                    notification_type = "conversion" if event in CONVERSION_EVENTS else "listener"
+                    event_label = {
+                        "like": "liked",
+                        "superlike": "superliked",
+                        "save": "saved",
+                        "play_complete": "finished",
+                        "open_spotify": "opened your Spotify link for",
+                        "artist_click": "opened your artist profile from",
+                        "follow_artist": "followed after hearing",
+                        "share": "shared",
+                    }.get(event, event.replace("_", " "))
+                    title = "New conversion" if notification_type == "conversion" else "New listener signal"
+                    _create_notification(
+                        db,
+                        owner_id,
+                        notification_type,
+                        title,
+                        f"A listener {event_label} {owned_track.canonical_title}.",
+                        "/profile/dashboard",
+                    )
             db.commit()
     except Exception:
         db.rollback()
@@ -3730,7 +3953,7 @@ def profile_music_web(
     upload_candidates = ranked_uploads[:12]
     upload_metrics, _, _, _ = _artist_upload_metrics(db, [track.id for track in upload_candidates])
     for index, track in enumerate(upload_candidates):
-        item = _attach_upload_metrics(track, _serialize_uploaded_catalog_track(track), upload_metrics.get(track.id) or {})
+        item = _attach_upload_metrics(track, _serialize_uploaded_catalog_track(track, db), upload_metrics.get(track.id) or {})
         score = ((item.get("metrics") or {}).get("discoveryScore") or {})
         fit_score, discovery_reason = _candidate_fit(track)
         track_node_id = f"track:{track.id}"
@@ -4269,7 +4492,7 @@ def list_managed_uploads(limit: int = 100, request: Request = None, db: Session 
     track_metrics, _, _, _ = _artist_upload_metrics(db, track_ids)
     return {
         "tracks": [
-            _attach_upload_metrics(row, _serialize_uploaded_catalog_track(row), track_metrics.get(row.id) or {})
+            _attach_upload_metrics(row, _serialize_uploaded_catalog_track(row, db), track_metrics.get(row.id) or {})
             for row in rows
         ]
     }
@@ -4297,16 +4520,19 @@ def artist_dashboard(request: Request, db: Session = Depends(get_db)):
     track_metrics, event_counts, source_counts, recent_rows = _artist_upload_metrics(db, track_ids)
     total_unique_listeners: set[str] = set()
     qualified_connections = 0
+    conversion_breakdown: Dict[str, int] = {}
     for metrics in track_metrics.values():
         total_unique_listeners.update(metrics.get("uniqueListeners") or set())
         qualified_connections += len(metrics.get("qualifiedListeners") or set())
+        for key, value in (metrics.get("conversionBreakdown") or {}).items():
+            conversion_breakdown[str(key)] = int(conversion_breakdown.get(str(key), 0)) + int(value or 0)
 
     def _count_events(events: set[str]) -> int:
         return sum(int(event_counts.get(event, 0)) for event in events)
 
     serialized_tracks = []
     for track in tracks:
-        item = _serialize_uploaded_catalog_track(track)
+        item = _serialize_uploaded_catalog_track(track, db)
         serialized_tracks.append(_attach_upload_metrics(track, item, track_metrics.get(track.id) or {}))
 
     score_values = [
@@ -4315,6 +4541,7 @@ def artist_dashboard(request: Request, db: Session = Depends(get_db)):
         if bool(item.get("isPublished"))
     ]
     average_discovery_score = round(sum(score_values) / len(score_values), 1) if score_values else 0
+    discovery_paused_tracks = sum(1 for item in serialized_tracks if bool(item.get("discoveryPaused")))
 
     recent = []
     track_title_by_id = {track.id: track.canonical_title for track in tracks}
@@ -4348,8 +4575,10 @@ def artist_dashboard(request: Request, db: Session = Depends(get_db)):
             "plays": _count_events({"play", "play_start", "play_30s", "play_complete", "upload_play"}),
             "likes": _count_events({"like", "superlike"}),
             "recommendationClicks": _count_events({"click_recommendation"}),
-            "conversionClicks": _count_events({"open_spotify", "artist_click"}),
+            "conversionClicks": _count_events(CONVERSION_EVENTS),
+            "conversionBreakdown": conversion_breakdown,
             "averageDiscoveryScore": average_discovery_score,
+            "discoveryPausedTracks": discovery_paused_tracks,
         },
         "eventCounts": event_counts,
         "sourceCounts": source_counts,
@@ -4383,7 +4612,44 @@ def update_managed_upload(upload_id: str, payload: UploadUpdateRequest, request:
 
     db.refresh(track)
     refreshed = _managed_upload_query(db, track.id)
-    return _serialize_uploaded_catalog_track(refreshed or track)
+    return _serialize_uploaded_catalog_track(refreshed or track, db)
+
+
+@app.patch("/api/uploads/{upload_id}/discovery")
+def update_upload_discovery_control(
+    upload_id: str,
+    payload: UploadDiscoveryControlRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    uid = (upload_id or "").strip()
+    user_id, track = _require_upload_owner(db, request, uid)
+    reason = (payload.reason or "").strip()[:500] or None
+    try:
+        control = _upload_discovery_control(db, track.id)
+        if not control:
+            control = UploadDiscoveryControl(track_id=track.id, user_id=int(user_id))
+        control.user_id = int(user_id)
+        control.discovery_paused = bool(payload.discovery_paused)
+        control.reason = reason if control.discovery_paused else None
+        db.add(control)
+        _create_notification(
+            db,
+            int(user_id),
+            "discovery",
+            "Discovery paused" if control.discovery_paused else "Discovery resumed",
+            f"{track.canonical_title} is {'paused from' if control.discovery_paused else 'back in'} listener discovery.",
+            "/profile/uploads",
+        )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Could not update discovery control. Please try again.")
+
+    refreshed = _managed_upload_query(db, track.id)
+    item = _serialize_uploaded_catalog_track(refreshed or track, db)
+    metrics, _, _, _ = _artist_upload_metrics(db, [track.id])
+    return _attach_upload_metrics(refreshed or track, item, metrics.get(track.id) or {})
 
 
 @app.post("/api/uploads/{upload_id}/replace")
@@ -4447,7 +4713,7 @@ async def replace_managed_upload_audio(
         raise HTTPException(status_code=503, detail="Could not replace audio. Please try again.")
 
     refreshed = _managed_upload_query(db, track.id)
-    return _serialize_uploaded_catalog_track(refreshed or track)
+    return _serialize_uploaded_catalog_track(refreshed or track, db)
 
 
 @app.delete("/api/uploads/{upload_id}")
@@ -4461,7 +4727,7 @@ def unpublish_managed_upload(upload_id: str, request: Request, db: Session = Dep
         db.rollback()
         raise HTTPException(status_code=503, detail="Could not unpublish upload. Please try again.")
     refreshed = _managed_upload_query(db, track.id)
-    return {"ok": True, "track": _serialize_uploaded_catalog_track(refreshed or track)}
+    return {"ok": True, "track": _serialize_uploaded_catalog_track(refreshed or track, db)}
 
 
 @app.get("/api/uploads")
@@ -4482,7 +4748,7 @@ def list_uploads(limit: int = 50, db: Session = Depends(get_db)):
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="Database unavailable. Please try again.")
 
-    normalized_items = [_serialize_uploaded_catalog_track(row) for row in normalized_rows]
+    normalized_items = [_serialize_uploaded_catalog_track(row, db) for row in normalized_rows]
     if len(normalized_items) >= limit:
         return {"tracks": normalized_items}
 

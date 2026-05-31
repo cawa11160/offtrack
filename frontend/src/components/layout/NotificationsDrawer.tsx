@@ -1,90 +1,88 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { X, Bell, Sparkles, Music2, MapPin, ArrowRight, CheckCheck } from "lucide-react";
+import { ArrowRight, Bell, CheckCheck, Loader2, MapPin, Music2, Radio, Shield, Sparkles, X } from "lucide-react";
+
+import {
+  apiListNotifications,
+  apiMarkAllNotificationsRead,
+  apiMarkNotificationRead,
+  type NotificationItem,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
-
-type NotificationType = "release" | "playlist" | "event" | "system";
-
-type NotificationItem = {
-  id: string;
-  type: NotificationType;
-  title: string;
-  description: string;
-  time: string;
-  unread?: boolean;
-  ctaLabel?: string;
-
-  // ✅ Optional: explicit deep link if you want per-notification routing
-  link?: string;
-};
 
 type NotificationsDrawerProps = {
   open: boolean;
   onClose: () => void;
+  onUnreadChange?: (count: number) => void;
 };
 
-function iconFor(type: NotificationType) {
-  switch (type) {
-    case "release":
-      return Music2;
-    case "playlist":
+function iconFor(type: string) {
+  switch ((type || "").toLowerCase()) {
+    case "listener":
+      return Radio;
+    case "conversion":
       return Sparkles;
+    case "discovery":
+      return Music2;
+    case "security":
+      return Shield;
     case "event":
+    case "concert":
       return MapPin;
     default:
       return Bell;
   }
 }
 
-export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps) {
+function relativeTime(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+  if (seconds < 60) return "Now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d`;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+export function NotificationsDrawer({ open, onClose, onUnreadChange }: NotificationsDrawerProps) {
   const navigate = useNavigate();
+  const [items, setItems] = useState<NotificationItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-  const items: NotificationItem[] = useMemo(
-    () => [
-      {
-        id: "n1",
-        type: "release",
-        title: "New single from Luna Nova",
-        description: "“Midnight Drive (Deluxe)” just dropped.",
-        time: "2h ago",
-        unread: true,
-        ctaLabel: "Open",
-        // link: "/release/123", // (future)
-      },
-      {
-        id: "n2",
-        type: "event",
-        title: "Concert near you",
-        description: "Synthwave Collective • Friday • 8:00 PM",
-        time: "Today",
-        unread: true,
-        ctaLabel: "View map",
-        // link: "/concerts?highlight=n2", // (future)
-      },
-      {
-        id: "n3",
-        type: "playlist",
-        title: "Made For You refreshed",
-        description: "Your “Late Night Finds” playlist has new picks.",
-        time: "Yesterday",
-        unread: false,
-        ctaLabel: "Listen",
-        // link: "/recommendations", // (future)
-      },
-      {
-        id: "n4",
-        type: "system",
-        title: "Tip",
-        description: "Drag the carousel to browse releases faster.",
-        time: "2d ago",
-        unread: false,
-        // link: "/profile", // (future)
-      },
-    ],
-    []
-  );
+  const unreadCount = items.filter((item) => item.unread).length;
 
-  const unreadCount = items.filter((i) => i.unread).length;
+  useEffect(() => {
+    onUnreadChange?.(unreadCount);
+  }, [onUnreadChange, unreadCount]);
+
+  useEffect(() => {
+    if (!open) return;
+    let mounted = true;
+    setLoading(true);
+    setError("");
+    apiListNotifications(50)
+      .then((data) => {
+        if (!mounted) return;
+        setItems(data.notifications);
+        onUnreadChange?.(data.unreadCount);
+      })
+      .catch((err: unknown) => {
+        if (!mounted) return;
+        setError(err instanceof Error ? err.message : "Could not load notifications");
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [onUnreadChange, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -95,84 +93,66 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open, onClose]);
 
-  const routeFor = (n: NotificationItem) => {
-    if (n.link) return n.link;
-
-    switch (n.type) {
-      case "event":
-        return "/concerts";
-      case "playlist":
-        return "/recommendations";
-      case "release":
-        return "/release/demo"; // replace with real release id when you have it
-      case "system":
-      default:
-        return "/profile";
+  async function markAllRead() {
+    const previous = items;
+    setItems((current) => current.map((item) => ({ ...item, unread: false, readAt: item.readAt || new Date().toISOString() })));
+    onUnreadChange?.(0);
+    try {
+      await apiMarkAllNotificationsRead();
+    } catch {
+      setItems(previous);
     }
-  };
+  }
 
-  const goTo = (path: string) => {
-    onClose();          // close drawer first
-    navigate(path);     // then navigate
-  };
+  async function openNotification(item: NotificationItem) {
+    const target = item.link || "/profile";
+    if (item.unread) {
+      setItems((current) =>
+        current.map((row) => (row.id === item.id ? { ...row, unread: false, readAt: row.readAt || new Date().toISOString() } : row))
+      );
+      apiMarkNotificationRead(item.id).catch(() => undefined);
+    }
+    onClose();
+    navigate(target);
+  }
 
   if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-[120]">
-      {/* Backdrop */}
-      <button
-        type="button"
-        className="absolute inset-0 bg-black/40"
-        onClick={onClose}
-        aria-label="Close notifications"
-      />
+      <button type="button" className="absolute inset-0 bg-black/40" onClick={onClose} aria-label="Close notifications" />
 
-      {/* Drawer */}
       <aside
         className={cn(
-          "absolute right-0 top-0 h-full w-full sm:w-[420px]",
-          "bg-background border-l border-border shadow-2xl",
-          "flex flex-col"
+          "absolute right-0 top-0 flex h-full w-full flex-col border-l border-border bg-background shadow-2xl sm:w-[420px]"
         )}
         role="dialog"
         aria-modal="true"
       >
-        {/* Header */}
-        <div className="p-4 border-b border-border flex items-center justify-between gap-3">
+        <div className="flex items-center justify-between gap-3 border-b border-border p-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h2 className="text-lg font-semibold truncate">Notifications</h2>
-              {unreadCount > 0 && (
-                <span className="text-xs px-2 py-0.5 rounded-full bg-primary text-primary-foreground">
-                  {unreadCount} new
-                </span>
-              )}
+              <h2 className="truncate text-lg font-semibold">Notifications</h2>
+              {unreadCount > 0 ? (
+                <span className="rounded-full bg-primary px-2 py-0.5 text-xs text-primary-foreground">{unreadCount} new</span>
+              ) : null}
             </div>
-            <p className="text-sm text-muted-foreground">Updates from artists, playlists, and events.</p>
+            <p className="text-sm text-muted-foreground">Listener, discovery, and account updates.</p>
           </div>
 
-          <button
-            type="button"
-            className="h-9 w-9 rounded-md hover:bg-accent grid place-items-center"
-            aria-label="Close"
-            onClick={onClose}
-          >
-            <X className="w-5 h-5" />
+          <button type="button" className="grid h-9 w-9 place-items-center rounded-md hover:bg-accent" aria-label="Close" onClick={onClose}>
+            <X className="h-5 w-5" />
           </button>
         </div>
 
-        {/* Actions */}
-        <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <button
             type="button"
-            className="inline-flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground"
-            onClick={() => {
-              // placeholder "mark all read" - wire to state/store later
-              onClose();
-            }}
+            className="inline-flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground disabled:opacity-50"
+            onClick={() => void markAllRead()}
+            disabled={!unreadCount}
           >
-            <CheckCheck className="w-4 h-4" />
+            <CheckCheck className="h-4 w-4" />
             Mark all as read
           </button>
 
@@ -181,63 +161,47 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
           </span>
         </div>
 
-        {/* List */}
         <div className="flex-1 overflow-y-auto">
-          <div className="p-3 space-y-2">
-            {items.map((n) => {
-              const Icon = iconFor(n.type);
-              const target = routeFor(n);
+          {loading ? (
+            <div className="flex items-center gap-2 p-4 text-sm font-semibold text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading notifications
+            </div>
+          ) : null}
 
+          {error ? <div className="m-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">{error}</div> : null}
+
+          <div className="space-y-2 p-3">
+            {items.map((item) => {
+              const Icon = iconFor(item.type);
               return (
                 <button
-                  key={n.id}
+                  key={item.id}
                   type="button"
-                  onClick={() => goTo(target)}
-                  className={cn(
-                    "w-full text-left rounded-2xl border border-border bg-card p-4",
-                    "transition-colors hover:bg-accent/40"
-                  )}
+                  onClick={() => void openNotification(item)}
+                  className="w-full rounded-lg border border-border bg-card p-4 text-left transition-colors hover:bg-accent/40"
                 >
                   <div className="flex items-start gap-3">
-                    <div
-                      className={cn(
-                        "h-10 w-10 rounded-xl grid place-items-center flex-shrink-0",
-                        n.unread ? "bg-primary/15" : "bg-secondary"
-                      )}
-                    >
-                      <Icon className={cn("w-5 h-5", n.unread ? "text-primary" : "text-muted-foreground")} />
+                    <div className={cn("grid h-10 w-10 flex-shrink-0 place-items-center rounded-md", item.unread ? "bg-primary/15" : "bg-secondary")}>
+                      <Icon className={cn("h-5 w-5", item.unread ? "text-primary" : "text-muted-foreground")} />
                     </div>
 
                     <div className="min-w-0 flex-1">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <p className="font-semibold leading-tight truncate">
-                            {n.title}
-                            {n.unread && (
-                              <span className="ml-2 inline-block align-middle h-2 w-2 rounded-full bg-primary" />
-                            )}
+                          <p className="truncate font-semibold leading-tight">
+                            {item.title}
+                            {item.unread ? <span className="ml-2 inline-block h-2 w-2 rounded-full bg-primary align-middle" /> : null}
                           </p>
-                          <p className="text-sm text-muted-foreground mt-1">{n.description}</p>
+                          <p className="mt-1 text-sm text-muted-foreground">{item.body}</p>
                         </div>
-                        <span className="text-xs text-muted-foreground flex-shrink-0">{n.time}</span>
+                        <span className="flex-shrink-0 text-xs text-muted-foreground">{relativeTime(item.createdAt)}</span>
                       </div>
 
-                      {n.ctaLabel && (
-                        <div className="mt-3">
-                          {/* CTA button should not double-trigger card click */}
-                          <button
-                            type="button"
-                            className="inline-flex items-center gap-2 text-sm font-semibold"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              goTo(target);
-                            }}
-                          >
-                            {n.ctaLabel}
-                            <ArrowRight className="w-4 h-4" />
-                          </button>
-                        </div>
-                      )}
+                      <div className="mt-3 inline-flex items-center gap-2 text-sm font-semibold">
+                        Open
+                        <ArrowRight className="h-4 w-4" />
+                      </div>
                     </div>
                   </div>
                 </button>
@@ -245,17 +209,17 @@ export function NotificationsDrawer({ open, onClose }: NotificationsDrawerProps)
             })}
           </div>
 
-          {items.length === 0 && (
-            <div className="h-full grid place-items-center p-8 text-center">
+          {!loading && !items.length ? (
+            <div className="grid h-full place-items-center p-8 text-center">
               <div className="max-w-sm">
-                <div className="mx-auto h-14 w-14 rounded-2xl bg-secondary grid place-items-center">
-                  <Bell className="w-6 h-6 text-muted-foreground" />
+                <div className="mx-auto grid h-14 w-14 place-items-center rounded-lg bg-secondary">
+                  <Bell className="h-6 w-6 text-muted-foreground" />
                 </div>
-                <h3 className="text-xl font-semibold mt-4">All caught up</h3>
-                <p className="text-muted-foreground mt-2">When there’s something new, it’ll show up here.</p>
+                <h3 className="mt-4 text-xl font-semibold">All caught up</h3>
+                <p className="mt-2 text-muted-foreground">Listener and discovery updates will show up here.</p>
               </div>
             </div>
-          )}
+          ) : null}
         </div>
       </aside>
     </div>
